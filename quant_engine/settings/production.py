@@ -1,3 +1,4 @@
+# pylint: disable=C0413,C0411,w0401,w0614
 import os
 from .base import *
 
@@ -14,7 +15,7 @@ try:
     from .local import *
 except ImportError:
     import secrets
-    
+
     SECRET_KEY = secrets.token_urlsafe(32)
 
 __base_path__ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

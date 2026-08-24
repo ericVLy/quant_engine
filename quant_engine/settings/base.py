@@ -9,6 +9,7 @@ https://docs.djangoproject.com/en/6.1/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
+# pylint: disable=C0413,C0411,w0401,w0614,w0611
 import os
 from pathlib import Path
 
