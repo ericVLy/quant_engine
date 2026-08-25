@@ -55,5 +55,10 @@ LOGGING = {
             "level": "INFO",
             "propagate": True,
         },
+        "apps.datasources.tests": {
+            "handlers": ["file"],
+            "level": "INFO",
+            "propagate": True,
+        },
     },
 }
