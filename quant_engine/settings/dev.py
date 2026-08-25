@@ -75,5 +75,20 @@ LOGGING = {
             "level": "INFO",
             "propagate": True,
         },
+        "apps.cases.tests": {
+            "handlers": ["file", "console"],
+            "level": "INFO",
+            "propagate": True,
+        },
+        "apps.suites.tests": {
+            "handlers": ["file", "console"],
+            "level": "INFO",
+            "propagate": True,
+        },
+        "apps.plans.tests": {
+            "handlers": ["file", "console"],
+            "level": "INFO",
+            "propagate": True,
+        },
     },
 }
