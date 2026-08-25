@@ -48,15 +48,25 @@ LOGGING = {
             "filename": os.path.join(__log_path__, 
                                         f"django_logfile_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S_%f')[:23]}.log"),
         },
+        "console": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "verbose"
+        }
     },
     "loggers": {
         "django": {
-            "handlers": ["file"],
+            "handlers": ["file", "console"],
             "level": "INFO",
             "propagate": True,
         },
         "apps.datasources.tests": {
-            "handlers": ["file"],
+            "handlers": ["file", "console"],
+            "level": "INFO",
+            "propagate": True,
+        },
+        "apps.watchlists.tests": {
+            "handlers": ["file", "console"],
             "level": "INFO",
             "propagate": True,
         },

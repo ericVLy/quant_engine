@@ -52,6 +52,8 @@ INSTALLED_APPS = [
     'apps.watchlists',
     'apps.datasources',
     'apps.users',
+
+    'django_filters',
 ]
 
 MIDDLEWARE = [

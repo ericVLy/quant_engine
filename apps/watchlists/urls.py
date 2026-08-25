@@ -1,7 +1,17 @@
-﻿from django.urls import path
-from . import views
+﻿from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import SymbolViewSet, GroupViewSet, WatchlistViewSet
 
-app_name = 'watchlists'
-urlpatterns = [    path('', views.list_create, name='list-create'),
-    path('<int:pk>/', views.detail, name='detail'),
+router = DefaultRouter()
+router.register(r'symbols', SymbolViewSet, basename='symbol')
+router.register(r'groups', GroupViewSet, basename='group')
+
+urlpatterns = [
+    path('', include(router.urls)),
+    path('watchlist/', WatchlistViewSet.as_view({
+        'get': 'list',
+        'put': 'update',
+        'patch': 'partial_update',
+        'post': 'create',
+    })),
 ]
