@@ -311,11 +311,11 @@ class EventTypeRegistry(models.Model):
 该实现是执行层的同步基础服务，不等同于独立进程中的完整 EventLoop；Case 匹配和 CaseExecutor 仍需在 `runner` 与 `cases` 模块完成后接入。
 
 
-### 模块5：`cases`（原子策略节点）⬜ 未开始
+### 模块5：`cases`（原子策略节点）🟡 P0 基础能力已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ⬜ 未开始 |
+| **状态** | 🟡 已完成 CRUD、触发校验、发布和删除保护；参数 Schema 与版本快照待完善 |
 | **优先级** | P0 |
 | **依赖** | `execution.EventRegistry`（校验触发事件类型） |
 
@@ -323,17 +323,17 @@ class EventTypeRegistry(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| C-01 | Case 模型（名称、节点类型、参数 JSON、版本、状态） | P0 |
-| C-02 | Case CRUD API（列表、详情、创建、更新、删除） | P0 |
-| C-03 | Case 发布（版本号 +1，状态改为 published） | P0 |
-| C-04 | `params` 中的 `trigger` 配置校验（调用 `EventRegistry.validate`） | P0 |
-| C-05 | 删除保护（被 Suite 引用时返回 409 Conflict） | P0 |
-| C-06 | Case 搜索/过滤（按名称、节点类型、状态） | P1 |
+| C-01 | Case 模型（名称、节点类型、参数 JSON、版本、状态） | ✅ 完成 |
+| C-02 | Case CRUD API（列表、详情、创建、更新、删除） | ✅ 完成 |
+| C-03 | Case 发布（版本号 +1，状态改为 published） | ✅ 完成 |
+| C-04 | `params` 中的 `trigger` 配置校验（调用 `EventRegistry.validate`） | ✅ 完成 |
+| C-05 | 删除保护（被 Suite 引用时返回 409 Conflict） | ✅ 完成 |
+| C-06 | Case 搜索/过滤（按名称、节点类型、状态） | ✅ 完成 |
 | C-07 | Case 版本历史记录（发布快照） | P1 |
-| C-08 | 节点类型定义（signal / filter / verdict / executor） | P0 |
+| C-08 | 节点类型定义（signal / filter / verdict / executor） | ✅ 完成 |
 | C-09 | 参数 JSON Schema 校验（根据节点类型校验参数完整性） | P1 |
 
-#### 数据模型（待实现）
+#### 数据模型
 
 ```python
 class Case(models.Model):
@@ -365,13 +365,15 @@ class Case(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 ```
 
-#### API 端点（待实现）
+#### API 端点
 
 | 方法 | 端点 | 功能 |
 |------|------|------|
 | GET/POST | `/api/cases/` | Case 列表/创建 |
 | GET/PUT/DELETE | `/api/cases/{id}/` | Case 详情/更新/删除 |
 | POST | `/api/cases/{id}/publish/` | 发布 Case |
+
+当前实现文件：`models.py`、`serializers.py`、`views.py`、`urls.py`。`Suite.cases` 已建立多对多引用，用于删除保护和后续工作流调度。
 
 
 ### 模块6：`suites`（工作流编排）⬜ 未开始
@@ -557,7 +559,7 @@ class Plan(models.Model):
 | `watchlists` | ✅ 已完成 | 15 通过 | 100% |
 | `datasources` | ✅ 已完成 | 18 通过 | 100% |
 | `execution` | ⚠️ 基础闭环完成 | 12 通过 | 70%（服务层完成，runner/Case 执行待开发） |
-| `cases` | ⬜ 未开始 | — | 0% |
+| `cases` | 🟡 P0 基础能力完成 | 8 通过 | 70%（Schema、版本历史和执行器待开发） |
 | `suites` | ⬜ 未开始 | — | 0% |
 | `plans` | ⬜ 未开始 | — | 0% |
 | `runner` | ⬜ 未开始 | — | 0% |
@@ -577,7 +579,7 @@ class Plan(models.Model):
 
 | 顺序 | 模块 | 预估工作量 | 关键依赖 |
 |------|------|------------|----------|
-| 1 | `cases` | 中（3-4 天） | `execution.EventRegistry`（校验） |
+| 1 | `cases` | 中（剩余 1-2 天） | `execution.EventRegistry`（校验） |
 | 2 | `suites` | 中（3-4 天） | `cases.Case` |
 | 3 | `plans` | 中（2-3 天） | `suites.Suite`, `watchlists`（解析） |
 | 4 | `runner` | 大（5-7 天） | `execution`, `cases`, `suites`, `plans` |
@@ -588,7 +590,7 @@ class Plan(models.Model):
 | 阶段 | 内容 | 验收标准 |
 |------|------|----------|
 | 阶段1 | `execution` 模块测试全部通过 | 12 个测试全部 OK |
-| 阶段2 | `cases` 模块测试全部通过 | 待定义（约 12-15 个测试用例） |
+| 阶段2 | `cases` 模块基础功能测试全部通过 | 8 个测试全部 OK；Schema 和版本历史测试待补 |
 | 阶段3 | `suites` 模块测试全部通过 | 待定义（约 15-20 个测试用例） |
 | 阶段4 | `plans` 模块测试全部通过 | 待定义（约 10-12 个测试用例） |
 | 阶段5 | `runner` 模块集成测试 | 完整端到端流程（Plan 触发 → 执行 → 日志写入） |
