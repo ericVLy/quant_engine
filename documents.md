@@ -91,11 +91,11 @@ users（用户权限）
 
 ## 三、模块详细需求
 
-### 模块1：`users`（用户与权限）
+### 模块1：`users`（用户与权限）✅ 已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ⬜ 未开始 |
+| **状态** | ✅ 已完成（5 个测试全部通过） |
 | **优先级** | P1 |
 | **依赖** | 无（基础模块） |
 
@@ -107,6 +107,18 @@ users（用户权限）
 | U-02 | 用户信息管理（扩展字段：手机号、公司） |
 | U-03 | 权限分组（管理员/普通用户/只读用户） |
 | U-04 | 各模块资源的访问控制（如"仅管理员可同步全市场标的"） |
+
+#### API 端点
+
+| 方法 | 端点 | 功能 |
+|------|------|------|
+| POST | `/api/users/register/` | 用户注册并加入普通用户组 |
+| POST | `/api/users/login/` | Session 登录 |
+| POST | `/api/users/logout/` | 注销当前 Session |
+| GET/PUT/PATCH | `/api/users/profile/` | 当前用户信息查询/更新 |
+| POST | `/api/users/{user_id}/roles/` | 管理员调整用户角色 |
+
+当前实现文件：`models.py`、`serializers.py`、`views.py`、`urls.py`、`admin.py`。角色使用 Django `Group`，注册用户默认加入 `user` 组，管理员可分配已存在的角色组。
 
 #### 数据模型
 
@@ -560,7 +572,7 @@ class Plan(models.Model):
 
 | 模块 | 状态 | 测试用例数 | 完成度 |
 |------|------|------------|--------|
-| `users` | ⬜ 未开始 | — | 0% |
+| `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 15 通过 | 100% |
 | `datasources` | ✅ 已完成 | 18 通过 | 100% |
 | `execution` | ⚠️ 基础闭环完成 | 12 通过 | 70%（服务层完成，runner/Case 执行待开发） |
@@ -588,7 +600,7 @@ class Plan(models.Model):
 | 2 | `suites` | 中（剩余 1-2 天） | `cases.Case` |
 | 3 | `plans` | 中（剩余 1-2 天） | `suites.Suite`, `watchlists`（解析） |
 | 4 | `runner` | 大（5-7 天） | `execution`, `cases`, `suites`, `plans` |
-| 5 | `users` | 小（1-2 天） | 无（基础模块，可提前开发） |
+| 5 | `users` | ✅ 已完成 | — |
 
 ### 5.3 测试验证计划
 
