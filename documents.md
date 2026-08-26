@@ -430,7 +430,7 @@ class Edge(models.Model):
     weight = models.FloatField(default=1.0)
 ```
 
-#### API 端点（待实现）
+#### API 端点
 
 | 方法 | 端点 | 功能 |
 |------|------|------|
@@ -443,11 +443,11 @@ class Edge(models.Model):
 当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。拓扑更新在事务中替换 Case 关联和当前 Suite 出边，并在提交前执行 DAG 校验。
 
 
-### 模块7：`plans`（调度管理）⬜ 未开始
+### 模块7：`plans`（调度管理）🟡 P0 基础能力已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ⬜ 未开始 |
+| **状态** | 🟡 已完成 CRUD、触发校验、标的解析、发布和删除保护；Cron 完整校验与调度器待完善 |
 | **优先级** | P0 |
 | **依赖** | `suites.Suite`, `watchlists`（解析 symbol_scope） |
 
@@ -455,18 +455,18 @@ class Edge(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| P-01 | Plan 模型（名称、根 Suite、触发方式、Cron 表达式、标的范围、执行模式、重试策略、状态、版本） | P0 |
-| P-02 | Plan CRUD API | P0 |
-| P-03 | Plan 发布（校验根 Suite 已发布 + 创建版本快照 + 通知异步引擎热加载） | P0 |
-| P-04 | 标的范围解析（all / 分组 / 指定列表 → 调用 `watchlists.services.resolve_symbol_scope`） | P0 |
-| P-05 | Cron 表达式校验 | P0 |
-| P-06 | Plan 删除保护（已有执行记录时返回 409 Conflict） | P0 |
-| P-07 | 触发方式支持（时间驱动 / 事件驱动 / 手动触发） | P0 |
+| P-01 | Plan 模型（名称、根 Suite、触发方式、Cron 表达式、标的范围、执行模式、重试策略、状态、版本） | ✅ 完成 |
+| P-02 | Plan CRUD API | ✅ 完成 |
+| P-03 | Plan 发布（校验根 Suite 已发布 + 创建版本快照 + 通知异步引擎热加载） | 🟡 基础完成（已校验并递增版本，热加载待 runner） |
+| P-04 | 标的范围解析（all / 分组 / 指定列表 → 调用 `watchlists.services.resolve_symbol_scope`） | ✅ 完成 |
+| P-05 | Cron 表达式校验 | 🟡 基础完成（5 字段和字符校验） |
+| P-06 | Plan 删除保护（已有执行记录时返回 409 Conflict） | ✅ 完成 |
+| P-07 | 触发方式支持（时间驱动 / 事件驱动 / 手动触发） | ✅ 完成 |
 | P-08 | 执行模式支持（串行 / 并行 / 失败停止） | P1 |
 | P-09 | 重试策略配置（重试次数 + 延迟秒数） | P2 |
 | P-10 | Plan 历史版本回滚 | P2 |
 
-#### 数据模型（待实现）
+#### 数据模型
 
 ```python
 class Plan(models.Model):
@@ -498,13 +498,16 @@ class Plan(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
 ```
 
-#### API 端点（待实现）
+#### API 端点
 
 | 方法 | 端点 | 功能 |
 |------|------|------|
 | GET/POST | `/api/plans/` | Plan 列表/创建 |
 | GET/PUT/DELETE | `/api/plans/{id}/` | Plan 详情/更新/删除 |
 | POST | `/api/plans/{id}/publish/` | 发布 Plan |
+| GET | `/api/plans/{id}/symbols/` | 解析 Plan 的标的范围 |
+
+当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。Plan 只能在发布时要求根 Suite 已发布，创建和编辑阶段允许保存草稿配置。
 
 
 ### 模块8：`runner`（独立异步引擎）⬜ 未开始
@@ -563,7 +566,7 @@ class Plan(models.Model):
 | `execution` | ⚠️ 基础闭环完成 | 12 通过 | 70%（服务层完成，runner/Case 执行待开发） |
 | `cases` | 🟡 P0 基础能力完成 | 8 通过 | 70%（Schema、版本历史和执行器待开发） |
 | `suites` | 🟡 P0 基础能力完成 | 9 通过 | 70%（运行时聚合、并行执行和完整画布拓扑待完善） |
-| `plans` | ⬜ 未开始 | — | 0% |
+| `plans` | 🟡 P0 基础能力完成 | 10 通过 | 70%（完整 Cron、调度器、版本快照和热加载待开发） |
 | `runner` | ⬜ 未开始 | — | 0% |
 
 
@@ -583,7 +586,7 @@ class Plan(models.Model):
 |------|------|------------|----------|
 | 1 | `cases` | 中（剩余 1-2 天） | `execution.EventRegistry`（校验） |
 | 2 | `suites` | 中（剩余 1-2 天） | `cases.Case` |
-| 3 | `plans` | 中（2-3 天） | `suites.Suite`, `watchlists`（解析） |
+| 3 | `plans` | 中（剩余 1-2 天） | `suites.Suite`, `watchlists`（解析） |
 | 4 | `runner` | 大（5-7 天） | `execution`, `cases`, `suites`, `plans` |
 | 5 | `users` | 小（1-2 天） | 无（基础模块，可提前开发） |
 
@@ -594,7 +597,7 @@ class Plan(models.Model):
 | 阶段1 | `execution` 模块测试全部通过 | 12 个测试全部 OK |
 | 阶段2 | `cases` 模块基础功能测试全部通过 | 8 个测试全部 OK；Schema 和版本历史测试待补 |
 | 阶段3 | `suites` 模块基础功能测试全部通过 | 9 个测试全部 OK；运行时聚合和并行执行测试待补 |
-| 阶段4 | `plans` 模块测试全部通过 | 待定义（约 10-12 个测试用例） |
+| 阶段4 | `plans` 模块基础功能测试全部通过 | 10 个测试全部 OK；调度器和版本快照测试待补 |
 | 阶段5 | `runner` 模块集成测试 | 完整端到端流程（Plan 触发 → 执行 → 日志写入） |
 
 ### 5.4 非功能需求
