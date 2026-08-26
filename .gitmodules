@@ -1,0 +1,3 @@
+[submodule "quant-frontend"]
+	path = quant-frontend
+	url = git@github.com:ericisnotrealname-rgb/quant-frontend.git
