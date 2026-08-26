@@ -522,11 +522,11 @@ class Plan(models.Model):
 当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。Plan 只能在发布时要求根 Suite 已发布，创建和编辑阶段允许保存草稿配置。
 
 
-### 模块8：`runner`（独立异步引擎）⬜ 未开始
+### 模块8：`runner`（独立异步引擎）🟡 基础能力已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ⬜ 未开始 |
+| **状态** | 🟡 EventLoop、SuiteRunner、Scheduler、TaskQueue、WorkerPool 已完成；数据夹具、风控和外部交易接口待完善 |
 | **优先级** | P0 |
 | **依赖** | `execution.SuiteRun`, `execution.Event`, `cases.Case`, `suites.Suite`, `plans.Plan` |
 
@@ -535,16 +535,18 @@ class Plan(models.Model):
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
 | R-01 | **Scheduler（调度器）**：定时扫描 Plan，按 Cron 表达式触发执行 | P0 |
-| R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | P0 |
-| R-03 | **Worker Pool**：固定数量协程并发执行任务 | P0 |
-| R-04 | **SuiteRunner**：加载 Suite 拓扑，创建 SuiteRun 实例 | P0 |
-| R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | P0 |
-| R-06 | **CaseExecutor**：执行单个 Case 的运算逻辑（因子计算/过滤/裁决） | P0 |
+| R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | ✅ 基础完成 |
+| R-03 | **Worker Pool**：固定数量协程并发执行任务 | ✅ 基础完成 |
+| R-04 | **SuiteRunner**：加载 Suite 拓扑，创建 SuiteRun 实例 | ✅ 基础完成 |
+| R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | ✅ 基础完成 |
+| R-06 | **CaseExecutor**：执行单个 Case 的运算逻辑（因子计算/过滤/裁决） | 🟡 声明式结果完成，计算引擎待接入 |
 | R-07 | **数据夹具（Fixture）**：为 Case 执行提供数据上下文（K线/基本面/实时快照） | P0 |
 | R-08 | **风控拦截器**：在 Executor 节点输出前校验仓位/资金限制 | P0 |
 | R-09 | **热加载**：Plan 发布后自动刷新内存中的 DAG 配置 | P1 |
-| R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | P0 |
-| R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | P0 |
+| R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 基础完成 |
+| R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 基础完成 |
+
+当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；后续可替换 `CaseExecutor` 接入真实因子、行情数据、风控和交易接口。
 
 #### 执行流程
 
@@ -579,7 +581,7 @@ class Plan(models.Model):
 | `cases` | 🟡 P0 基础能力完成 | 8 通过 | 70%（Schema、版本历史和执行器待开发） |
 | `suites` | 🟡 P0 基础能力完成 | 9 通过 | 70%（运行时聚合、并行执行和完整画布拓扑待完善） |
 | `plans` | 🟡 P0 基础能力完成 | 10 通过 | 70%（完整 Cron、调度器、版本快照和热加载待开发） |
-| `runner` | ⬜ 未开始 | — | 0% |
+| `runner` | 🟡 基础能力完成 | 3 通过 | 60%（核心执行链路完成，生产能力待完善） |
 
 
 ## 五、待办事项汇总
@@ -588,18 +590,18 @@ class Plan(models.Model):
 
 | 序号 | 问题描述 | 影响模块 | 紧急程度 |
 |------|----------|----------|----------|
-| 1 | 独立异步 EventLoop、CaseExecutor 尚未实现 | `runner`, `cases` | 🔴 P0 |
-| 2 | `ExecutionLog` 写入和 Order 生成尚未接入事件处理流程 | `runner`, `execution` | 🔴 P0 |
+| 1 | 生产级数据 Fixture、风控拦截和真实 Case 计算尚未接入 | `runner`, `cases`, `datasources` | 🔴 P0 |
+| 2 | Order 状态回写尚未对接真实交易接口 | `runner`, `execution` | 🔴 P0 |
 | 3 | `EventRegistry.validate` 已支持数据库回退并回填缓存 | `execution` | ✅ 已解决 |
 
-### 5.2 未开始模块开发（建议顺序）
+### 5.2 后续模块开发（建议顺序）
 
 | 顺序 | 模块 | 预估工作量 | 关键依赖 |
 |------|------|------------|----------|
-| 1 | `cases` | 中（剩余 1-2 天） | `execution.EventRegistry`（校验） |
-| 2 | `suites` | 中（剩余 1-2 天） | `cases.Case` |
-| 3 | `plans` | 中（剩余 1-2 天） | `suites.Suite`, `watchlists`（解析） |
-| 4 | `runner` | 大（5-7 天） | `execution`, `cases`, `suites`, `plans` |
+| 1 | `cases` 剩余能力 | 中 | 参数 Schema、版本历史、真实 CaseExecutor |
+| 2 | `suites` 剩余能力 | 中 | 运行时聚合、并行节点执行 |
+| 3 | `plans` 剩余能力 | 中 | 完整 Cron、版本快照、热加载 |
+| 4 | `runner` 生产能力 | 大 | Fixture、风控、真实交易接口 |
 | 5 | `users` | ✅ 已完成 | — |
 
 ### 5.3 测试验证计划
@@ -610,7 +612,8 @@ class Plan(models.Model):
 | 阶段2 | `cases` 模块基础功能测试全部通过 | 8 个测试全部 OK；Schema 和版本历史测试待补 |
 | 阶段3 | `suites` 模块基础功能测试全部通过 | 9 个测试全部 OK；运行时聚合和并行执行测试待补 |
 | 阶段4 | `plans` 模块基础功能测试全部通过 | 10 个测试全部 OK；调度器和版本快照测试待补 |
-| 阶段5 | `runner` 模块集成测试 | 完整端到端流程（Plan 触发 → 执行 → 日志写入） |
+| 阶段5 | `runner` 基础集成测试全部通过 | 3 个 runner 测试 OK；Fixture、风控和真实交易接口测试待补 |
+| 阶段6 | 全项目回归测试 | 80 个测试全部 OK |
 
 ### 5.4 非功能需求
 
