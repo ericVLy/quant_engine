@@ -376,11 +376,11 @@ class Case(models.Model):
 当前实现文件：`models.py`、`serializers.py`、`views.py`、`urls.py`。`Suite.cases` 已建立多对多引用，用于删除保护和后续工作流调度。
 
 
-### 模块6：`suites`（工作流编排）⬜ 未开始
+### 模块6：`suites`（工作流编排）🟡 P0 基础能力已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ⬜ 未开始 |
+| **状态** | 🟡 已完成 CRUD、拓扑读写、DAG 校验、发布校验和 Plan 引用删除保护；聚合执行与并行调度待完善 |
 | **优先级** | P0 |
 | **依赖** | `cases.Case` |
 
@@ -388,19 +388,19 @@ class Case(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| S-01 | Suite 模型（名称、聚合方式、父 Suite、状态、版本） | P0 |
-| S-02 | Edge 模型（源 Suite → 目标 Suite、条件、事件条件、权重） | P0 |
-| S-03 | Suite CRUD API | P0 |
-| S-04 | DAG 无环校验（发布前检查） | P0 |
-| S-05 | 拓扑获取接口（完整树形结构，供前端画布渲染） | P0 |
-| S-06 | 拓扑更新接口（批量增删节点和边） | P0 |
-| S-07 | Suite 发布（递归校验所有引用 Case/Suite 已发布） | P0 |
-| S-08 | 删除保护（被 Plan 引用时返回 409 Conflict） | P0 |
-| S-09 | 条件路由支持（`Edge.event_condition` 匹配事件类型） | P0 |
-| S-10 | 聚合方式支持（加权求和 / 投票 / 逻辑与 / 逻辑或） | P0 |
-| S-11 | 并行节点执行支持 | P1 |
+| S-01 | Suite 模型（名称、聚合方式、父 Suite、状态、版本） | ✅ 完成 |
+| S-02 | Edge 模型（源 Suite → 目标 Suite、条件、事件条件、权重） | ✅ 完成 |
+| S-03 | Suite CRUD API | ✅ 完成 |
+| S-04 | DAG 无环校验（发布前检查） | ✅ 完成 |
+| S-05 | 拓扑获取接口（完整树形结构，供前端画布渲染） | ✅ 完成 |
+| S-06 | 拓扑更新接口（批量增删节点和边） | ✅ 完成 |
+| S-07 | Suite 发布（递归校验所有引用 Case/Suite 已发布） | ✅ 完成 |
+| S-08 | 删除保护（被 Plan 引用时返回 409 Conflict） | ✅ 完成 |
+| S-09 | 条件路由支持（`Edge.event_condition` 匹配事件类型） | 🟡 基础完成 |
+| S-10 | 聚合方式支持（加权求和 / 投票 / 逻辑与 / 逻辑或） | 🟡 字段已支持，运行时聚合待实现 |
+| S-11 | 并行节点执行支持 | ❌ 待实现 |
 
-#### 数据模型（待实现）
+#### 数据模型
 
 ```python
 class Suite(models.Model):
@@ -439,6 +439,8 @@ class Edge(models.Model):
 | GET | `/api/suites/{id}/topology/` | 获取完整拓扑 |
 | POST | `/api/suites/{id}/topology/` | 更新拓扑 |
 | POST | `/api/suites/{id}/publish/` | 发布 Suite |
+
+当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。拓扑更新在事务中替换 Case 关联和当前 Suite 出边，并在提交前执行 DAG 校验。
 
 
 ### 模块7：`plans`（调度管理）⬜ 未开始
@@ -560,7 +562,7 @@ class Plan(models.Model):
 | `datasources` | ✅ 已完成 | 18 通过 | 100% |
 | `execution` | ⚠️ 基础闭环完成 | 12 通过 | 70%（服务层完成，runner/Case 执行待开发） |
 | `cases` | 🟡 P0 基础能力完成 | 8 通过 | 70%（Schema、版本历史和执行器待开发） |
-| `suites` | ⬜ 未开始 | — | 0% |
+| `suites` | 🟡 P0 基础能力完成 | 9 通过 | 70%（运行时聚合、并行执行和完整画布拓扑待完善） |
 | `plans` | ⬜ 未开始 | — | 0% |
 | `runner` | ⬜ 未开始 | — | 0% |
 
@@ -580,7 +582,7 @@ class Plan(models.Model):
 | 顺序 | 模块 | 预估工作量 | 关键依赖 |
 |------|------|------------|----------|
 | 1 | `cases` | 中（剩余 1-2 天） | `execution.EventRegistry`（校验） |
-| 2 | `suites` | 中（3-4 天） | `cases.Case` |
+| 2 | `suites` | 中（剩余 1-2 天） | `cases.Case` |
 | 3 | `plans` | 中（2-3 天） | `suites.Suite`, `watchlists`（解析） |
 | 4 | `runner` | 大（5-7 天） | `execution`, `cases`, `suites`, `plans` |
 | 5 | `users` | 小（1-2 天） | 无（基础模块，可提前开发） |
@@ -591,7 +593,7 @@ class Plan(models.Model):
 |------|------|----------|
 | 阶段1 | `execution` 模块测试全部通过 | 12 个测试全部 OK |
 | 阶段2 | `cases` 模块基础功能测试全部通过 | 8 个测试全部 OK；Schema 和版本历史测试待补 |
-| 阶段3 | `suites` 模块测试全部通过 | 待定义（约 15-20 个测试用例） |
+| 阶段3 | `suites` 模块基础功能测试全部通过 | 9 个测试全部 OK；运行时聚合和并行执行测试待补 |
 | 阶段4 | `plans` 模块测试全部通过 | 待定义（约 10-12 个测试用例） |
 | 阶段5 | `runner` 模块集成测试 | 完整端到端流程（Plan 触发 → 执行 → 日志写入） |
 
