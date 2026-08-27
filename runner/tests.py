@@ -10,6 +10,8 @@ from apps.suites.models import Suite
 from apps.watchlists.models import Symbol
 
 from .engine import SuiteRunner
+from .gm_adapter import GmBrokerAdapter
+from .risk import RiskController
 from .scheduler import Scheduler
 
 
@@ -58,6 +60,26 @@ class RunnerIntegrationTest(TestCase):
         self.assertEqual(ExecutionLog.objects.get(symbol='000001').status, 'failed')
         self.assertIn('JSON 对象', ExecutionLog.objects.get(symbol='000001').error_msg)
 
+    def test_risk_block_prevents_broker_submission(self):
+        case = Case.objects.create(
+            name='Risky order', node_type='executor', status='published',
+            params={
+                'trigger': {'event_type': 'SUITE_INIT'},
+                'result': {'direction': 1, 'order': {
+                    'direction': 'buy', 'price': '12.34', 'volume': 100,
+                }},
+            },
+        )
+        self.suite.cases.add(case)
+        broker = type('Broker', (), {'submit_order': lambda *_args: self.fail('不应下单')})()
+
+        log = SuiteRunner(
+            broker=broker, risk_controller=RiskController(max_volume=10)
+        ).run(self.plan, '000001')
+
+        self.assertEqual(log.status, 'blocked')
+        self.assertEqual(Order.objects.get(log=log).status, 'pending')
+
 
 class SchedulerTest(TestCase):
     def test_matches_cron_and_enqueues_symbols(self):
@@ -74,3 +96,24 @@ class SchedulerTest(TestCase):
 
         self.assertFalse(queue.empty())
         self.assertEqual(queue._queue.get_nowait()[1], '000001')
+
+
+class GmOrderReportTest(TestCase):
+    def test_report_updates_order_by_external_id(self):
+        suite = Suite.objects.create(name='Report Suite')
+        plan = Plan.objects.create(name='Report Plan', root_suite=suite)
+        log = ExecutionLog.objects.create(symbol='000001', final_direction=1)
+        order = Order.objects.create(
+            log=log, symbol='000001', direction='buy', price='12.0000',
+            volume=100, external_order_id='gm-123',
+        )
+
+        adapter = GmBrokerAdapter(api=object())
+        updated = adapter.on_order_status({
+            'cl_ord_id': 'gm-123', 'symbol': '000001', 'status': 3, 'price': 12.5,
+        })
+
+        order.refresh_from_db()
+        self.assertEqual(updated.pk, order.pk)
+        self.assertEqual(order.status, 'filled')
+        self.assertEqual(order.price, Decimal('12.5000'))

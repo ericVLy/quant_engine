@@ -9,14 +9,17 @@ from apps.execution.models import Event, ExecutionLog, Order
 from apps.execution.services import create_suite_run, enqueue_event, start_suite_run
 
 from .executor import CaseExecutionError, CaseExecutor
+from .risk import RiskController
 
 
 class EventLoop:
-    def __init__(self, run, case_executor=None, context=None, broker=None):
+    def __init__(self, run, case_executor=None, context=None, broker=None,
+                 risk_controller=None):
         self.run = run
         self.case_executor = case_executor or CaseExecutor()
         self.context = context or {}
         self.broker = broker
+        self.risk_controller = risk_controller
         self.node_snapshots = {}
         self.direction = 0
         self.orders = []
@@ -74,10 +77,23 @@ class EventLoop:
             order_data = self.orders
             for item in order_data:
                 order = self._create_order(log, item)
+                if self.risk_controller:
+                    decision = self.risk_controller.check(item)
+                    if not decision.allowed:
+                        log.status = 'blocked'
+                        log.error_msg = decision.reason
+                        log.save(update_fields=['status', 'error_msg'])
+                        self.run.status = 'failed'
+                        self.run.ended_at = timezone.now()
+                        self.run.save(update_fields=['status', 'ended_at'])
+                        return log
                 if self.broker:
-                    self.broker.submit_order(self.run.symbol, item)
+                    response = self.broker.submit_order(self.run.symbol, item)
+                    external_id = self._external_order_id(response)
+                    if external_id:
+                        order.external_order_id = external_id
                     order.status = 'sent'
-                    order.save(update_fields=['status', 'updated_at'])
+                    order.save(update_fields=['status', 'external_order_id', 'updated_at'])
             self.run.status = 'completed'
             self.run.ended_at = timezone.now()
             self.run.save(update_fields=['status', 'ended_at'])
@@ -94,15 +110,26 @@ class EventLoop:
             )
             raise
 
+    @staticmethod
+    def _external_order_id(response):
+        if isinstance(response, dict):
+            return response.get('cl_ord_id') or response.get('order_id')
+        if isinstance(response, (list, tuple)) and response and isinstance(response[0], dict):
+            return response[0].get('cl_ord_id') or response[0].get('order_id')
+        return getattr(response, 'cl_ord_id', None) or getattr(response, 'order_id', None)
+
 
 class SuiteRunner:
-    def __init__(self, case_executor=None, broker=None):
+    def __init__(self, case_executor=None, broker=None, risk_controller=None):
         self.case_executor = case_executor
         self.broker = broker
+        self.risk_controller = risk_controller
 
     def run(self, plan, symbol, payload=None):
         run = create_suite_run(plan, symbol, payload)
-        return EventLoop(run, self.case_executor, payload, self.broker).run_to_completion()
+        return EventLoop(
+            run, self.case_executor, payload, self.broker, self.risk_controller
+        ).run_to_completion()
 
     async def arun(self, plan, symbol, payload=None):
         return await sync_to_async(self.run, thread_sensitive=True)(plan, symbol, payload)
