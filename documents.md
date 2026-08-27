@@ -546,7 +546,7 @@ class Plan(models.Model):
 | R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 基础完成 |
 | R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 基础完成 |
 
-当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；后续可替换 `CaseExecutor` 接入真实因子、行情数据、风控和交易接口。
+当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`、`runner/gm_adapter.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；`GmBrokerAdapter` 已封装 gm SDK 的 `set_token`、`subscribe`、`history`、`history_n`、`schedule`、`order_volume`、`get_orders` 及订单状态回调。真实因子、行情 Fixture、风控和交易回报的生产策略仍可在该适配边界上继续扩展。
 
 #### 执行流程
 
@@ -591,8 +591,9 @@ class Plan(models.Model):
 | 序号 | 问题描述 | 影响模块 | 紧急程度 |
 |------|----------|----------|----------|
 | 1 | 生产级数据 Fixture、风控拦截和真实 Case 计算尚未接入 | `runner`, `cases`, `datasources` | 🔴 P0 |
-| 2 | Order 状态回写尚未对接真实交易接口 | `runner`, `execution` | 🔴 P0 |
+| 2 | gm 订单状态回调已具备适配器，仍需完善真实订单 ID 关联和交易回报链路 | `runner`, `execution` | 🔴 P0 |
 | 3 | `EventRegistry.validate` 已支持数据库回退并回填缓存 | `execution` | ✅ 已解决 |
+| 4 | gm SDK 适配器已接入行情查询、订阅、调度和下单接口 | `runner` | ✅ 已完成 |
 
 ### 5.2 后续模块开发（建议顺序）
 
@@ -602,7 +603,6 @@ class Plan(models.Model):
 | 2 | `suites` 剩余能力 | 中 | 运行时聚合、并行节点执行 |
 | 3 | `plans` 剩余能力 | 中 | 完整 Cron、版本快照、热加载 |
 | 4 | `runner` 生产能力 | 大 | Fixture、风控、真实交易接口 |
-| 5 | `users` | ✅ 已完成 | — |
 
 ### 5.3 测试验证计划
 
@@ -612,8 +612,8 @@ class Plan(models.Model):
 | 阶段2 | `cases` 模块基础功能测试全部通过 | 8 个测试全部 OK；Schema 和版本历史测试待补 |
 | 阶段3 | `suites` 模块基础功能测试全部通过 | 9 个测试全部 OK；运行时聚合和并行执行测试待补 |
 | 阶段4 | `plans` 模块基础功能测试全部通过 | 10 个测试全部 OK；调度器和版本快照测试待补 |
-| 阶段5 | `runner` 基础集成测试全部通过 | 3 个 runner 测试 OK；Fixture、风控和真实交易接口测试待补 |
-| 阶段6 | 全项目回归测试 | 80 个测试全部 OK |
+| 阶段5 | `runner` 基础集成测试全部通过 | 6 个 runner/SDK 测试 OK；Fixture、风控和真实交易接口测试待补 |
+| 阶段6 | 全项目回归测试 | 83 个测试全部 OK |
 
 ### 5.4 非功能需求
 
