@@ -82,10 +82,13 @@ class GmBrokerAdapter:
     @transaction.atomic
     def on_order_status(self, report):
         """Apply a gm order report to a local Order, when identifiable."""
-        local_order = Order.objects.filter(
-            symbol=report.get('symbol', ''),
-            status__in=('pending', 'sent'),
-        ).order_by('-created_at').first()
+        external_id = report.get('cl_ord_id') or report.get('order_id')
+        local_order = Order.objects.filter(external_order_id=external_id).first()
+        if local_order is None:
+            local_order = Order.objects.filter(
+                symbol=report.get('symbol', ''),
+                status__in=('pending', 'sent'),
+            ).order_by('-created_at').first()
         if local_order is None:
             return None
         status = self._status(report.get('status'))

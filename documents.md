@@ -590,10 +590,10 @@ class Plan(models.Model):
 
 | 序号 | 问题描述 | 影响模块 | 紧急程度 |
 |------|----------|----------|----------|
-| 1 | 生产级数据 Fixture、风控拦截和真实 Case 计算尚未接入 | `runner`, `cases`, `datasources` | 🔴 P0 |
-| 2 | gm 订单状态回调已具备适配器，仍需完善真实订单 ID 关联和交易回报链路 | `runner`, `execution` | 🔴 P0 |
+| 1 | gm 行情 Fixture、基础风控拦截和可注入 Case 计算已接入；复杂因子与生产数据上下文仍待扩展 | `runner`, `cases`, `datasources` | 🟡 P1 |
+| 2 | gm 订单状态回调已按外部订单 ID 关联并回写；真实交易环境回报字段适配仍需持续验证 | `runner`, `execution` | 🟡 P1 |
 | 3 | `EventRegistry.validate` 已支持数据库回退并回填缓存 | `execution` | ✅ 已解决 |
-| 4 | gm SDK 适配器已接入行情查询、订阅、调度和下单接口 | `runner` | ✅ 已完成 |
+| 4 | gm SDK 适配器已接入行情查询、订阅、调度、下单和订单回报接口 | `runner`, `execution` | ✅ 已完成 |
 
 ### 5.2 后续模块开发（建议顺序）
 
@@ -602,7 +602,7 @@ class Plan(models.Model):
 | 1 | `cases` 剩余能力 | 中 | 参数 Schema、版本历史、真实 CaseExecutor |
 | 2 | `suites` 剩余能力 | 中 | 运行时聚合、并行节点执行 |
 | 3 | `plans` 剩余能力 | 中 | 完整 Cron、版本快照、热加载 |
-| 4 | `runner` 生产能力 | 大 | Fixture、风控、真实交易接口 |
+| 4 | `runner` 生产能力 | 大 | 复杂因子、生产数据上下文、交易环境验证 |
 
 ### 5.3 测试验证计划
 
@@ -612,8 +612,8 @@ class Plan(models.Model):
 | 阶段2 | `cases` 模块基础功能测试全部通过 | 8 个测试全部 OK；Schema 和版本历史测试待补 |
 | 阶段3 | `suites` 模块基础功能测试全部通过 | 9 个测试全部 OK；运行时聚合和并行执行测试待补 |
 | 阶段4 | `plans` 模块基础功能测试全部通过 | 10 个测试全部 OK；调度器和版本快照测试待补 |
-| 阶段5 | `runner` 基础集成测试全部通过 | 6 个 runner/SDK 测试 OK；Fixture、风控和真实交易接口测试待补 |
-| 阶段6 | 全项目回归测试 | 83 个测试全部 OK |
+| 阶段5 | `runner` 基础集成测试全部通过 | 8 个 runner/SDK 测试 OK；复杂因子和真实交易环境测试待补 |
+| 阶段6 | 全项目回归测试 | 85 个测试全部 OK |
 
 ### 5.4 非功能需求
 

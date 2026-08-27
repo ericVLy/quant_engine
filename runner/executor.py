@@ -16,11 +16,14 @@ class CaseExecutionError(Exception):
 class CaseExecutor:
     """Execute the declarative result of a published Case."""
 
+    def __init__(self, calculator=None):
+        self.calculator = calculator
+
     def execute(self, case, context):
         params = case.params or {}
         if params.get('skip'):
             return CaseResult(status='skipped')
-        result = params.get('result', {})
+        result = self.calculator(case, context) if self.calculator else params.get('result', {})
         if not isinstance(result, dict):
             raise CaseExecutionError('Case result 必须是 JSON 对象')
         direction = result.get('direction', params.get('direction', context.get('direction', 0)))
