@@ -12,10 +12,11 @@ from .executor import CaseExecutionError, CaseExecutor
 
 
 class EventLoop:
-    def __init__(self, run, case_executor=None, context=None):
+    def __init__(self, run, case_executor=None, context=None, broker=None):
         self.run = run
         self.case_executor = case_executor or CaseExecutor()
         self.context = context or {}
+        self.broker = broker
         self.node_snapshots = {}
         self.direction = 0
         self.orders = []
@@ -72,7 +73,11 @@ class EventLoop:
             )
             order_data = self.orders
             for item in order_data:
-                self._create_order(log, item)
+                order = self._create_order(log, item)
+                if self.broker:
+                    self.broker.submit_order(self.run.symbol, item)
+                    order.status = 'sent'
+                    order.save(update_fields=['status', 'updated_at'])
             self.run.status = 'completed'
             self.run.ended_at = timezone.now()
             self.run.save(update_fields=['status', 'ended_at'])
@@ -91,12 +96,13 @@ class EventLoop:
 
 
 class SuiteRunner:
-    def __init__(self, case_executor=None):
+    def __init__(self, case_executor=None, broker=None):
         self.case_executor = case_executor
+        self.broker = broker
 
     def run(self, plan, symbol, payload=None):
         run = create_suite_run(plan, symbol, payload)
-        return EventLoop(run, self.case_executor, payload).run_to_completion()
+        return EventLoop(run, self.case_executor, payload, self.broker).run_to_completion()
 
     async def arun(self, plan, symbol, payload=None):
         return await sync_to_async(self.run, thread_sensitive=True)(plan, symbol, payload)
