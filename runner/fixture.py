@@ -14,3 +14,8 @@ class MarketDataFixture:
         return self.broker.subscribe(
             symbols=symbol, frequency=frequency, count=count, fields=fields,
         )
+
+    def context(self, symbol, frequency='1d', count=50, fields=None, end_time=None):
+        """Return a stable Case context without imposing a pandas dependency."""
+        data = self.load(symbol, frequency, count, fields, end_time)
+        return {'symbol': symbol, 'frequency': frequency, 'market_data': data}

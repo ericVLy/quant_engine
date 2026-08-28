@@ -34,3 +34,16 @@ class Plan(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class PlanVersion(models.Model):
+    plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name='versions')
+    version = models.PositiveIntegerField()
+    snapshot = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-version',)
+        constraints = [
+            models.UniqueConstraint(fields=('plan', 'version'), name='unique_plan_version'),
+        ]

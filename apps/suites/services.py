@@ -7,6 +7,32 @@ class SuiteError(Exception):
     """Raised when a Suite cannot be changed or published."""
 
 
+def event_condition_matches(condition, payload):
+    """Return whether every configured condition equals the event payload."""
+    if not condition:
+        return True
+    return all(payload.get(key) == value for key, value in condition.items())
+
+
+def aggregate_directions(suite, results):
+    """Aggregate Case directions according to the Suite configuration."""
+    if not results:
+        return 0
+    directions = [int(result.get('direction', 0)) for result in results]
+    if suite.aggregate_method == 'and':
+        return 1 if all(direction == 1 for direction in directions) else -1 if any(direction == -1 for direction in directions) else 0
+    if suite.aggregate_method == 'or':
+        return 1 if any(direction == 1 for direction in directions) else -1 if any(direction == -1 for direction in directions) else 0
+    if suite.aggregate_method == 'vote':
+        totals = {direction: directions.count(direction) for direction in (-1, 0, 1)}
+        return max(totals, key=totals.get)
+    weighted = sum(
+        direction * float(result.get('weight', 1.0))
+        for direction, result in zip(directions, results)
+    )
+    return 1 if weighted > 0 else -1 if weighted < 0 else 0
+
+
 def validate_dag(suite):
     """Validate that Suite edges reachable from suite contain no cycle."""
     visiting = set()

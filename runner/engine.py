@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from asgiref.sync import sync_to_async
@@ -7,6 +8,7 @@ from django.utils import timezone
 from apps.execution.events import EventType
 from apps.execution.models import Event, ExecutionLog, Order
 from apps.execution.services import create_suite_run, enqueue_event, start_suite_run
+from apps.suites.services import aggregate_directions, event_condition_matches
 
 from .executor import CaseExecutionError, CaseExecutor
 from .risk import RiskController
@@ -28,6 +30,17 @@ class EventLoop:
         cases = self.run.suite.cases.filter(status='published')
         return [case for case in cases
                 if (case.params or {}).get('trigger', {}).get('event_type') == event.event_type]
+
+    def _execute_cases(self, cases):
+        if self.run.plan.exec_mode == 'parallel' and len(cases) > 1:
+            with ThreadPoolExecutor(max_workers=len(cases)) as pool:
+                return list(pool.map(
+                    lambda case: self.case_executor.execute(case, self.context), cases
+                ))
+        results = []
+        for case in cases:
+            results.append(self.case_executor.execute(case, self.context))
+        return results
 
     def _create_order(self, log, order_data):
         required = {'direction', 'price', 'volume'}
@@ -52,15 +65,26 @@ class EventLoop:
                 event = Event.objects.get(pk=self.run.event_queue[0], run=self.run)
                 event.status = 'processing'
                 event.save(update_fields=['status'])
-                for case in self._subscribed_cases(event):
-                    result = self.case_executor.execute(case, self.context)
+                self.context.update(event.payload or {})
+                cases = self._subscribed_cases(event)
+                results = self._execute_cases(cases)
+                aggregate_results = []
+                for case, result in zip(cases, results):
                     self.direction = result.direction
                     self.context.update(result.payload)
                     self.node_snapshots[str(case.pk)] = result.payload
+                    aggregate_results.append({
+                        'direction': result.direction,
+                        'weight': (case.params or {}).get('weight', 1.0),
+                    })
                     if result.order:
                         self.orders.append(result.order)
                     enqueue_event(self.run, EventType.CASE_COMPLETED,
                                   source=f'case:{case.pk}', payload=result.payload)
+                if aggregate_results:
+                    self.direction = aggregate_directions(
+                        self.run.suite, aggregate_results
+                    )
                 event.status = 'done'
                 event.processed_at = timezone.now()
                 event.save(update_fields=['status', 'processed_at'])

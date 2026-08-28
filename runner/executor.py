@@ -23,7 +23,13 @@ class CaseExecutor:
         params = case.params or {}
         if params.get('skip'):
             return CaseResult(status='skipped')
-        result = self.calculator(case, context) if self.calculator else params.get('result', {})
+        if self.calculator:
+            result = self.calculator(case, context)
+        elif params.get('calculation'):
+            from .factors import calculate
+            result = calculate(params, context)
+        else:
+            result = params.get('result', {})
         if not isinstance(result, dict):
             raise CaseExecutionError('Case result 必须是 JSON 对象')
         direction = result.get('direction', params.get('direction', context.get('direction', 0)))
