@@ -27,12 +27,26 @@ class Scheduler:
 
     @staticmethod
     def _matches_field(field, value):
-        if field == '*':
-            return True
-        try:
-            return value in {int(part) for part in field.split(',')}
-        except ValueError:
-            return False
+        for part in field.split(','):
+            try:
+                base, _, step_text = part.partition('/')
+                step = int(step_text) if step_text else 1
+                if step < 1:
+                    return False
+                if base in ('', '*'):
+                    if value % step == 0:
+                        return True
+                    continue
+                if '-' in base:
+                    start, end = (int(item) for item in base.split('-', 1))
+                    if start <= value <= end and (value - start) % step == 0:
+                        return True
+                    continue
+                if step == 1 and value == int(base):
+                    return True
+            except (TypeError, ValueError):
+                return False
+        return False
 
     def enqueue_due_plans(self, now):
         for plan in self.due_plans(now):

@@ -4,6 +4,7 @@ from apps.execution.models import ExecutionLog, SuiteRun
 from apps.watchlists.services import resolve_symbol_scope
 
 from .models import Plan
+from .models import PlanVersion
 
 
 class PlanError(Exception):
@@ -14,9 +15,26 @@ def publish_plan(plan):
     """Publish a Plan only when its root Suite is already published."""
     if plan.root_suite.status != 'published':
         raise PlanError('根 Suite 必须已发布')
-    plan.status = 'published'
-    plan.version += 1
-    plan.save(update_fields=('status', 'version', 'updated_at'))
+    from runner.registry import PlanRegistry
+
+    with transaction.atomic():
+        plan.status = 'published'
+        plan.version += 1
+        plan.save(update_fields=('status', 'version', 'updated_at'))
+        snapshot = {
+            'name': plan.name,
+            'root_suite_id': plan.root_suite_id,
+            'trigger_type': plan.trigger_type,
+            'cron_expr': plan.cron_expr,
+            'event_type': plan.event_type,
+            'symbol_scope': plan.symbol_scope,
+            'exec_mode': plan.exec_mode,
+            'retry_policy': plan.retry_policy,
+            'status': plan.status,
+            'version': plan.version,
+        }
+        PlanVersion.objects.create(plan=plan, version=plan.version, snapshot=snapshot)
+        transaction.on_commit(lambda: PlanRegistry.refresh(plan))
     return plan
 
 

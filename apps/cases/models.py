@@ -24,3 +24,19 @@ class Case(models.Model):
 
     def __str__(self):
         return f"{self.name} (v{self.version})"
+
+
+class CaseVersion(models.Model):
+    case = models.ForeignKey(Case, on_delete=models.CASCADE, related_name='versions')
+    version = models.PositiveIntegerField()
+    name = models.CharField(max_length=100)
+    node_type = models.CharField(max_length=20, choices=Case.NODE_TYPE_CHOICES)
+    params = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=Case.STATUS_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=('case', 'version'), name='unique_case_version'),
+        ]
+        ordering = ('-version',)

@@ -2,7 +2,7 @@
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Plan
+from .models import Plan, PlanVersion
 from .serializers import PlanSerializer
 from .services import PlanError, delete_plan, publish_plan, resolve_plan_symbols
 
@@ -44,4 +44,13 @@ class PlanViewSet(viewsets.ModelViewSet):
             {'id': symbol.id, 'code': symbol.code, 'name': symbol.name,
              'market': symbol.market, 'exchange': symbol.exchange}
             for symbol in resolve_plan_symbols(plan)
+        ])
+
+    @action(detail=True, methods=['get'])
+    def versions(self, request, pk=None):
+        plan = self.get_object()
+        return Response([
+            {'id': version.id, 'version': version.version,
+             'snapshot': version.snapshot, 'created_at': version.created_at}
+            for version in PlanVersion.objects.filter(plan=plan)
         ])
