@@ -6,7 +6,7 @@ from apps.execution.events import EventType
 from apps.execution.registry import EventRegistry
 from apps.suites.models import Suite
 
-from .models import Case
+from .models import Case, CaseVersion
 
 
 class CaseAPITest(APITestCase):
@@ -65,6 +65,19 @@ class CaseAPITest(APITestCase):
         case.refresh_from_db()
         self.assertEqual(case.status, 'published')
         self.assertEqual(case.version, 2)
+        self.assertTrue(CaseVersion.objects.filter(case=case, version=2).exists())
+
+    def test_case_versions_endpoint_returns_snapshots(self):
+        case = Case.objects.create(name='历史', node_type='signal', status='published', version=2)
+        CaseVersion.objects.create(
+            case=case, version=2, name=case.name, node_type=case.node_type,
+            params={'direction': 1}, status='published',
+        )
+
+        response = self.client.get(f'{self.url}{case.id}/versions/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['params']['direction'], 1)
 
     def test_delete_referenced_case_returns_conflict(self):
         case = Case.objects.create(name='已引用', node_type='signal')

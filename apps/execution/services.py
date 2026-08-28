@@ -76,7 +76,7 @@ def _event_condition_matches(condition, payload):
     """Match simple equality conditions used by Suite edges."""
     if not condition:
         return True
-    return all(payload.get(key) == value for key, value in condition.items())
+    return all(payload.get(key) == value for key, value in condition.items() if key != 'next_event')
 
 
 def process_next_event(run):

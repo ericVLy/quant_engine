@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from apps.plans.models import Plan
 from apps.watchlists.services import resolve_symbol_scope
 
@@ -9,6 +11,7 @@ class Scheduler:
 
     def __init__(self, task_queue=None):
         self.task_queue = task_queue or TaskQueue()
+        self._enqueued = set()
 
     def due_plans(self, now):
         plans = Plan.objects.filter(status='published', trigger_type='time')
@@ -49,7 +52,17 @@ class Scheduler:
         return False
 
     def enqueue_due_plans(self, now):
+        enqueued = 0
         for plan in self.due_plans(now):
             for symbol in resolve_symbol_scope(plan.symbol_scope):
+                key = (plan.pk, plan.version, symbol.code, now.year, now.month, now.day, now.hour, now.minute)
+                if key in self._enqueued:
+                    continue
                 self.task_queue._queue.put_nowait((plan, symbol.code, {}))
+                self._enqueued.add(key)
+                enqueued += 1
         return self.task_queue
+
+    def poll_once(self, now=None):
+        """Poll published time plans once; repeated polls in one minute are idempotent."""
+        return self.enqueue_due_plans(now or datetime.now())
