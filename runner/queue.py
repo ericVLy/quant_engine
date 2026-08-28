@@ -38,7 +38,18 @@ class WorkerPool:
                 except asyncio.CancelledError:
                     return
                 try:
-                    await self.runner.arun(plan, symbol, payload)
+                    policy = plan.retry_policy or {}
+                    max_retries = max(0, int(policy.get('max_retries', 0)))
+                    for attempt in range(max_retries + 1):
+                        try:
+                            await self.runner.arun(plan, symbol, payload)
+                            break
+                        except Exception:
+                            if attempt >= max_retries:
+                                raise
+                            delay = max(0, float(policy.get('delay_seconds', 0)))
+                            if delay:
+                                await asyncio.sleep(delay)
                 finally:
                     task_queue.task_done()
 

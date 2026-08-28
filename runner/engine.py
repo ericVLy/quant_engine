@@ -8,6 +8,7 @@ from django.utils import timezone
 from apps.execution.events import EventType
 from apps.execution.models import Event, ExecutionLog, Order
 from apps.execution.services import create_suite_run, enqueue_event, start_suite_run
+from apps.suites.models import Edge, Suite
 from apps.suites.services import aggregate_directions, event_condition_matches
 
 from .executor import CaseExecutionError, CaseExecutor
@@ -42,6 +43,21 @@ class EventLoop:
             results.append(self.case_executor.execute(case, self.context))
         return results
 
+    def _route_edges(self, event):
+        for edge in Edge.objects.filter(from_suite=self.run.suite):
+            condition = edge.event_condition or edge.condition
+            event_data = {'event_type': event.event_type, **(event.payload or {})}
+            if not event_condition_matches(condition, event_data):
+                continue
+            payload = dict(event.payload or {})
+            payload['target_suite_id'] = edge.to_suite_id
+            enqueue_event(
+                self.run,
+                (edge.event_condition or {}).get('next_event', EventType.CASE_START),
+                source=f'edge:{edge.pk}',
+                payload=payload,
+            )
+
     def _create_order(self, log, order_data):
         required = {'direction', 'price', 'volume'}
         if not required.issubset(order_data):
@@ -65,6 +81,11 @@ class EventLoop:
                 event = Event.objects.get(pk=self.run.event_queue[0], run=self.run)
                 event.status = 'processing'
                 event.save(update_fields=['status'])
+                target_suite_id = (event.payload or {}).get('target_suite_id')
+                if target_suite_id and target_suite_id != self.run.suite_id:
+                    self.run.suite = Suite.objects.get(pk=target_suite_id)
+                    self.run.save(update_fields=['suite'])
+                    self.run.refresh_from_db()
                 self.context.update(event.payload or {})
                 cases = self._subscribed_cases(event)
                 results = self._execute_cases(cases)
@@ -85,6 +106,7 @@ class EventLoop:
                     self.direction = aggregate_directions(
                         self.run.suite, aggregate_results
                     )
+                self._route_edges(event)
                 event.status = 'done'
                 event.processed_at = timezone.now()
                 event.save(update_fields=['status', 'processed_at'])

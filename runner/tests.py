@@ -6,7 +6,8 @@ from django.test import TestCase
 from apps.cases.models import Case
 from apps.execution.models import ExecutionLog, Order
 from apps.plans.models import Plan
-from apps.suites.models import Suite
+from apps.suites.models import Edge, Suite
+from apps.suites.services import aggregate_directions
 from apps.watchlists.models import Symbol
 
 from .engine import SuiteRunner
@@ -96,6 +97,53 @@ class SchedulerTest(TestCase):
 
         self.assertFalse(queue.empty())
         self.assertEqual(queue._queue.get_nowait()[1], '000001')
+
+    def test_poll_once_deduplicates_same_minute(self):
+        suite = Suite.objects.create(name='去重 Suite', status='published')
+        Symbol.objects.create(code='000002', name='测试标的2', market='A')
+        Plan.objects.create(
+            name='去重 Plan', root_suite=suite, status='published',
+            trigger_type='time', cron_expr='30 10 * * *',
+            symbol_scope={'type': 'symbols', 'symbol_codes': ['000002']},
+        )
+
+        scheduler = Scheduler()
+        now = datetime(2026, 8, 26, 10, 30)
+        scheduler.poll_once(now)
+        scheduler.poll_once(now)
+
+        self.assertEqual(scheduler.task_queue._queue.qsize(), 1)
+
+
+class SuiteRuntimeTest(TestCase):
+    def test_aggregate_directions(self):
+        suite = Suite.objects.create(name='聚合', aggregate_method='vote')
+        self.assertEqual(aggregate_directions(suite, [
+            {'direction': 1}, {'direction': 1}, {'direction': -1},
+        ]), 1)
+
+    def test_runner_routes_to_downstream_suite(self):
+        root = Suite.objects.create(name='根', status='published')
+        downstream = Suite.objects.create(name='下游', status='published')
+        Edge.objects.create(
+            from_suite=root, to_suite=downstream,
+            event_condition={'event_type': 'CASE_COMPLETED'},
+        )
+        plan = Plan.objects.create(name='路由计划', root_suite=root, status='published')
+        case = Case.objects.create(
+            name='根节点', node_type='signal', status='published',
+            params={'trigger': {'event_type': 'SUITE_INIT'}, 'result': {'direction': 1}},
+        )
+        downstream_case = Case.objects.create(
+            name='下游节点', node_type='signal', status='published',
+            params={'trigger': {'event_type': 'CASE_START'}, 'result': {'direction': -1}},
+        )
+        root.cases.add(case)
+        downstream.cases.add(downstream_case)
+
+        log = SuiteRunner().run(plan, '000003')
+
+        self.assertEqual(log.final_direction, -1)
 
 
 class GmOrderReportTest(TestCase):
