@@ -1,0 +1,1594 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>量化平台 · 全功能版</title>
+    <style>
+        /* ========== CSS 变量 & 重置 ========== */
+        :root {
+            --primary: #0d9488;
+            --primary-light: #ccfbf1;
+            --primary-dark: #0f766e;
+            --bg: #f1f5f9;
+            --card-bg: #ffffff;
+            --border: #e2e8f0;
+            --text: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --radius: 12px;
+            --radius-sm: 6px;
+            --shadow: 0 1px 3px rgba(0,0,0,0.06);
+            --sider-width: 220px;
+            --sider-collapsed: 60px;
+            --transition: 0.25s ease;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            font-size: 14px;
+        }
+        ::-webkit-scrollbar { width:5px; height:5px; }
+        ::-webkit-scrollbar-track { background:transparent; }
+        ::-webkit-scrollbar-thumb { background:var(--primary); border-radius:8px; }
+
+        /* ========== 侧边栏 ========== */
+        .sider {
+            width: var(--sider-width);
+            background: var(--card-bg);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            position: sticky;
+            top: 0;
+            flex-shrink: 0;
+            transition: width var(--transition);
+            overflow: hidden;
+            z-index: 100;
+        }
+        .sider.collapsed { width: var(--sider-collapsed); }
+        .sider .logo {
+            padding: 20px 16px 16px;
+            font-weight: 700;
+            font-size: 20px;
+            color: var(--primary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            transition: padding var(--transition);
+        }
+        .sider.collapsed .logo { padding: 16px 10px; justify-content:center; }
+        .sider .logo .brand-text { transition: opacity 0.2s; }
+        .sider.collapsed .logo .brand-text { opacity:0; width:0; overflow:hidden; }
+        .sider .nav {
+            flex:1;
+            padding: 12px 8px;
+            overflow-y: auto;
+        }
+        .sider .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 14px;
+            margin: 2px 0;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-weight: 500;
+            gap: 12px;
+            white-space: nowrap;
+            transition: all 0.15s;
+            position: relative;
+        }
+        .sider.collapsed .nav-item { padding: 10px 12px; justify-content:center; }
+        .sider .nav-item:hover { background: var(--primary-light); color: var(--primary); }
+        .sider .nav-item.active {
+            background: var(--primary-light);
+            color: var(--primary);
+            font-weight: 600;
+        }
+        .sider .nav-item.active::before {
+            content: '';
+            position: absolute;
+            left:0; top:6px; bottom:6px;
+            width:3px; background: var(--primary);
+            border-radius:0 4px 4px 0;
+        }
+        .sider .nav-item .icon { font-size:18px; width:24px; text-align:center; flex-shrink:0; }
+        .sider .nav-item .label { transition:opacity 0.2s; }
+        .sider.collapsed .nav-item .label { opacity:0; width:0; overflow:hidden; }
+        .sider .footer {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            font-size:12px;
+            color: var(--text-muted);
+            text-align:center;
+            transition:opacity 0.2s;
+        }
+        .sider.collapsed .footer { opacity:0; height:0; padding:0; overflow:hidden; }
+
+        /* ========== 主内容 ========== */
+        .main {
+            flex:1;
+            display: flex;
+            flex-direction: column;
+            min-width:0;
+            height:100vh;
+            overflow:hidden;
+        }
+        .header {
+            background: var(--card-bg);
+            padding: 0 24px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+            flex-shrink:0;
+        }
+        .header .left { display: flex; align-items:center; gap:12px; }
+        .header .toggle-btn {
+            border:none; background:transparent;
+            font-size:20px; cursor:pointer;
+            padding:4px 8px;
+            border-radius:var(--radius-sm);
+            color:var(--text-secondary);
+        }
+        .header .toggle-btn:hover { background:var(--primary-light); color:var(--primary); }
+        .header .page-title { font-size:18px; font-weight:600; }
+        .header .user-area {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            position: relative;
+        }
+        .header .user-area .user-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 4px 8px 4px 4px;
+            border-radius: var(--radius-sm);
+            transition: background 0.2s;
+        }
+        .header .user-area .user-info:hover { background: var(--primary-light); }
+        .header .user-area .avatar {
+            width: 32px; height: 32px;
+            border-radius: 50%;
+            background: var(--primary);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+        }
+        .header .user-area .username { font-weight:500; color:var(--text); }
+        .header .user-area .dropdown {
+            position: absolute;
+            top: 44px;
+            right: 0;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+            min-width: 160px;
+            display: none;
+            padding: 8px 0;
+            z-index: 200;
+        }
+        .header .user-area .dropdown.show { display: block; }
+        .header .user-area .dropdown-item {
+            padding: 8px 16px;
+            cursor: pointer;
+            transition: background 0.15s;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .header .user-area .dropdown-item:hover { background: var(--primary-light); color: var(--primary); }
+        .header .user-area .dropdown-item.danger { color: #dc2626; }
+        .header .user-area .dropdown-item.danger:hover { background: #fee2e2; }
+        .btn-login {
+            border: none;
+            background: var(--primary);
+            color: #fff;
+            padding: 6px 16px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        .btn-login:hover { background: var(--primary-dark); }
+
+        /* ========== 内容区 ========== */
+        .content {
+            flex:1;
+            padding: 24px;
+            overflow-y: auto;
+            background: var(--bg);
+        }
+
+        /* ========== 面板 ========== */
+        .panel {
+            display: none;
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+        }
+        .panel.active { display: block; }
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .panel-header h2 { font-size:18px; font-weight:600; }
+        .panel-header .actions { display:flex; gap:8px; flex-wrap:wrap; }
+
+        /* ========== 表格 ========== */
+        .table-wrap { overflow-x:auto; }
+        table {
+            width:100%;
+            border-collapse: collapse;
+            font-size:14px;
+        }
+        th {
+            text-align:left;
+            padding: 10px 12px;
+            border-bottom: 2px solid var(--border);
+            font-weight:600;
+            color: var(--text-secondary);
+            background: var(--bg);
+            font-size:12px;
+            text-transform:uppercase;
+            letter-spacing:0.3px;
+        }
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align:middle;
+        }
+        tr:hover td { background: var(--primary-light); }
+
+        /* ========== 徽章 ========== */
+        .badge {
+            display:inline-block;
+            padding:2px 10px;
+            border-radius:20px;
+            font-size:12px;
+            font-weight:500;
+            background:var(--bg);
+            color:var(--text-secondary);
+        }
+        .badge.success { background:#dcfce7; color:#166534; }
+        .badge.danger { background:#fee2e2; color:#991b1b; }
+        .badge.warning { background:#fef3c7; color:#92400e; }
+        .badge.primary { background:var(--primary-light); color:var(--primary); }
+
+        /* ========== 表单 ========== */
+        .form-row {
+            display:flex;
+            flex-wrap:wrap;
+            gap:12px;
+            align-items:flex-end;
+            margin-top:12px;
+        }
+        .form-group {
+            display:flex;
+            flex-direction:column;
+            gap:4px;
+            flex:1 1 180px;
+        }
+        .form-group label { font-size:13px; font-weight:500; color:var(--text-secondary); }
+        .form-group input, .form-group select, .form-group textarea {
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size:14px;
+            background: var(--card-bg);
+            transition: border 0.2s;
+        }
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+            outline:none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-light);
+        }
+        .form-group textarea { resize:vertical; min-height:60px; font-family:monospace; }
+
+        /* ========== 按钮 ========== */
+        .btn {
+            padding: 8px 18px;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size:14px;
+            font-weight:500;
+            cursor:pointer;
+            transition: all 0.2s;
+            background: var(--bg);
+            color: var(--text-secondary);
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            white-space:nowrap;
+        }
+        .btn:hover { background: var(--border); }
+        .btn-primary { background: var(--primary); color:#fff; }
+        .btn-primary:hover { background: var(--primary-dark); box-shadow: 0 2px 8px rgba(13,148,136,0.3); }
+        .btn-success { background: #16a34a; color:#fff; }
+        .btn-success:hover { background: #15803d; }
+        .btn-danger { background: #dc2626; color:#fff; }
+        .btn-danger:hover { background: #b91c1c; }
+        .btn-sm { padding: 4px 12px; font-size:12px; }
+
+        /* ========== 消息 ========== */
+        .loading, .empty { padding:30px 0; text-align:center; color:var(--text-muted); }
+        .message-box {
+            padding:12px 16px;
+            border-radius:var(--radius-sm);
+            margin-top:12px;
+        }
+        .message-box.success { background:#dcfce7; border:1px solid #86efac; color:#166534; }
+        .message-box.error { background:#fee2e2; border:1px solid #fca5a5; color:#991b1b; }
+        .json-view {
+            background:var(--bg);
+            padding:12px;
+            border-radius:var(--radius-sm);
+            font-family:monospace;
+            font-size:12px;
+            overflow-x:auto;
+            max-height:260px;
+            overflow-y:auto;
+            white-space:pre-wrap;
+            word-break:break-all;
+            border:1px solid var(--border);
+        }
+        .modal-overlay {
+            position:fixed; top:0; left:0; right:0; bottom:0;
+            background:rgba(0,0,0,0.4);
+            backdrop-filter:blur(4px);
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            z-index:999;
+        }
+        .modal-box {
+            background:var(--card-bg);
+            border-radius:var(--radius);
+            padding:24px;
+            max-width:600px;
+            width:90%;
+            max-height:80vh;
+            overflow-y:auto;
+            box-shadow:0 20px 60px rgba(0,0,0,0.2);
+        }
+        .modal-box h3 { margin-bottom:16px; }
+        .modal-box .form-row { margin-top:0; }
+        .modal-box .actions { margin-top:20px; display:flex; gap:12px; justify-content:flex-end; }
+        .modal-box .tab-switch { display:flex; gap:0; margin-bottom:16px; border-bottom:1px solid var(--border); }
+        .modal-box .tab-switch button {
+            padding:8px 20px;
+            border:none;
+            background:transparent;
+            cursor:pointer;
+            font-size:14px;
+            font-weight:500;
+            color:var(--text-secondary);
+            border-bottom:2px solid transparent;
+            transition: all 0.2s;
+        }
+        .modal-box .tab-switch button.active { color:var(--primary); border-bottom-color:var(--primary); }
+        .modal-box .tab-switch button:hover { color:var(--primary); }
+
+        /* ========== 响应式 ========== */
+        @media (max-width:768px) {
+            .sider { width:60px; }
+            .sider .logo .brand-text, .sider .nav-item .label, .sider .footer { display:none; }
+            .sider .logo { padding:16px 10px; justify-content:center; }
+            .sider .nav-item { padding:10px 12px; justify-content:center; }
+            .sider.collapsed { width:0; border-right:none; }
+            .sider.collapsed .logo, .sider.collapsed .nav { display:none; }
+            .header { padding:0 12px; }
+            .content { padding:12px; }
+            .panel { padding:16px; }
+            .form-row { flex-direction:column; }
+            .modal-box { width:95%; padding:16px; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ===== 侧边栏 ===== -->
+<div class="sider" id="sider">
+    <div class="logo"><span class="brand-text">📊 量化</span></div>
+    <div class="nav" id="navMenu">
+        <div class="nav-item active" data-tab="symbols"><span class="icon">📋</span><span class="label">标的</span></div>
+        <div class="nav-item" data-tab="groups"><span class="icon">📂</span><span class="label">分组</span></div>
+        <div class="nav-item" data-tab="cases"><span class="icon">🧩</span><span class="label">Case</span></div>
+        <div class="nav-item" data-tab="suites"><span class="icon">🔗</span><span class="label">Suite</span></div>
+        <div class="nav-item" data-tab="plans"><span class="icon">📅</span><span class="label">Plan</span></div>
+        <div class="nav-item" data-tab="logs"><span class="icon">📈</span><span class="label">执行日志</span></div>
+        <div class="nav-item" data-tab="trigger"><span class="icon">⚡</span><span class="label">触发执行</span></div>
+        <div class="nav-item" data-tab="event-types"><span class="icon">📌</span><span class="label">事件类型</span></div>
+    </div>
+    <div class="footer">v2.0 · 全功能</div>
+</div>
+
+<!-- ===== 主内容 ===== -->
+<div class="main">
+    <!-- 顶部栏 -->
+    <div class="header">
+        <div class="left">
+            <button class="toggle-btn" id="toggleSiderBtn">☰</button>
+            <span class="page-title" id="pageTitle">标的管理</span>
+        </div>
+        <div class="user-area" id="userArea">
+            <!-- 由 JS 动态渲染 -->
+        </div>
+    </div>
+
+    <!-- 内容区 -->
+    <div class="content" id="contentArea">
+        <div id="panelContainer"></div>
+    </div>
+</div>
+
+<script>
+    // ================================================================
+    // 1. 配置
+    // ================================================================
+    const API_BASE = 'http://127.0.0.1:8000/api';
+    const CREDENTIALS = 'include';
+
+    // ================================================================
+    // 2. CSRF Token 辅助函数
+    // ================================================================
+    function getCookie(name) {
+        let cookieValue = null;
+        if (document.cookie && document.cookie !== '') {
+            const cookies = document.cookie.split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const cookie = cookies[i].trim();
+                if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                    cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                    break;
+                }
+            }
+        }
+        return cookieValue;
+    }
+
+    // ================================================================
+    // 3. API 封装（自动带 CSRF Token）
+    // ================================================================
+    async function apiFetch(endpoint, method='GET', body=null) {
+        const url = `${API_BASE}${endpoint}`;
+        const headers = {
+            'Content-Type': 'application/json',
+        };
+        // 从 cookie 中获取 csrftoken，并添加到请求头
+        const csrftoken = getCookie('csrftoken');
+        if (csrftoken) {
+            headers['X-CSRFToken'] = csrftoken;
+        }
+        const options = {
+            method,
+            headers,
+            credentials: CREDENTIALS,
+        };
+        if (body) options.body = JSON.stringify(body);
+        try {
+            const resp = await fetch(url, options);
+            if (!resp.ok) {
+                const errText = await resp.text();
+                throw new Error(`HTTP ${resp.status}: ${errText}`);
+            }
+            const contentType = resp.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                return await resp.json();
+            } else {
+                return { _raw: await resp.text() };
+            }
+        } catch (e) {
+            console.error('API Error:', e);
+            throw e;
+        }
+    }
+
+    // ================================================================
+    // 4. 工具函数
+    // ================================================================
+    function formatTime(iso) {
+        if (!iso) return '-';
+        try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }); } catch { return iso; }
+    }
+    function showError(containerId, error) {
+        const el = document.getElementById(containerId);
+        if (el) {
+            el.innerHTML = `<div class="message-box error">❌ ${error.message || error}</div>`;
+        }
+    }
+    function showSuccess(containerId, msg) {
+        const el = document.getElementById(containerId);
+        if (el) {
+            el.innerHTML = `<div class="message-box success">✅ ${msg}</div>`;
+        }
+    }
+    function getVal(id) { return document.getElementById(id)?.value || ''; }
+    function setVal(id, val) { const el = document.getElementById(id); if (el) el.value = val; }
+
+    // ================================================================
+    // 5. 模态框管理
+    // ================================================================
+    function openModal(contentHtml, onClose) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `<div class="modal-box">${contentHtml}</div>`;
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                overlay.remove();
+                if (onClose) onClose();
+            }
+        });
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+    function closeModal(overlay) { if (overlay) overlay.remove(); }
+
+    // ================================================================
+    // 6. 用户认证模块
+    // ================================================================
+    let currentUser = null;
+    let isAdmin = false;
+
+    async function fetchCurrentUser() {
+        try {
+            const data = await apiFetch('/users/profile/');
+            currentUser = data;
+            isAdmin = false; // 从 data 中解析角色，暂默认
+            if (data.groups && data.groups.includes('admin')) isAdmin = true;
+            updateUserUI();
+        } catch (e) {
+            // 未登录或获取失败
+            currentUser = null;
+            isAdmin = false;
+            updateUserUI();
+        }
+    }
+
+    function updateUserUI() {
+        const area = document.getElementById('userArea');
+        if (!area) return;
+        if (currentUser) {
+            area.innerHTML = `
+                <div class="user-info" id="userInfoBtn">
+                    <div class="avatar">${currentUser.username ? currentUser.username[0].toUpperCase() : 'U'}</div>
+                    <span class="username">${currentUser.username}</span>
+                    <span style="font-size:12px;color:var(--text-muted);">▼</span>
+                </div>
+                <div class="dropdown" id="userDropdown">
+                    <div class="dropdown-item" onclick="showProfile()">👤 个人资料</div>
+                    <div class="dropdown-item danger" onclick="logout()">🚪 登出</div>
+                </div>
+            `;
+            // 点击切换下拉
+            const btn = document.getElementById('userInfoBtn');
+            const dropdown = document.getElementById('userDropdown');
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                dropdown.classList.toggle('show');
+            });
+            document.addEventListener('click', () => dropdown.classList.remove('show'));
+        } else {
+            area.innerHTML = `<button class="btn-login" onclick="showLoginModal()">登录</button>`;
+        }
+    }
+
+    // ---------- 登录/注册模态框 ----------
+    function showLoginModal() {
+        const html = `
+            <h3 id="authTitle">登录</h3>
+            <div class="tab-switch">
+                <button class="active" data-tab="login" onclick="switchAuthTab('login')">登录</button>
+                <button data-tab="register" onclick="switchAuthTab('register')">注册</button>
+            </div>
+            <div id="authForm">
+                <div class="form-row"><div class="form-group"><label>用户名</label><input id="authUsername" placeholder="username"></div></div>
+                <div class="form-row"><div class="form-group"><label>密码</label><input id="authPassword" type="password" placeholder="••••••••"></div></div>
+                <div id="registerExtra" style="display:none;">
+                    <div class="form-row"><div class="form-group"><label>邮箱</label><input id="authEmail" placeholder="email@example.com"></div></div>
+                    <div class="form-row"><div class="form-group"><label>手机号</label><input id="authPhone" placeholder="手机号"></div></div>
+                    <div class="form-row"><div class="form-group"><label>公司</label><input id="authCompany" placeholder="公司名称"></div></div>
+                </div>
+                <div id="authError" style="color:red;margin-top:8px;"></div>
+                <div class="actions">
+                    <button class="btn btn-primary" id="authSubmitBtn" onclick="submitAuth()">登录</button>
+                    <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+                </div>
+            </div>
+        `;
+        const overlay = openModal(html);
+        // 默认登录
+        window._authMode = 'login';
+        document.getElementById('registerExtra').style.display = 'none';
+        document.getElementById('authTitle').textContent = '登录';
+        document.getElementById('authSubmitBtn').textContent = '登录';
+    }
+
+    window.switchAuthTab = function(mode) {
+        window._authMode = mode;
+        const title = document.getElementById('authTitle');
+        const extra = document.getElementById('registerExtra');
+        const submitBtn = document.getElementById('authSubmitBtn');
+        const tabs = document.querySelectorAll('.tab-switch button');
+        tabs.forEach(t => t.classList.remove('active'));
+        document.querySelector(`.tab-switch button[data-tab="${mode}"]`).classList.add('active');
+        if (mode === 'login') {
+            title.textContent = '登录';
+            extra.style.display = 'none';
+            submitBtn.textContent = '登录';
+        } else {
+            title.textContent = '注册';
+            extra.style.display = 'block';
+            submitBtn.textContent = '注册';
+        }
+        document.getElementById('authError').textContent = '';
+    };
+
+    window.submitAuth = function() {
+        const username = getVal('authUsername');
+        const password = getVal('authPassword');
+        const errorEl = document.getElementById('authError');
+        if (!username || !password) {
+            errorEl.textContent = '请填写用户名和密码';
+            return;
+        }
+        const mode = window._authMode;
+        if (mode === 'login') {
+            apiFetch('/users/login/', 'POST', { username, password }).then(() => {
+                closeModal(document.querySelector('.modal-overlay'));
+                fetchCurrentUser();
+                // 刷新当前面板
+                const activeTab = document.querySelector('.nav-item.active')?.dataset.tab;
+                if (activeTab && renderMap[activeTab]) renderMap[activeTab]();
+            }).catch(e => {
+                errorEl.textContent = '登录失败：' + e.message;
+            });
+        } else {
+            const email = getVal('authEmail');
+            const phone = getVal('authPhone');
+            const company = getVal('authCompany');
+            apiFetch('/users/register/', 'POST', { username, password, email, phone, company }).then(() => {
+                closeModal(document.querySelector('.modal-overlay'));
+                alert('注册成功，请登录');
+                showLoginModal();
+            }).catch(e => {
+                errorEl.textContent = '注册失败：' + e.message;
+            });
+        }
+    };
+
+    // ---------- 登出 ----------
+    window.logout = function() {
+        if (!confirm('确认登出？')) return;
+        apiFetch('/users/logout/', 'POST').then(() => {
+            currentUser = null;
+            isAdmin = false;
+            updateUserUI();
+            // 刷新当前面板
+            const activeTab = document.querySelector('.nav-item.active')?.dataset.tab;
+            if (activeTab && renderMap[activeTab]) renderMap[activeTab]();
+        }).catch(e => {
+            // 即使后端失败也清空本地状态
+            currentUser = null;
+            isAdmin = false;
+            updateUserUI();
+        });
+    };
+
+    // ---------- 个人资料 ----------
+    window.showProfile = function() {
+        if (!currentUser) return;
+        const html = `
+            <h3>个人资料</h3>
+            <div class="form-row">
+                <div class="form-group"><label>用户名</label><input id="profUsername" value="${currentUser.username}" readonly></div>
+                <div class="form-group"><label>邮箱</label><input id="profEmail" value="${currentUser.email || ''}"></div>
+            </div>
+            <div class="form-row">
+                <div class="form-group"><label>手机号</label><input id="profPhone" value="${currentUser.phone || ''}"></div>
+                <div class="form-group"><label>公司</label><input id="profCompany" value="${currentUser.company || ''}"></div>
+            </div>
+            <div id="profError" style="color:red;margin-top:8px;"></div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="submitProfile()">保存</button>
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+            </div>
+        `;
+        openModal(html);
+    };
+
+    window.submitProfile = function() {
+        const email = getVal('profEmail');
+        const phone = getVal('profPhone');
+        const company = getVal('profCompany');
+        const errorEl = document.getElementById('profError');
+        apiFetch('/users/profile/', 'PUT', { email, phone, company }).then(data => {
+            currentUser = data;
+            closeModal(document.querySelector('.modal-overlay'));
+            updateUserUI();
+            alert('资料更新成功');
+        }).catch(e => {
+            errorEl.textContent = '更新失败：' + e.message;
+        });
+    };
+
+    // ================================================================
+    // 7. 模块渲染函数
+    // ================================================================
+
+    // ---------- 7.1 标的 ----------
+    async function renderSymbols() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-symbols">
+                <div class="panel-header">
+                    <h2>📋 标的列表</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="showSymbolForm()">+ 新增</button>
+                        <button class="btn btn-primary btn-sm" onclick="renderSymbols()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div class="form-row" style="margin-bottom:16px;">
+                    <div class="form-group" style="flex:2;">
+                        <label>搜索</label>
+                        <input type="text" id="symbolSearch" placeholder="代码或名称" oninput="renderSymbols()">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>市场</label>
+                        <select id="symbolMarket" onchange="renderSymbols()">
+                            <option value="">全部</option>
+                            <option value="A">A股</option>
+                            <option value="HK">港股</option>
+                            <option value="US">美股</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="symbolsList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadSymbols();
+    }
+
+    async function loadSymbols() {
+        const container = document.getElementById('symbolsList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const search = document.getElementById('symbolSearch')?.value || '';
+            const market = document.getElementById('symbolMarket')?.value || '';
+            let url = '/watchlists/symbols/';
+            const params = new URLSearchParams();
+            if (search) params.append('search', search);
+            if (market) params.append('market', market);
+            if (params.toString()) url += '?' + params.toString();
+            const data = await apiFetch(url);
+            let symbols = Array.isArray(data) ? data : (data.results || []);
+            if (!symbols.length) {
+                container.innerHTML = '<div class="empty">暂无标的</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>代码</th><th>名称</th><th>市场</th><th>交易所</th><th style="width:160px;">操作</th></tr></thead><tbody>`;
+            symbols.forEach(s => {
+                html += `<tr>
+                    <td><strong>${s.code}</strong></td>
+                    <td>${s.name}</td>
+                    <td><span class="badge">${s.market || '-'}</span></td>
+                    <td>${s.exchange || '-'}</td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="editSymbol(${s.id})">编辑</button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteSymbol(${s.id})">删除</button>
+                    </td>
+                </tr>`;
+            });
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('symbolsList', e);
+        }
+    }
+
+    window.showSymbolForm = function(data) {
+        const isEdit = !!data;
+        const title = isEdit ? '编辑标的' : '新增标的';
+        const html = `
+            <h3>${title}</h3>
+            <div class="form-row">
+                <div class="form-group"><label>代码 *</label><input id="symCode" value="${isEdit ? data.code : ''}" ${isEdit ? 'readonly' : ''}></div>
+                <div class="form-group"><label>名称 *</label><input id="symName" value="${isEdit ? data.name : ''}"></div>
+                <div class="form-group"><label>市场 *</label>
+                    <select id="symMarket">
+                        <option value="A" ${isEdit && data.market==='A'?'selected':''}>A股</option>
+                        <option value="HK" ${isEdit && data.market==='HK'?'selected':''}>港股</option>
+                        <option value="US" ${isEdit && data.market==='US'?'selected':''}>美股</option>
+                    </select>
+                </div>
+                <div class="form-group"><label>交易所</label><input id="symExchange" value="${isEdit ? data.exchange || '' : ''}"></div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="submitSymbol(${isEdit ? data.id : null})">保存</button>
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+            </div>
+        `;
+        openModal(html);
+    };
+
+    window.submitSymbol = function(id) {
+        const code = getVal('symCode');
+        const name = getVal('symName');
+        const market = getVal('symMarket');
+        const exchange = getVal('symExchange');
+        if (!code || !name || !market) {
+            alert('请填写完整信息');
+            return;
+        }
+        const body = { code, name, market, exchange };
+        const method = id ? 'PUT' : 'POST';
+        const endpoint = id ? `/watchlists/symbols/${id}/` : '/watchlists/symbols/';
+        apiFetch(endpoint, method, body).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            renderSymbols();
+        }).catch(e => alert('保存失败: '+e.message));
+    };
+
+    window.editSymbol = function(id) {
+        apiFetch(`/watchlists/symbols/${id}/`).then(data => {
+            showSymbolForm(data);
+        }).catch(e => alert('获取失败: '+e.message));
+    };
+
+    window.deleteSymbol = function(id) {
+        if (!confirm('确认删除该标的？')) return;
+        apiFetch(`/watchlists/symbols/${id}/`, 'DELETE').then(() => {
+            renderSymbols();
+        }).catch(e => alert('删除失败: '+e.message));
+    };
+
+    // ---------- 7.2 分组 ----------
+    async function renderGroups() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-groups">
+                <div class="panel-header">
+                    <h2>📂 分组管理</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="showGroupForm()">+ 新增分组</button>
+                        <button class="btn btn-primary btn-sm" onclick="renderGroups()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div id="groupsList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadGroups();
+    }
+
+    async function loadGroups() {
+        const container = document.getElementById('groupsList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const data = await apiFetch('/watchlists/groups/');
+            let groups = Array.isArray(data) ? data : (data.results || []);
+            if (!groups.length) {
+                container.innerHTML = '<div class="empty">暂无分组</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>分组名称</th><th>包含标的数</th><th>标的列表</th><th style="width:200px;">操作</th></tr></thead><tbody>`;
+            for (const g of groups) {
+                const symbols = g.symbols || [];
+                const count = symbols.length;
+                const list = symbols.map(s => `${s.code}(${s.name})`).join('、') || '（空）';
+                html += `<tr>
+                    <td><strong>${g.name}</strong></td>
+                    <td>${count}</td>
+                    <td style="font-size:13px;color:var(--text-secondary);">${list}</td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="editGroup(${g.id})">编辑</button>
+                        <button class="btn btn-primary btn-sm" onclick="manageGroupSymbols(${g.id})">管理标的</button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteGroup(${g.id})">删除</button>
+                    </td>
+                </tr>`;
+            }
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('groupsList', e);
+        }
+    }
+
+    window.showGroupForm = function(data) {
+        const isEdit = !!data;
+        const title = isEdit ? '编辑分组' : '新增分组';
+        const html = `
+            <h3>${title}</h3>
+            <div class="form-row">
+                <div class="form-group"><label>分组名称 *</label><input id="groupName" value="${isEdit ? data.name : ''}"></div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="submitGroup(${isEdit ? data.id : null})">保存</button>
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+            </div>
+        `;
+        openModal(html);
+    };
+
+    window.submitGroup = function(id) {
+        const name = getVal('groupName');
+        if (!name) { alert('请输入分组名称'); return; }
+        const body = { name };
+        const method = id ? 'PUT' : 'POST';
+        const endpoint = id ? `/watchlists/groups/${id}/` : '/watchlists/groups/';
+        apiFetch(endpoint, method, body).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            renderGroups();
+        }).catch(e => alert('保存失败: '+e.message));
+    };
+
+    window.editGroup = function(id) {
+        apiFetch(`/watchlists/groups/${id}/`).then(data => {
+            showGroupForm(data);
+        }).catch(e => alert('获取失败: '+e.message));
+    };
+
+    window.deleteGroup = function(id) {
+        if (!confirm('确认删除该分组？')) return;
+        apiFetch(`/watchlists/groups/${id}/`, 'DELETE').then(() => {
+            renderGroups();
+        }).catch(e => alert('删除失败: '+e.message));
+    };
+
+    window.manageGroupSymbols = function(groupId) {
+        apiFetch(`/watchlists/groups/${groupId}/`).then(group => {
+            const symbols = group.symbols || [];
+            const symbolIds = symbols.map(s => s.id);
+            apiFetch('/watchlists/symbols/').then(allData => {
+                let allSymbols = Array.isArray(allData) ? allData : (allData.results || []);
+                const html = `
+                    <h3>管理分组 "${group.name}" 的标的</h3>
+                    <div style="margin:12px 0;">
+                        <label>当前标的：</label>
+                        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;">
+                            ${symbols.length ? symbols.map(s => `<span class="badge primary">${s.code} (${s.name}) <button class="btn btn-danger btn-sm" onclick="removeSymbolFromGroup(${groupId}, ${s.id})" style="margin-left:4px;">✕</button></span>`).join('') : '（空）'}
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>添加标的</label>
+                            <select id="addSymbolSelect" style="width:100%;">
+                                <option value="">-- 选择标的 --</option>
+                                ${allSymbols.filter(s => !symbolIds.includes(s.id)).map(s => `<option value="${s.id}">${s.code} (${s.name})</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group" style="flex:0;">
+                            <button class="btn btn-success" onclick="addSymbolToGroup(${groupId})">添加</button>
+                        </div>
+                    </div>
+                    <div class="actions">
+                        <button class="btn" onclick="this.closest('.modal-overlay').remove()">关闭</button>
+                    </div>
+                `;
+                openModal(html);
+            }).catch(e => alert('加载标的失败: '+e.message));
+        }).catch(e => alert('获取分组失败: '+e.message));
+    };
+
+    window.addSymbolToGroup = function(groupId) {
+        const select = document.getElementById('addSymbolSelect');
+        const symbolId = parseInt(select.value);
+        if (!symbolId) { alert('请选择标的'); return; }
+        apiFetch(`/watchlists/groups/${groupId}/add-symbols/`, 'POST', { symbol_ids: [symbolId] }).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            manageGroupSymbols(groupId);
+        }).catch(e => alert('添加失败: '+e.message));
+    };
+
+    window.removeSymbolFromGroup = function(groupId, symbolId) {
+        if (!confirm('确认移除该标的？')) return;
+        apiFetch(`/watchlists/groups/${groupId}/remove-symbols/`, 'POST', { symbol_ids: [symbolId] }).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            manageGroupSymbols(groupId);
+        }).catch(e => alert('移除失败: '+e.message));
+    };
+
+    // ---------- 7.3 Case ----------
+    async function renderCases() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-cases">
+                <div class="panel-header">
+                    <h2>🧩 Case 管理</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="showCaseForm()">+ 新增 Case</button>
+                        <button class="btn btn-primary btn-sm" onclick="renderCases()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div id="casesList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadCases();
+    }
+
+    async function loadCases() {
+        const container = document.getElementById('casesList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const data = await apiFetch('/cases/');
+            let cases = Array.isArray(data) ? data : (data.results || []);
+            if (!cases.length) {
+                container.innerHTML = '<div class="empty">暂无 Case</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>名称</th><th>类型</th><th>版本</th><th>状态</th><th style="width:220px;">操作</th></tr></thead><tbody>`;
+            cases.forEach(c => {
+                html += `<tr>
+                    <td><strong>${c.name}</strong></td>
+                    <td><span class="badge">${c.node_type}</span></td>
+                    <td>v${c.version}</td>
+                    <td><span class="badge ${c.status==='published'?'success':'warning'}">${c.status}</span></td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="editCase(${c.id})">编辑</button>
+                        ${c.status !== 'published' ? `<button class="btn btn-success btn-sm" onclick="publishCase(${c.id})">发布</button>` : ''}
+                        <button class="btn btn-danger btn-sm" onclick="deleteCase(${c.id})">删除</button>
+                    </td>
+                </tr>`;
+            });
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('casesList', e);
+        }
+    }
+
+    window.showCaseForm = function(data) {
+        const isEdit = !!data;
+        const title = isEdit ? '编辑 Case' : '新增 Case';
+        const html = `
+            <h3>${title}</h3>
+            <div class="form-row">
+                <div class="form-group"><label>名称 *</label><input id="caseName" value="${isEdit ? data.name : ''}"></div>
+                <div class="form-group"><label>节点类型 *</label>
+                    <select id="caseNodeType">
+                        <option value="signal" ${isEdit && data.node_type==='signal'?'selected':''}>signal</option>
+                        <option value="filter" ${isEdit && data.node_type==='filter'?'selected':''}>filter</option>
+                        <option value="verdict" ${isEdit && data.node_type==='verdict'?'selected':''}>verdict</option>
+                        <option value="executor" ${isEdit && data.node_type==='executor'?'selected':''}>executor</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group"><label>参数 (JSON)</label><textarea id="caseParams" rows="4">${isEdit ? JSON.stringify(data.params, null, 2) : '{"trigger":{"event_type":"SUITE_INIT"}}'}</textarea></div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="submitCase(${isEdit ? data.id : null})">保存</button>
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+            </div>
+        `;
+        openModal(html);
+    };
+
+    window.submitCase = function(id) {
+        const name = getVal('caseName');
+        const node_type = getVal('caseNodeType');
+        const params = getVal('caseParams');
+        if (!name || !node_type) { alert('请填写完整信息'); return; }
+        let parsedParams;
+        try { parsedParams = JSON.parse(params); } catch(e) { alert('参数格式错误，请填写合法的JSON'); return; }
+        const body = { name, node_type, params: parsedParams };
+        const method = id ? 'PUT' : 'POST';
+        const endpoint = id ? `/cases/${id}/` : '/cases/';
+        apiFetch(endpoint, method, body).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            renderCases();
+        }).catch(e => alert('保存失败: '+e.message));
+    };
+
+    window.editCase = function(id) {
+        apiFetch(`/cases/${id}/`).then(data => {
+            showCaseForm(data);
+        }).catch(e => alert('获取失败: '+e.message));
+    };
+
+    window.publishCase = function(id) {
+        if (!confirm('确认发布该 Case？')) return;
+        apiFetch(`/cases/${id}/publish/`, 'POST').then(() => {
+            renderCases();
+        }).catch(e => alert('发布失败: '+e.message));
+    };
+
+    window.deleteCase = function(id) {
+        if (!confirm('确认删除该 Case？')) return;
+        apiFetch(`/cases/${id}/`, 'DELETE').then(() => {
+            renderCases();
+        }).catch(e => alert('删除失败: '+e.message));
+    };
+
+    // ---------- 7.4 Suite ----------
+    async function renderSuites() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-suites">
+                <div class="panel-header">
+                    <h2>🔗 Suite 管理</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="showSuiteForm()">+ 新增 Suite</button>
+                        <button class="btn btn-primary btn-sm" onclick="renderSuites()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div id="suitesList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadSuites();
+    }
+
+    async function loadSuites() {
+        const container = document.getElementById('suitesList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const data = await apiFetch('/suites/');
+            let suites = Array.isArray(data) ? data : (data.results || []);
+            if (!suites.length) {
+                container.innerHTML = '<div class="empty">暂无 Suite</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>名称</th><th>聚合方式</th><th>版本</th><th>状态</th><th style="width:240px;">操作</th></tr></thead><tbody>`;
+            for (const s of suites) {
+                html += `<tr>
+                    <td><strong>${s.name}</strong></td>
+                    <td><span class="badge">${s.aggregate_method}</span></td>
+                    <td>v${s.version}</td>
+                    <td><span class="badge ${s.status==='published'?'success':'warning'}">${s.status}</span></td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="editSuite(${s.id})">编辑</button>
+                        <button class="btn btn-primary btn-sm" onclick="viewSuiteTopology(${s.id})">拓扑</button>
+                        ${s.status !== 'published' ? `<button class="btn btn-success btn-sm" onclick="publishSuite(${s.id})">发布</button>` : ''}
+                        <button class="btn btn-danger btn-sm" onclick="deleteSuite(${s.id})">删除</button>
+                    </td>
+                </tr>`;
+            }
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('suitesList', e);
+        }
+    }
+
+    window.showSuiteForm = function(data) {
+        const isEdit = !!data;
+        const title = isEdit ? '编辑 Suite' : '新增 Suite';
+        const html = `
+            <h3>${title}</h3>
+            <div class="form-row">
+                <div class="form-group"><label>名称 *</label><input id="suiteName" value="${isEdit ? data.name : ''}"></div>
+                <div class="form-group"><label>聚合方式</label>
+                    <select id="suiteAggregate">
+                        <option value="weighted_sum" ${isEdit && data.aggregate_method==='weighted_sum'?'selected':''}>加权求和</option>
+                        <option value="vote" ${isEdit && data.aggregate_method==='vote'?'selected':''}>投票</option>
+                        <option value="and" ${isEdit && data.aggregate_method==='and'?'selected':''}>逻辑与</option>
+                        <option value="or" ${isEdit && data.aggregate_method==='or'?'selected':''}>逻辑或</option>
+                    </select>
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="submitSuite(${isEdit ? data.id : null})">保存</button>
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+            </div>
+        `;
+        openModal(html);
+    };
+
+    window.submitSuite = function(id) {
+        const name = getVal('suiteName');
+        const aggregate_method = getVal('suiteAggregate');
+        if (!name) { alert('请输入名称'); return; }
+        const body = { name, aggregate_method };
+        const method = id ? 'PUT' : 'POST';
+        const endpoint = id ? `/suites/${id}/` : '/suites/';
+        apiFetch(endpoint, method, body).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            renderSuites();
+        }).catch(e => alert('保存失败: '+e.message));
+    };
+
+    window.editSuite = function(id) {
+        apiFetch(`/suites/${id}/`).then(data => {
+            showSuiteForm(data);
+        }).catch(e => alert('获取失败: '+e.message));
+    };
+
+    window.publishSuite = function(id) {
+        if (!confirm('确认发布该 Suite？')) return;
+        apiFetch(`/suites/${id}/publish/`, 'POST').then(() => {
+            renderSuites();
+        }).catch(e => alert('发布失败: '+e.message));
+    };
+
+    window.deleteSuite = function(id) {
+        if (!confirm('确认删除该 Suite？')) return;
+        apiFetch(`/suites/${id}/`, 'DELETE').then(() => {
+            renderSuites();
+        }).catch(e => alert('删除失败: '+e.message));
+    };
+
+    window.viewSuiteTopology = function(id) {
+        apiFetch(`/suites/${id}/topology/`).then(data => {
+            const html = `
+                <h3>Suite #${id} 拓扑</h3>
+                <div class="json-view">${JSON.stringify(data, null, 2)}</div>
+                <div class="actions"><button class="btn" onclick="this.closest('.modal-overlay').remove()">关闭</button></div>
+            `;
+            openModal(html);
+        }).catch(e => alert('获取拓扑失败: '+e.message));
+    };
+
+    // ---------- 7.5 Plan ----------
+    async function renderPlans() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-plans">
+                <div class="panel-header">
+                    <h2>📅 Plan 管理</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="showPlanForm()">+ 新增 Plan</button>
+                        <button class="btn btn-primary btn-sm" onclick="renderPlans()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div id="plansList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadPlans();
+    }
+
+    async function loadPlans() {
+        const container = document.getElementById('plansList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const data = await apiFetch('/plans/');
+            let plans = Array.isArray(data) ? data : (data.results || []);
+            if (!plans.length) {
+                container.innerHTML = '<div class="empty">暂无 Plan</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>名称</th><th>触发类型</th><th>根Suite</th><th>状态</th><th style="width:240px;">操作</th></tr></thead><tbody>`;
+            for (const p of plans) {
+                html += `<tr>
+                    <td><strong>${p.name}</strong></td>
+                    <td><span class="badge">${p.trigger_type}</span></td>
+                    <td>${p.root_suite}</td>
+                    <td><span class="badge ${p.status==='published'?'success':'warning'}">${p.status}</span></td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="editPlan(${p.id})">编辑</button>
+                        ${p.status !== 'published' ? `<button class="btn btn-success btn-sm" onclick="publishPlan(${p.id})">发布</button>` : ''}
+                        <button class="btn btn-danger btn-sm" onclick="deletePlan(${p.id})">删除</button>
+                    </td>
+                </tr>`;
+            }
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('plansList', e);
+        }
+    }
+
+    window.showPlanForm = function(data) {
+        const isEdit = !!data;
+        const title = isEdit ? '编辑 Plan' : '新增 Plan';
+        const html = `
+            <h3>${title}</h3>
+            <div class="form-row">
+                <div class="form-group"><label>名称 *</label><input id="planName" value="${isEdit ? data.name : ''}"></div>
+                <div class="form-group"><label>触发类型</label>
+                    <select id="planTrigger">
+                        <option value="time" ${isEdit && data.trigger_type==='time'?'selected':''}>时间</option>
+                        <option value="event" ${isEdit && data.trigger_type==='event'?'selected':''}>事件</option>
+                        <option value="manual" ${isEdit && data.trigger_type==='manual'?'selected':''}>手动</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group"><label>Cron 表达式</label><input id="planCron" value="${isEdit ? data.cron_expr || '' : ''}"></div>
+                <div class="form-group"><label>根 Suite ID *</label><input type="number" id="planRootSuite" value="${isEdit ? data.root_suite : ''}"></div>
+            </div>
+            <div class="form-row">
+                <div class="form-group"><label>标的范围 (JSON)</label><textarea id="planScope" rows="3">${isEdit ? JSON.stringify(data.symbol_scope, null, 2) : '{"type":"all"}'}</textarea></div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="submitPlan(${isEdit ? data.id : null})">保存</button>
+                <button class="btn" onclick="this.closest('.modal-overlay').remove()">取消</button>
+            </div>
+        `;
+        openModal(html);
+    };
+
+    window.submitPlan = function(id) {
+        const name = getVal('planName');
+        const trigger_type = getVal('planTrigger');
+        const cron_expr = getVal('planCron');
+        const root_suite = parseInt(getVal('planRootSuite'));
+        const scope = getVal('planScope');
+        if (!name || !root_suite) { alert('请填写完整信息'); return; }
+        let symbol_scope;
+        try { symbol_scope = JSON.parse(scope); } catch(e) { alert('标的范围格式错误'); return; }
+        const body = { name, trigger_type, cron_expr, root_suite, symbol_scope };
+        const method = id ? 'PUT' : 'POST';
+        const endpoint = id ? `/plans/${id}/` : '/plans/';
+        apiFetch(endpoint, method, body).then(() => {
+            closeModal(document.querySelector('.modal-overlay'));
+            renderPlans();
+        }).catch(e => alert('保存失败: '+e.message));
+    };
+
+    window.editPlan = function(id) {
+        apiFetch(`/plans/${id}/`).then(data => {
+            showPlanForm(data);
+        }).catch(e => alert('获取失败: '+e.message));
+    };
+
+    window.publishPlan = function(id) {
+        if (!confirm('确认发布该 Plan？')) return;
+        apiFetch(`/plans/${id}/publish/`, 'POST').then(() => {
+            renderPlans();
+        }).catch(e => alert('发布失败: '+e.message));
+    };
+
+    window.deletePlan = function(id) {
+        if (!confirm('确认删除该 Plan？')) return;
+        apiFetch(`/plans/${id}/`, 'DELETE').then(() => {
+            renderPlans();
+        }).catch(e => alert('删除失败: '+e.message));
+    };
+
+    // ---------- 7.6 执行日志 ----------
+    async function renderLogs() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-logs">
+                <div class="panel-header">
+                    <h2>📈 执行日志</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="renderLogs()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div id="logsList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadLogs();
+    }
+
+    async function loadLogs() {
+        const container = document.getElementById('logsList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const data = await apiFetch('/execution/logs/?limit=50');
+            let logs = Array.isArray(data) ? data : (data.results || []);
+            if (!logs.length) {
+                container.innerHTML = '<div class="empty">暂无执行记录</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>时间</th><th>标的</th><th>方向</th><th>状态</th><th>Plan</th><th style="width:100px;">操作</th></tr></thead><tbody>`;
+            logs.forEach(l => {
+                const dirMap = {'-1':'卖出/做空','0':'观望','1':'买入/做多'};
+                const dir = dirMap[l.final_direction] || l.final_direction;
+                const statusMap = {'success':'成功','failed':'失败','blocked':'风控拦截'};
+                const status = statusMap[l.status] || l.status;
+                const badgeClass = l.status==='success'?'success':(l.status==='blocked'?'warning':'danger');
+                html += `<tr>
+                    <td>${formatTime(l.trigger_time)}</td>
+                    <td>${l.symbol}</td>
+                    <td><span class="badge">${dir}</span></td>
+                    <td><span class="badge ${badgeClass}">${status}</span></td>
+                    <td>${l.plan || '-'}</td>
+                    <td><button class="btn btn-primary btn-sm" onclick="viewLogDetail(${l.id})">详情</button></td>
+                </tr>`;
+            });
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('logsList', e);
+        }
+    }
+
+    window.viewLogDetail = function(id) {
+        apiFetch(`/execution/logs/${id}/`).then(data => {
+            const html = `
+                <h3>执行日志 #${id}</h3>
+                <div class="json-view">${JSON.stringify(data, null, 2)}</div>
+                <div class="actions"><button class="btn" onclick="this.closest('.modal-overlay').remove()">关闭</button></div>
+            `;
+            openModal(html);
+        }).catch(e => alert('获取详情失败: '+e.message));
+    };
+
+    // ---------- 7.7 触发执行 ----------
+    async function renderTrigger() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-trigger">
+                <div class="panel-header">
+                    <h2>⚡ 触发执行</h2>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Plan ID *</label><input type="number" id="triggerPlanId" placeholder="例如 1"></div>
+                    <div class="form-group"><label>标的代码 *</label><input type="text" id="triggerSymbol" placeholder="例如 000001.SZ"></div>
+                    <div class="form-group" style="flex:0;"><button class="btn btn-success" onclick="doTrigger()">🚀 触发</button></div>
+                </div>
+                <div id="triggerResult"></div>
+                <hr style="margin:24px 0; border:none; border-top:1px solid var(--border);">
+                <h3 style="font-size:15px; font-weight:600; margin-bottom:12px;">🔍 查询运行状态</h3>
+                <div class="form-row">
+                    <div class="form-group" style="flex:0 0 200px;"><label>Run ID</label><input type="number" id="runIdQuery" placeholder="例如 123"></div>
+                    <div class="form-group" style="flex:0;"><button class="btn btn-primary" onclick="queryRunStatus()">查询</button></div>
+                </div>
+                <div id="runStatusResult"></div>
+            </div>
+        `;
+    }
+
+    window.doTrigger = function() {
+        const plan_id = parseInt(document.getElementById('triggerPlanId').value);
+        const symbol = document.getElementById('triggerSymbol').value;
+        const resultDiv = document.getElementById('triggerResult');
+        if (!plan_id || !symbol) {
+            resultDiv.innerHTML = `<div class="message-box error">⚠️ 请填写完整信息</div>`;
+            return;
+        }
+        resultDiv.innerHTML = '<div class="loading">触发中...</div>';
+        apiFetch('/execution/trigger/', 'POST', { plan_id, symbol }).then(data => {
+            resultDiv.innerHTML = `<div class="message-box success">✅ 触发成功！<div class="json-view">${JSON.stringify(data, null, 2)}</div></div>`;
+        }).catch(e => {
+            resultDiv.innerHTML = `<div class="message-box error">❌ 触发失败：${e.message}</div>`;
+        });
+    };
+
+    window.queryRunStatus = function() {
+        const runId = document.getElementById('runIdQuery').value;
+        const resultDiv = document.getElementById('runStatusResult');
+        if (!runId) {
+            resultDiv.innerHTML = `<div class="message-box error">⚠️ 请输入 Run ID</div>`;
+            return;
+        }
+        resultDiv.innerHTML = '<div class="loading">查询中...</div>';
+        apiFetch(`/execution/run/${runId}/`).then(data => {
+            resultDiv.innerHTML = `<div style="background:var(--bg);padding:12px;border-radius:var(--radius-sm);border:1px solid var(--border);"><div class="json-view">${JSON.stringify(data, null, 2)}</div></div>`;
+        }).catch(e => {
+            resultDiv.innerHTML = `<div class="message-box error">❌ 查询失败：${e.message}</div>`;
+        });
+    };
+
+    // ---------- 7.8 事件类型 ----------
+    async function renderEventTypes() {
+        const container = document.getElementById('panelContainer');
+        container.innerHTML = `
+            <div class="panel active" id="panel-event-types">
+                <div class="panel-header">
+                    <h2>📌 事件类型注册表</h2>
+                    <div class="actions">
+                        <button class="btn btn-primary btn-sm" onclick="renderEventTypes()">🔄 刷新</button>
+                    </div>
+                </div>
+                <div id="eventTypesList"><div class="loading">加载中...</div></div>
+            </div>
+        `;
+        await loadEventTypes();
+    }
+
+    async function loadEventTypes() {
+        const container = document.getElementById('eventTypesList');
+        if (!container) return;
+        container.innerHTML = '<div class="loading">加载中...</div>';
+        try {
+            const data = await apiFetch('/execution/event-types/list-all/?include_system=true');
+            let types = Array.isArray(data) ? data : (data.results || data);
+            if (!types.length) {
+                container.innerHTML = '<div class="empty">暂无事件类型</div>';
+                return;
+            }
+            let html = `<div class="table-wrap"><table>
+                <thead><tr><th>事件类型</th><th>作用域</th><th>描述</th></tr></thead><tbody>`;
+            types.forEach(t => {
+                const scopeMap = { 'system':'系统','plugin':'插件','user':'用户' };
+                const scope = scopeMap[t.scope] || t.scope || '-';
+                html += `<tr>
+                    <td><code style="background:var(--bg);padding:2px 8px;border-radius:4px;">${t.name}</code></td>
+                    <td><span class="badge">${scope}</span></td>
+                    <td>${t.description || '-'}</td>
+                </tr>`;
+            });
+            html += `</tbody></table></div>`;
+            container.innerHTML = html;
+        } catch (e) {
+            showError('eventTypesList', e);
+        }
+    }
+
+    // ================================================================
+    // 8. 导航切换 & 侧边栏折叠
+    // ================================================================
+    const sider = document.getElementById('sider');
+    const toggleBtn = document.getElementById('toggleSiderBtn');
+    const navItems = document.querySelectorAll('.nav-item');
+    const pageTitle = document.getElementById('pageTitle');
+    const titleMap = {
+        symbols: '标的管理',
+        groups: '分组管理',
+        cases: 'Case 管理',
+        suites: 'Suite 管理',
+        plans: 'Plan 管理',
+        logs: '执行日志',
+        trigger: '触发执行',
+        'event-types': '事件类型'
+    };
+    const renderMap = {
+        symbols: renderSymbols,
+        groups: renderGroups,
+        cases: renderCases,
+        suites: renderSuites,
+        plans: renderPlans,
+        logs: renderLogs,
+        trigger: renderTrigger,
+        'event-types': renderEventTypes
+    };
+
+    function switchTab(tab) {
+        navItems.forEach(n => n.classList.remove('active'));
+        document.querySelector(`.nav-item[data-tab="${tab}"]`)?.classList.add('active');
+        pageTitle.textContent = titleMap[tab] || tab;
+        if (renderMap[tab]) renderMap[tab]();
+    }
+
+    navItems.forEach(item => {
+        item.addEventListener('click', function() {
+            const tab = this.dataset.tab;
+            switchTab(tab);
+        });
+    });
+
+    toggleBtn.addEventListener('click', function() {
+        sider.classList.toggle('collapsed');
+        localStorage.setItem('siderCollapsed', sider.classList.contains('collapsed') ? 'true' : 'false');
+    });
+
+    if (localStorage.getItem('siderCollapsed') === 'true') {
+        sider.classList.add('collapsed');
+    }
+
+    // ================================================================
+    // 9. 初始化
+    // ================================================================
+    document.addEventListener('DOMContentLoaded', async function() {
+        // 先获取用户信息
+        await fetchCurrentUser();
+        // 默认显示标的
+        switchTab('symbols');
+    });
+</script>
+</body>
+</html>
