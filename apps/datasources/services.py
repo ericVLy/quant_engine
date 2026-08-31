@@ -1,4 +1,5 @@
 import logging
+import json
 import akshare as ak
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -27,12 +28,21 @@ def fetch_kline_from_akshare(symbol, start_date, end_date, adjust='qfq'):
     返回 pandas DataFrame，字段包含: date, open, high, low, close, volume, amount, ...
     """
     # 确保日期为 date 对象
+    logger.info(f"Fetching {symbol.market} K线数据 for {symbol.code} from {start_date} to {end_date}")
     if isinstance(start_date, str):
         start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
     if isinstance(end_date, str):
         end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
 
     if symbol.market == 'A':
+        logger.info(f"Fetching A股 K线数据 for {symbol.code} from {start_date} to {end_date} with adjust={adjust}")
+        kwargs = {
+            'symbol': symbol.code,
+            'period': 'daily',
+            'start_date': start_date.strftime('%Y%m%d'),
+            'end_date': end_date.strftime('%Y%m%d'),
+            'adjust': adjust}
+        logger.info(f"Calling ak.stock_zh_a_hist with args: {json.dumps(kwargs, indent=4)}")
         df = ak.stock_zh_a_hist(
             symbol=symbol.code,
             period='daily',
@@ -41,6 +51,7 @@ def fetch_kline_from_akshare(symbol, start_date, end_date, adjust='qfq'):
             adjust=adjust
         )
         if df.empty:
+            logger.warning(f"No data returned for {symbol.code} from AkShare")
             return df
         df.rename(columns={
             '日期': 'date',
