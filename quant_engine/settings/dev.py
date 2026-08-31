@@ -65,6 +65,11 @@ LOGGING = {
             "level": "INFO",
             "propagate": True,
         },
+        "apps.datasources.services": {
+            "handlers": ["file", "console"],
+            "level": "INFO",
+            "propagate": True,
+        },
         "apps.watchlists.tests": {
             "handlers": ["file", "console"],
             "level": "INFO",
