@@ -169,6 +169,7 @@ class KLineSyncLogAPITest(APITestCase):
 
 class KLineAPITest(APITestCase):
     """测试 K 线查询和同步接口"""
+    databases = ['default', 'kline']
 
     def setUp(self):
         logger.info("=== KLineAPITest 开始 ===")
@@ -294,6 +295,7 @@ class KLineAPITest(APITestCase):
 
 class ServicesTest(TestCase):
     """测试数据服务函数"""
+    databases = ['default', 'kline']
 
     def setUp(self):
         logger.info("=== ServicesTest 开始 ===")

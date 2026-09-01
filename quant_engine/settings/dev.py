@@ -5,11 +5,11 @@ from .base import *
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-7ya^@-)^rrgxn!!)r(r)#^eo^zu3d_#r$0ibpyv@$_a$nmvgdp'
 
 # SECURITY WARNING: define the correct hosts in production!
 ALLOWED_HOSTS = ["*"]
+
+
 
 # EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
@@ -17,7 +17,19 @@ ALLOWED_HOSTS = ["*"]
 try:
     from .local import *
 except ImportError:
-    pass
+    # SECURITY WARNING: keep the secret key used in production secret!
+    SECRET_KEY = 'django-insecure-7ya^@-)^rrgxn!!)r(r)#^eo^zu3d_#r$0ibpyv@$_a$nmvgdp'
+    # Database (development default: SQLite for both main app DB and K-line DB)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        },
+        KLINE_DB_ALIAS: {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'kline.sqlite3',
+        },
+    }
 
 
 __base_path__ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
