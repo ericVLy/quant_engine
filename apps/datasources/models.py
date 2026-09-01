@@ -1,4 +1,5 @@
-﻿from django.db import models
+﻿import re
+from django.db import models, connection
 from apps.watchlists.models import Symbol
 
 # ============================================================
@@ -122,3 +123,80 @@ class KLineSyncLog(models.Model):
 
     def __str__(self):
         return f"{self.symbol.code} {self.sync_type} {self.start_date}~{self.end_date}"
+
+
+def normalize_symbol_code_for_table(symbol_code):
+    """将交易代码转换为数据库表名中的安全片段。"""
+    cleaned = re.sub(r'[^A-Za-z0-9]+', '_', str(symbol_code)).strip('_')
+    return cleaned.lower() if cleaned else 'unknown'
+
+
+def get_kline_table_name(symbol):
+    """按市场 + 股票编码生成分表名，示例：kline_a_000001。"""
+    market_key = {
+        'A': 'a',
+        'HK': 'hk',
+        'US': 'us',
+    }.get(str(symbol.market).upper(), str(symbol.market).lower())
+    return f'kline_{market_key}_{normalize_symbol_code_for_table(symbol.code)}'
+
+
+def ensure_kline_table(symbol):
+    """让指定 symbol 的动态分表存在；通过原生 SQL 创建，兼容 SQLite。"""
+    table_name = get_kline_table_name(symbol)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=%s",
+            [table_name],
+        )
+        exists = cursor.fetchone() is not None
+
+    if exists:
+        return table_name
+
+    market = str(symbol.market).upper()
+    field_sql = [
+        'id INTEGER PRIMARY KEY AUTOINCREMENT',
+        'symbol_id BIGINT NOT NULL',
+        'date DATE NOT NULL',
+        'open DECIMAL(12,4) NOT NULL',
+        'high DECIMAL(12,4) NOT NULL',
+        'low DECIMAL(12,4) NOT NULL',
+        'close DECIMAL(12,4) NOT NULL',
+        'volume BIGINT NOT NULL',
+        'amount DECIMAL(20,2)',
+        'created_at DATETIME NOT NULL',
+        'updated_at DATETIME NOT NULL',
+    ]
+
+    if market == 'A':
+        field_sql += [
+            'adj_factor DECIMAL(12,6) NOT NULL DEFAULT 1.0',
+            'limit_up DECIMAL(12,4)',
+            'limit_down DECIMAL(12,4)',
+            'turnover_rate DECIMAL(8,4)',
+        ]
+    elif market == 'HK':
+        field_sql += [
+            'prev_close DECIMAL(12,4)',
+            'currency VARCHAR(10) NOT NULL DEFAULT "HKD"',
+        ]
+    elif market == 'US':
+        field_sql += [
+            'split_factor DECIMAL(12,6) NOT NULL DEFAULT 1.0',
+            'pre_market_price DECIMAL(12,4)',
+            'after_hours_price DECIMAL(12,4)',
+        ]
+
+    field_sql.append('UNIQUE(symbol_id, date)')
+    field_sql.append('FOREIGN KEY(symbol_id) REFERENCES watchlists_symbol(id)')
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(field_sql)})")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol_date ON {table_name}(symbol_id, date)")
+    return table_name
+
+
+def get_runtime_kline_model(symbol):
+    """兼容调用入口：创建并返回分表名对应的表元数据。"""
+    return ensure_kline_table(symbol)

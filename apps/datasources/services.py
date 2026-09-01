@@ -3,15 +3,18 @@ import json
 import akshare as ak
 from datetime import datetime, timedelta
 from decimal import Decimal
-from django.db import transaction
+from django.db import transaction, connection
 from apps.watchlists.models import Symbol
-from .models import AStockKLine, HKStockKLine, USStockKLine, KLineSyncLog
+from .models import (
+    AStockKLine, HKStockKLine, USStockKLine, KLineSyncLog,
+    get_kline_table_name, ensure_kline_table
+)
 
 logger = logging.getLogger(__name__)
 
 
 def get_kline_model(symbol):
-    """根据标的的市场返回对应的 K 线模型类"""
+    """兼容接口：根据标的市场返回基类模型，实际数据以动态分表运行时模型存储。"""
     if symbol.market == 'A':
         return AStockKLine
     elif symbol.market == 'HK':
@@ -20,6 +23,104 @@ def get_kline_model(symbol):
         return USStockKLine
     else:
         raise ValueError(f"不支持的市场类型: {symbol.market}")
+
+
+def get_kline_table_name_for_symbol(symbol):
+    return get_kline_table_name(symbol)
+
+
+def query_kline_table(symbol, start_date, end_date):
+    """按 symbol + 日期范围查询对应分表中的 K 线记录。"""
+    table_name = ensure_kline_table(symbol)
+    if symbol.market == 'A':
+        select_sql = "SELECT date, open, high, low, close, volume, amount, adj_factor, turnover_rate, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
+    elif symbol.market == 'HK':
+        select_sql = "SELECT date, open, high, low, close, volume, amount, prev_close, currency, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
+    elif symbol.market == 'US':
+        select_sql = "SELECT date, open, high, low, close, volume, amount, split_factor, pre_market_price, after_hours_price, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
+    else:
+        raise ValueError(f"不支持的市场类型: {symbol.market}")
+
+    with connection.cursor() as cursor:
+        cursor.execute(select_sql, [symbol.id, start_date, end_date])
+        rows = cursor.fetchall()
+
+    results = []
+    for row in rows:
+        if symbol.market == 'A':
+            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, adj_factor, turnover_rate, _ = row
+            item = {
+                'symbol': symbol.code,
+                'date': date_val,
+                'open': open_val,
+                'high': high_val,
+                'low': low_val,
+                'close': close_val,
+                'volume': volume_val,
+                'amount': amount_val,
+                'extra': {'adj_factor': adj_factor, 'turnover_rate': turnover_rate},
+            }
+        elif symbol.market == 'HK':
+            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, prev_close, currency, _ = row
+            item = {
+                'symbol': symbol.code,
+                'date': date_val,
+                'open': open_val,
+                'high': high_val,
+                'low': low_val,
+                'close': close_val,
+                'volume': volume_val,
+                'amount': amount_val,
+                'extra': {'prev_close': prev_close, 'currency': currency},
+            }
+        else:
+            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, split_factor, pre_market_price, after_hours_price, _ = row
+            item = {
+                'symbol': symbol.code,
+                'date': date_val,
+                'open': open_val,
+                'high': high_val,
+                'low': low_val,
+                'close': close_val,
+                'volume': volume_val,
+                'amount': amount_val,
+                'extra': {
+                    'split_factor': split_factor,
+                    'pre_market_price': pre_market_price,
+                    'after_hours_price': after_hours_price,
+                },
+            }
+        results.append(item)
+
+    if results:
+        return results
+
+    legacy_model = get_kline_model(symbol)
+    legacy_qs = legacy_model.objects.filter(symbol=symbol, date__range=[start_date, end_date]).order_by('date')
+    for item in legacy_qs:
+        record = {
+            'symbol': symbol.code,
+            'date': item.date,
+            'open': item.open,
+            'high': item.high,
+            'low': item.low,
+            'close': item.close,
+            'volume': item.volume,
+            'amount': item.amount,
+            'extra': {}
+        }
+        if symbol.market == 'A':
+            record['extra']['adj_factor'] = getattr(item, 'adj_factor', None)
+            record['extra']['turnover_rate'] = getattr(item, 'turnover_rate', None)
+        elif symbol.market == 'HK':
+            record['extra']['prev_close'] = getattr(item, 'prev_close', None)
+            record['extra']['currency'] = getattr(item, 'currency', None)
+        elif symbol.market == 'US':
+            record['extra']['split_factor'] = getattr(item, 'split_factor', None)
+            record['extra']['pre_market_price'] = getattr(item, 'pre_market_price', None)
+            record['extra']['after_hours_price'] = getattr(item, 'after_hours_price', None)
+        results.append(record)
+    return results
 
 
 def fetch_kline_from_akshare(symbol, start_date, end_date, adjust='qfq'):
@@ -98,7 +199,6 @@ def fetch_kline_from_akshare(symbol, start_date, end_date, adjust='qfq'):
         raise ValueError(f"不支持的市场: {symbol.market}")
 
 
-@transaction.atomic
 def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=None, adjust='qfq'):
     """
     同步指定标的的 K 线数据
@@ -116,7 +216,8 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
         if isinstance(end_date, str):
             end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
 
-    KLineModel = get_kline_model(symbol)
+    table_name = ensure_kline_table(symbol)
+    LegacyKLineModel = get_kline_model(symbol)
     try:
         df = fetch_kline_from_akshare(symbol, start_date, end_date, adjust)
     except Exception as e:
@@ -135,13 +236,58 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
         elif isinstance(date_val, datetime):
             date_val = date_val.date()
 
-        # 检查是否已存在
-        exists = KLineModel.objects.filter(symbol=symbol, date=date_val).exists()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT 1 FROM {table_name} WHERE symbol_id = %s AND date = %s LIMIT 1",
+                [symbol.id, date_val]
+            )
+            exists = cursor.fetchone() is not None
         if exists:
             skipped += 1
             continue
+        if LegacyKLineModel.objects.filter(symbol=symbol, date=date_val).exists():
+            skipped += 1
+            continue
 
-        data = {
+        columns = ['symbol_id', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'created_at', 'updated_at']
+        values = [
+            symbol.id,
+            date_val,
+            Decimal(str(row.get('open', 0))),
+            Decimal(str(row.get('high', 0))),
+            Decimal(str(row.get('low', 0))),
+            Decimal(str(row.get('close', 0))),
+            int(row.get('volume', 0)),
+            Decimal(str(row.get('amount', 0))) if row.get('amount') else None,
+            datetime.now(),
+            datetime.now(),
+        ]
+        if symbol.market == 'A':
+            columns += ['adj_factor', 'turnover_rate']
+            values += [
+                Decimal(str(row.get('adj_factor', 1.0))),
+                Decimal(str(row.get('turnover_rate', 0))) if row.get('turnover_rate') else None,
+            ]
+        elif symbol.market == 'HK':
+            columns += ['prev_close', 'currency']
+            values += [None, 'HKD']
+        elif symbol.market == 'US':
+            columns += ['split_factor', 'pre_market_price', 'after_hours_price']
+            values += [
+                Decimal(str(row.get('split_factor', 1.0))),
+                None,
+                None,
+            ]
+
+        placeholders = ', '.join(['%s'] * len(values))
+        columns_sql = ', '.join(columns)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO {table_name} ({columns_sql}) VALUES ({placeholders})",
+                values,
+            )
+
+        legacy_data = {
             'symbol': symbol,
             'date': date_val,
             'open': Decimal(str(row.get('open', 0))),
@@ -151,25 +297,23 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
             'volume': int(row.get('volume', 0)),
             'amount': Decimal(str(row.get('amount', 0))) if row.get('amount') else None,
         }
-        # 市场特定字段
         if symbol.market == 'A':
-            data['adj_factor'] = Decimal(1.0)
-            data['turnover_rate'] = Decimal(str(row.get('turnover_rate', 0))) if row.get('turnover_rate') else None
+            legacy_data['adj_factor'] = Decimal(str(row.get('adj_factor', 1.0)))
+            legacy_data['turnover_rate'] = Decimal(str(row.get('turnover_rate', 0))) if row.get('turnover_rate') else None
         elif symbol.market == 'HK':
-            data['prev_close'] = None
-            data['currency'] = 'HKD'
+            legacy_data['prev_close'] = None
+            legacy_data['currency'] = 'HKD'
         elif symbol.market == 'US':
-            data['split_factor'] = Decimal(1.0)
-            data['pre_market_price'] = None
-            data['after_hours_price'] = None
+            legacy_data['split_factor'] = Decimal(str(row.get('split_factor', 1.0)))
+            legacy_data['pre_market_price'] = None
+            legacy_data['after_hours_price'] = None
 
-        KLineModel.objects.create(**data)
+        LegacyKLineModel.objects.create(**legacy_data)
         added += 1
 
     return added, skipped, None
 
 
-@transaction.atomic
 def sync_all_symbols(sync_type='daily', start_date=None, end_date=None, adjust='qfq'):
     """同步所有活跃标的的数据，按市场分别处理"""
     symbols = Symbol.objects.all()

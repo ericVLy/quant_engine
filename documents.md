@@ -199,13 +199,22 @@ class Watchlist(models.Model):
 | D-01 | 数据源配置 CRUD（AkShare/TuShare/TDX/YFinance） | `models.py`, `views.py` |
 | D-02 | 实时快照存储（仅保留最新值，`OneToOneField`） | `models.py` (RealtimeSnapshot) |
 | D-03 | K线抽象基类（定义公共字段，不建表） | `models.py` (AbstractKLine) |
-| D-04 | A股 K线表（含复权因子/涨跌停价/换手率） | `models.py` (AStockKLine) |
-| D-05 | 港股 K线表（含前收盘价/货币单位） | `models.py` (HKStockKLine) |
-| D-06 | 美股 K线表（含拆分因子/盘前盘后价） | `models.py` (USStockKLine) |
-| D-07 | K线增量同步（`update_or_create`，避免重复） | `services.py` (sync_kline_for_symbol) |
+| D-04 | A股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
+| D-05 | 港股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
+| D-06 | 美股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
+| D-07 | K线增量同步：按 symbol 生成表名并去重插入 | `services.py` (sync_kline_for_symbol) |
 | D-08 | K线同步日志（记录每次拉取状态） | `models.py` (KLineSyncLog) |
-| D-09 | K线查询接口（按标的 + 日期范围） | `views.py` (query_kline) |
-| D-10 | K线同步触发接口（单标的 / 全部） | `views.py` (sync_kline) |
+| D-09 | K线查询接口（按标的 + 日期范围查询对应分表） | `views.py`, `services.py` |
+| D-10 | K线同步触发接口（单标的 / 全部） | `views.py`, `services.py` |
+
+#### 分表设计
+
+当前 K 线存储已从“按市场共表”调整为“按标的编码分表”方案：
+
+- 表名规则：`kline_{market}_{symbol_code}`，例如 `kline_a_000001`
+- 运行时创建：当首次同步或查询某个 symbol 时，自动检查并创建该 symbol 对应的表
+- 查询时按 `symbol_id + date range` 定位目标表
+- 兼容策略：旧的市场级 legacy 表仍保留，查询/同步时优先命中新分表，若新表未落数据则回退到 legacy 表
 
 #### API 端点
 
@@ -229,12 +238,9 @@ class AbstractKLine(models.Model):
     amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
     class Meta: abstract = True
 
-class AStockKLine(AbstractKLine):
-    adj_factor = models.DecimalField(max_digits=12, decimal_places=6, default=1.0)
-    limit_up, limit_down = models.DecimalField(...)
-    turnover_rate = models.DecimalField(...)
-    class Meta: db_table = 'kline_a_stock'
-    # 同样模式：HKStockKLine, USStockKLine
+# 运行时分表命名规则：kline_a_000001 / kline_hk_00700 / kline_us_aapl
+# 逻辑层通过 symbol.id + market + code 识别表名，存储时以原生 SQL 自动创建
+# 对外 API 不变，仍通过 symbol + start + end 查询对应标的 K 线。
 ```
 
 

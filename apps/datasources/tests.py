@@ -12,7 +12,10 @@ from apps.datasources.models import (
     DataSource, RealtimeSnapshot, KLineSyncLog,
     AStockKLine, HKStockKLine, USStockKLine
 )
-from apps.datasources.services import get_kline_model, sync_kline_for_symbol, sync_all_symbols
+from apps.datasources.services import (
+    get_kline_model, sync_kline_for_symbol, sync_all_symbols,
+    get_kline_table_name, query_kline_table
+)
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +307,30 @@ class ServicesTest(TestCase):
         model = get_kline_model(self.symbol_a)
         self.assertEqual(model, AStockKLine)
         logger.info(f"返回模型: {model.__name__}")
+
+    def test_dynamic_kline_table_name_and_query(self):
+        logger.info("测试按股票编码创建动态分表和查询")
+        table_name = get_kline_table_name(self.symbol_a)
+        self.assertEqual(table_name, 'kline_a_000001')
+        self.assertTrue(table_name.startswith('kline_'))
+
+        AStockKLine.objects.create(
+            symbol=self.symbol_a,
+            date=date(2024, 1, 5),
+            open=Decimal('10.1'),
+            high=Decimal('10.8'),
+            low=Decimal('9.9'),
+            close=Decimal('10.6'),
+            volume=2000000,
+            amount=Decimal('20000000'),
+            adj_factor=Decimal('1.0')
+        )
+
+        rows = query_kline_table(self.symbol_a, date(2024, 1, 5), date(2024, 1, 5))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['symbol'], '000001')
+        self.assertEqual(str(rows[0]['close']), '10.6000')
+        logger.info(f"动态分表查询返回 {len(rows)} 条，表名为 {table_name}")
 
     @patch('apps.datasources.services.ak.stock_zh_a_hist')
     def test_sync_kline_for_symbol_new_data(self, mock_hist):
