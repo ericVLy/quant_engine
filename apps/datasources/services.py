@@ -3,11 +3,11 @@ import json
 import akshare as ak
 from datetime import datetime, timedelta
 from decimal import Decimal
-from django.db import transaction, connection
+from django.db import transaction, connections
 from apps.watchlists.models import Symbol
 from .models import (
     AStockKLine, HKStockKLine, USStockKLine, KLineSyncLog,
-    get_kline_table_name, ensure_kline_table
+    get_kline_database_alias, get_kline_table_name, ensure_kline_table
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ def get_kline_table_name_for_symbol(symbol):
 def query_kline_table(symbol, start_date, end_date):
     """按 symbol + 日期范围查询对应分表中的 K 线记录。"""
     table_name = ensure_kline_table(symbol)
+    db_alias = get_kline_database_alias()
     if symbol.market == 'A':
         select_sql = "SELECT date, open, high, low, close, volume, amount, adj_factor, turnover_rate, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
     elif symbol.market == 'HK':
@@ -41,7 +42,7 @@ def query_kline_table(symbol, start_date, end_date):
     else:
         raise ValueError(f"不支持的市场类型: {symbol.market}")
 
-    with connection.cursor() as cursor:
+    with connections[db_alias].cursor() as cursor:
         cursor.execute(select_sql, [symbol.id, start_date, end_date])
         rows = cursor.fetchall()
 
@@ -217,6 +218,7 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
             end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
 
     table_name = ensure_kline_table(symbol)
+    db_alias = get_kline_database_alias()
     LegacyKLineModel = get_kline_model(symbol)
     try:
         df = fetch_kline_from_akshare(symbol, start_date, end_date, adjust)
@@ -236,11 +238,17 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
         elif isinstance(date_val, datetime):
             date_val = date_val.date()
 
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"SELECT 1 FROM {table_name} WHERE symbol_id = %s AND date = %s LIMIT 1",
-                [symbol.id, date_val]
-            )
+        with connections[db_alias].cursor() as cursor:
+            if connections[db_alias].vendor == 'sqlite':
+                cursor.execute(
+                    f"SELECT 1 FROM {table_name} WHERE symbol_id = %s AND date = %s LIMIT 1",
+                    [symbol.id, date_val]
+                )
+            else:
+                cursor.execute(
+                    f"SELECT 1 FROM {table_name} WHERE symbol_id = %s AND date = %s LIMIT 1",
+                    [symbol.id, date_val]
+                )
             exists = cursor.fetchone() is not None
         if exists:
             skipped += 1
@@ -281,7 +289,7 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
 
         placeholders = ', '.join(['%s'] * len(values))
         columns_sql = ', '.join(columns)
-        with connection.cursor() as cursor:
+        with connections[db_alias].cursor() as cursor:
             cursor.execute(
                 f"INSERT INTO {table_name} ({columns_sql}) VALUES ({placeholders})",
                 values,

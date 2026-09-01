@@ -209,12 +209,15 @@ class Watchlist(models.Model):
 
 #### 分表设计
 
-当前 K 线存储已从“按市场共表”调整为“按标的编码分表”方案：
+当前 K 线存储已从“按市场共表”调整为“按标的编码分表”方案，并进一步拆成独立 K 线数据库：
 
+- 默认主库：`default`，保留 Django 业务数据（用户、策略、案例等）
+- 独立 K 线库：`kline`，默认使用 SQLite 本地实现；在生产环境可切换为 MariaDB/MySQL
 - 表名规则：`kline_{market}_{symbol_code}`，例如 `kline_a_000001`
 - 运行时创建：当首次同步或查询某个 symbol 时，自动检查并创建该 symbol 对应的表
 - 查询时按 `symbol_id + date range` 定位目标表
 - 兼容策略：旧的市场级 legacy 表仍保留，查询/同步时优先命中新分表，若新表未落数据则回退到 legacy 表
+- 开关方式：设置 `USE_KLINE_MARIADB=true`，并提供 `KLINE_DB_HOST`、`KLINE_DB_PORT`、`KLINE_DB_NAME` 等环境变量即可切换到 MariaDB
 
 #### API 端点
 

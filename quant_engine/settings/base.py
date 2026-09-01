@@ -88,16 +88,10 @@ TEMPLATES = [
 WSGI_APPLICATION = 'quant_engine.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/6.1/ref/settings/#databases
+# Database is configured per environment in dev.py and production.py.
+# See: quant_engine/settings/dev.py and quant_engine/settings/production.py
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME':  BASE_DIR / 'db.sqlite3',
-    }
-}
-
+KLINE_DB_ALIAS = 'kline'
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
