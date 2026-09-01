@@ -1,8 +1,8 @@
 # 量化交易系统 · 全模块需求文档
 
-> 版本：v2.0  
-> 日期：2026-08-25  
-> 状态：需求设计阶段 · 部分模块已实现
+> 版本：v2.1  
+> 日期：2026-09-02  
+> 状态：需求设计阶段 · 核心模块已实现并已通过回归验证
 
 
 ## 一、项目概述
@@ -245,6 +245,57 @@ class AbstractKLine(models.Model):
 # 逻辑层通过 symbol.id + market + code 识别表名，存储时以原生 SQL 自动创建
 # 对外 API 不变，仍通过 symbol + start + end 查询对应标的 K 线。
 ```
+
+#### 3.1.1 开发补充：A 股数据源从 AkShare 迁移到 Ashare 并保持兼容
+
+2026-09-01 至 2026-09-02 期间，数据源层完成一次关键修正：将 K 线抓取适配由 AkShare 兼容层重构为 Ashare 适配层，同时保持历史调用入口与返回字段契约不变。
+
+##### 1. 目标
+
+- 以 `ashare` 实现替代原有 `fetch_kline_from_akshare` / `stock_zh_a_hist` 依赖路径
+- 对外仍保留原有 `fetch_kline_from_ashare` 与 `fetch_kline_from_akshare` 接口入口
+- 统一对齐 `date / open / high / low / close / volume / amount / adj_factor / turnover_rate` 等字段
+- 兼容真实接口返回值中 index-based DataFrame、空 payload、日期类型混合、腾讯返回 `param error` 等情况
+
+##### 2. 关键实现
+
+- `apps/datasources/services.py`
+  - 新增/增强 `ashare_get_price()` 封装层，统一处理 `start_date`、`end_date`、`count` 与 `frequency`
+  - 强化 `_normalize_ashare_kline_dataframe()`，对缺失 `date` 列、DatetimeIndex、空值和类型转换做兼容处理
+  - `fetch_kline_from_ashare()` 继续以 ashare 为实际数据源，并在同步阶段调用 `sync_kline_for_symbol()` 实现去重入库
+- `apps/datasources/ashare.py`
+  - 兼容 `get_price_sina()` 和 `get_price_day_tx()` 的真实返回结构
+  - 处理腾讯接口返回 `{"code":0,"msg":"param error","data":[]}` 的空数据情况
+  - 修复 `datetime.date` 与 `datetime.datetime` 混用导致的 `TypeError`
+  - 当结果是 index-based DataFrame 时，确保 `date` 可从索引中恢复并继续插入分表
+
+##### 3. 运行时问题与修复
+
+本次修复覆盖了真实运行环境中发现的几类问题：
+
+- `KeyError: 'date'`：在 ashare 返回 DataFrame 仅存在索引而无 `date` 列时触发
+- `TypeError: unsupported operand type(s) for -: 'datetime.datetime' and 'datetime.date'`：日期对象混用导致
+- `TypeError: list indices must be integers or slices, not str`：腾讯接口在无有效数据时返回空列表，原代码直接按 dict 访问
+- `NoneType` / empty DataFrame 返回：mock 与真实返回路径需统一确保结果可被调用方安全消费
+
+##### 4. 验证方式
+
+已执行回归验证命令：
+
+```bash
+cd c:\Users\linye\Documents\quant_engine
+.\venv\Scripts\python.exe .\manage.py test apps.datasources.tests -v 1
+```
+
+验证结论：
+
+- 22 个测试全部通过
+- 关键覆盖：K线查询、异步同步、数据源 CRUD、ashare schema 规范化、真实接口兼容
+
+##### 5. 说明
+
+- 动态模型重复注册 `RuntimeWarning` 仍会出现在测试日志中，但不影响功能执行，也不属于当前业务错误
+- 该兼容层已改为“保留接口名称、切换数据实现”，后续其他模块可继续按已有 `Symbol + start/end` 的协议调用，不需要大面积改动上层代码
 
 
 ### 模块4：`execution`（事件与执行基础设施）⚠️ 基础闭环已完成
