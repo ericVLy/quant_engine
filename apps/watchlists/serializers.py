@@ -1,12 +1,30 @@
 from rest_framework import serializers
 from .models import Symbol, Group, Watchlist
+from .services import resolve_symbol_name
 
 
 class SymbolSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(required=False, allow_blank=True)
+
     class Meta:
         model = Symbol
         fields = '__all__'
         read_only_fields = ('created_at', 'updated_at')
+
+    def validate(self, attrs):
+        code = attrs.get('code') or getattr(self.instance, 'code', None)
+        market = attrs.get('market') or getattr(self.instance, 'market', None)
+        name = attrs.get('name')
+
+        if code and not name:
+            resolved_name = resolve_symbol_name(code, market)
+            if resolved_name:
+                attrs['name'] = resolved_name
+
+        if not attrs.get('name'):
+            raise serializers.ValidationError({'name': '名称不能为空，或请提供代码与市场以自动填充名称。'})
+
+        return attrs
 
 
 class GroupSerializer(serializers.ModelSerializer):

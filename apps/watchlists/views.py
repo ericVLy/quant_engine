@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Symbol, Group, Watchlist
 from .serializers import SymbolSerializer, GroupSerializer, WatchlistSerializer
-from .services import sync_market_data
+from .services import sync_market_data, resolve_symbol_name
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,14 @@ class SymbolViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
     search_fields = ['code', 'name']
     filterset_fields = ['market', 'exchange']
+
+    @action(detail=False, methods=['get'], url_path='resolve-name')
+    def resolve_name(self, request):
+        code = request.query_params.get('code', '').strip()
+        market = request.query_params.get('market', '').strip() or None
+        if not code:
+            return Response({'detail': 'code 不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'name': resolve_symbol_name(code, market)})
 
     @action(detail=False, methods=['post'], url_path='sync')
     def sync_market(self, request):

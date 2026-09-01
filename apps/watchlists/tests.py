@@ -53,6 +53,17 @@ class SymbolAPITest(APITestCase):
         self.assertEqual(Symbol.objects.count(), 3)
         logger.info("创建成功")
 
+    @patch('apps.watchlists.serializers.resolve_symbol_name', return_value='万科A')
+    def test_create_symbol_auto_fills_name(self, mock_resolve_symbol_name):
+        logger.info("测试创建标的时根据代码和市场自动填充名称")
+        data = {'code': '000099', 'market': 'A', 'exchange': 'SZSE'}
+        response = self.client.post(self.list_url, data)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['name'], '万科A')
+        self.assertTrue(Symbol.objects.filter(code='000099', name='万科A').exists())
+        mock_resolve_symbol_name.assert_called_once_with('000099', 'A')
+        logger.info("名称自动填充成功")
+
     def test_update_symbol(self):
         logger.info("测试更新标的信息")
         url = f'/api/watchlists/symbols/{self.symbol1.id}/'

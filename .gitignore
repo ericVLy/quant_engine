@@ -60,6 +60,7 @@ cover/
 *.log
 local_settings.py
 db.sqlite3
+kline.sqlite3
 db.sqlite3-journal
 quant_engine/settings/local.py
 # Flask stuff:

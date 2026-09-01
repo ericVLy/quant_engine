@@ -3,6 +3,70 @@ import akshare as ak
 from django.core.exceptions import ValidationError
 from .models import Symbol, Group
 
+
+def infer_market_from_code(code):
+    """根据代码前缀推断市场类型。"""
+    code_str = str(code or '').strip()
+    if not code_str:
+        return 'A'
+    if code_str.startswith(('600', '601', '603', '605', '000', '001', '002', '003', '004', '300')):
+        return 'A'
+    if code_str.startswith(('7', '8', '9')):
+        return 'HK'
+    return 'US' if code_str.isdigit() else 'A'
+
+
+def resolve_symbol_name(code, market=None):
+    """通过代码和市场类型解析对应名称，失败时返回安全回退值。"""
+    code_str = str(code or '').strip()
+    if not code_str:
+        return ''
+
+    resolved_market = (market or infer_market_from_code(code_str)).upper()
+    normalized_code = code_str.replace('.SH', '').replace('.SZ', '').replace('.BJ', '').replace('.HK', '')
+
+    try:
+        if resolved_market == 'A':
+            df = ak.stock_info_a_code_name()
+            if df is not None and not df.empty:
+                df = df.copy()
+                df['code'] = df['code'].astype(str).str.replace('.SH', '').str.replace('.SZ', '').str.replace('.BJ', '')
+                match = df[df['code'] == normalized_code]
+                if not match.empty:
+                    return str(match.iloc[0].get('name', ''))
+        elif resolved_market == 'HK':
+            df = ak.stock_hk_spot()
+            if df is not None and not df.empty:
+                df = df.copy()
+                df['code'] = df['code'].astype(str)
+                match = df[df['code'] == normalized_code]
+                if not match.empty:
+                    return str(match.iloc[0].get('name', ''))
+        elif resolved_market == 'US':
+            df = ak.stock_us_spot()
+            if df is not None and not df.empty:
+                df = df.copy()
+                df['symbol'] = df['symbol'].astype(str)
+                match = df[df['symbol'] == normalized_code]
+                if not match.empty:
+                    return str(match.iloc[0].get('name', ''))
+    except Exception as exc:
+        logger.warning(f"resolve_symbol_name 失败，code={normalized_code}, market={resolved_market}, error={exc}")
+
+    common_names = {
+        '000001': '平安银行',
+        '000002': '万科A',
+        '600036': '招商银行',
+        '601166': '兴业银行',
+        'AAPL': 'Apple Inc.',
+        'MSFT': 'Microsoft Corporation',
+        '00700': '腾讯控股',
+    }
+    if normalized_code in common_names:
+        return common_names[normalized_code]
+
+    return normalized_code
+
 logger = logging.getLogger(__name__)
 
 
