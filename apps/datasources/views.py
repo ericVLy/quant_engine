@@ -54,8 +54,7 @@ class KLineViewSet(viewsets.GenericViewSet):
             raise serializers.ValidationError({"detail": "start 和 end 日期必填"})
 
         symbol = get_object_or_404(Symbol, code=symbol_code)
-        from .services import get_kline_model
-        KLineModel = get_kline_model(symbol)
+        from .services import query_kline_table
 
         try:
             start = datetime.strptime(start_date, '%Y-%m-%d').date()
@@ -63,35 +62,7 @@ class KLineViewSet(viewsets.GenericViewSet):
         except ValueError:
             raise serializers.ValidationError({"detail": "日期格式应为 YYYY-MM-DD"})
 
-        qs = KLineModel.objects.filter(
-            symbol=symbol,
-            date__range=[start, end]
-        ).order_by('date')
-
-        results = []
-        for item in qs:
-            data = {
-                'symbol': symbol.code,
-                'date': item.date,
-                'open': item.open,
-                'high': item.high,
-                'low': item.low,
-                'close': item.close,
-                'volume': item.volume,
-                'amount': item.amount,
-                'extra': {}
-            }
-            # 市场特定信息放入 extra
-            if symbol.market == 'A':
-                data['extra']['adj_factor'] = item.adj_factor
-                data['extra']['turnover_rate'] = item.turnover_rate
-            elif symbol.market == 'HK':
-                data['extra']['prev_close'] = item.prev_close
-                data['extra']['currency'] = item.currency
-            elif symbol.market == 'US':
-                data['extra']['split_factor'] = item.split_factor
-            results.append(data)
-
+        results = query_kline_table(symbol, start, end)
         serializer = self.get_serializer(results, many=True)
         return Response(serializer.data)
 
