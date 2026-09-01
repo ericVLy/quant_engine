@@ -14,8 +14,9 @@ from apps.datasources.models import (
 )
 from apps.datasources.services import (
     get_kline_model, sync_kline_for_symbol, sync_all_symbols,
-    get_kline_table_name, query_kline_table
+    get_kline_table_name, query_kline_table, fetch_kline_from_ashare
 )
+from apps.datasources.ashare import get_price_day_tx, get_price_sina
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,54 @@ class KLineSyncLogAPITest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['symbol']['code'], '000002')
         logger.info("成功获取同步日志详情")
+
+
+class AshareKLineFetchTest(TestCase):
+    """测试 ashare 模块返回的数据规范化"""
+
+    @patch('apps.datasources.services.ashare_get_price')
+    def test_fetch_kline_from_ashare_normalizes_schema(self, mock_get_price):
+        index = pd.to_datetime(['2024-01-02', '2024-01-03'])
+        df = pd.DataFrame(
+            {
+                'open': [10.0, 11.0],
+                'high': [11.0, 12.0],
+                'low': [9.5, 10.5],
+                'close': [10.8, 11.7],
+                'volume': [1000, 1200],
+            },
+            index=index,
+        )
+        mock_get_price.return_value = df
+
+        symbol = Symbol.objects.create(code='000001', name='平安银行', market='A', exchange='SZSE')
+        result = fetch_kline_from_ashare(symbol, date(2024, 1, 2), date(2024, 1, 3), adjust='qfq')
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result.empty)
+        self.assertIn('date', result.columns)
+        self.assertIn('amount', result.columns)
+        self.assertIn('adj_factor', result.columns)
+        self.assertIn('turnover_rate', result.columns)
+        self.assertEqual(result.iloc[0]['date'], date(2024, 1, 2))
+        self.assertAlmostEqual(result.iloc[0]['amount'], 10800.0)
+        self.assertEqual(str(result.iloc[0]['adj_factor']), '1.0')
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_get_price_day_tx_handles_empty_param_error(self, mock_get):
+        mock_get.return_value.json.return_value = {'code': 0, 'msg': 'param error', 'data': []}
+        result = get_price_day_tx('000426', end_date=date(2026, 9, 1), count=10, frequency='1d')
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertTrue(result.empty)
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_get_price_sina_accepts_date_end_date(self, mock_get):
+        mock_get.return_value.json.return_value = [
+            {'day': '2024-01-02', 'open': '10.0', 'high': '11.0', 'low': '9.5', 'close': '10.8', 'volume': '1000'}
+        ]
+        result = get_price_sina('sz000001', end_date=date(2024, 1, 2), count=10, frequency='1d')
+        self.assertFalse(result.empty)
+        self.assertEqual(str(result.index[0]), '2024-01-02 00:00:00')
 
 
 class KLineAPITest(APITestCase):
