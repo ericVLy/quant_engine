@@ -27,6 +27,22 @@ def resolve_symbol_name(code, market=None):
 
     try:
         if resolved_market == 'A':
+            index_code = {
+                        'sh000001': '上证指数',
+                        'sz399001': '深证成指',
+                        'sz399006': '创业板指',
+                        'sh000300': '沪深300',
+                        'sh000905': '中证500',
+                        'sh000852': '中证1000',
+                        'sz399005': '中小板指',
+                        'sz399102': '科创板指',
+                        'sh000016': '上证50',
+                        'sh000010': '上证180',
+                        'sh000688': '科创50',
+                        'sh000906': '中证800',
+                        }
+            if normalized_code in index_code:
+                return index_code[normalized_code]
             df = ak.stock_info_a_code_name()
             if df is not None and not df.empty:
                 df = df.copy()

@@ -306,28 +306,50 @@ cd c:\Users\linye\Documents\quant_engine
 | **优先级** | P0 |
 | **依赖** | `plans.Plan`, `suites.Suite`（外键允许空） |
 
+#### 事件设计：类和对象模式
+
+`execution.events` 已从“字符串常量中心”扩展为“类 + 对象”双层模型：
+
+- `EventType`：定义系统内置事件类型常量，如 `SUITE_INIT`、`CASE_COMPLETED`、`PRICE_SURGE` 等。
+- `BaseEvent`：定义事件对象的通用结构，包括 `source`、`payload`、`metadata` 以及 `to_dict()`。
+- 具体子类：如 `SuiteInitEvent`、`SuiteStartEvent`、`CaseCompletedEvent` 等，表示某一类事件的定义。
+- 事件实例：`SuiteInitEvent(source='plan', payload={'symbol': '000001'})` 表示一条真实的具体事件，有明确的事件类型和业务参数。
+
+这意味着上层代码既可以继续传递字符串事件类型，也可以直接传递事件对象实例；`enqueue_event()` 统一做类型归一化和 payload 合并，最后写入数据库的 `Event` 表仍保持单条事件记录结构。
+
+此外，针对不同事件类型已设计专属字段与方法，便于事件分发和策略判断：
+
+- `SuiteInitEvent`: `plan_id` / `suite_id` / `symbol`，用于启动一轮执行；`summary()` 返回初始化摘要。
+- `CaseStartEvent`: `case_id` / `case_name` / `trigger_event`，用于追踪某个 Case 的触发来源。
+- `CaseCompletedEvent`: `case_id` / `result` / `execution_time_ms`，用于统计执行结果与时长。
+- `TimerEvent`: `trigger_time` / `interval_seconds` / `cron`，并提供 `is_due()` 判断是否触发。
+- `PriceSurgeEvent` / `PriceDropEvent`: `symbol` / `market` / `price` / `change_pct` / `volume`，并提供 `is_upward()` / `is_downward()`。
+- `VolumeSpikeEvent`: `symbol` / `current_volume` / `avg_volume` / `spike_ratio`，并提供 `is_spike()`。
+- `MacroCpiEvent` / `MacroInterestEvent`: `country` / `value` / `policy` / `rate`，便于宏观事件路由和研究策略触发。
+
 #### 功能需求
 
 | 编号 | 需求描述 | 实现状态 | 实现文件 |
 |------|----------|----------|----------|
 | EX-01 | 系统内置事件类型常量（EventType） | ✅ 完成 | `events.py` |
-| EX-02 | 事件类型注册中心（缓存 + 校验 + 列表） | ✅ 完成 | `registry.py` |
-| EX-03 | 自定义事件类型注册表模型（EventTypeRegistry） | ✅ 完成 | `models.py` |
-| EX-04 | 执行实例模型（SuiteRun） | ✅ 完成 | `models.py` |
-| EX-05 | 事件模型（Event） | ✅ 完成 | `models.py` |
-| EX-06 | 执行日志模型（ExecutionLog） | ✅ 完成 | `models.py` |
-| EX-07 | 委托单模型（Order） | ✅ 完成 | `models.py` |
-| EX-08 | 事件类型管理 API（CRUD + list-all） | ✅ 完成 | `views.py`, `serializers.py` |
-| EX-09 | SuiteRun 只读 API | ✅ 完成 | `views.py` |
-| EX-10 | Event 只读 API | ✅ 完成 | `views.py` |
-| EX-11 | ExecutionLog 只读 API | ✅ 完成 | `views.py` |
-| EX-12 | Order CRUD API | ✅ 完成 | `views.py` |
-| EX-13 | Admin 后台注册所有模型 | ✅ 完成 | `admin.py` |
-| EX-14 | **事件循环基础处理** | 🟡 部分完成 | `services.py`；关联开发任务：5.1.3-2、5.1.3-4 |
-| EX-15 | **事件匹配逻辑（Event → Edge 路由）** | 🟡 基础完成 | `services.py`；关联开发任务：5.1.3-2 |
-| EX-16 | **Plan 触发接口（创建 SuiteRun）** | ✅ 完成 | `views.py`, `services.py` |
-| EX-17 | **SuiteRun 状态流转逻辑** | ✅ 完成 | `services.py` |
-| EX-18 | **委托单状态回写（对接交易接口）** | 🟡 已接入 gm 适配器，生产回报验证待完善 | `runner/gm_adapter.py`；关联开发任务：5.1.2-4 |
+| EX-02 | 事件对象基类与具体事件类（BaseEvent + 子类） | ✅ 完成 | `events.py` |
+| EX-03 | 事件类型注册中心（缓存 + 校验 + 列表） | ✅ 完成 | `registry.py` |
+| EX-04 | 自定义事件类型注册表模型（EventTypeRegistry） | ✅ 完成 | `models.py` |
+| EX-05 | 执行实例模型（SuiteRun） | ✅ 完成 | `models.py` |
+| EX-06 | 事件模型（Event） | ✅ 完成 | `models.py` |
+| EX-07 | 执行日志模型（ExecutionLog） | ✅ 完成 | `models.py` |
+| EX-08 | 委托单模型（Order） | ✅ 完成 | `models.py` |
+| EX-09 | 事件类型管理 API（CRUD + list-all） | ✅ 完成 | `views.py`, `serializers.py` |
+| EX-10 | SuiteRun 只读 API | ✅ 完成 | `views.py` |
+| EX-11 | Event 只读 API | ✅ 完成 | `views.py` |
+| EX-12 | ExecutionLog 只读 API | ✅ 完成 | `views.py` |
+| EX-13 | Order CRUD API | ✅ 完成 | `views.py` |
+| EX-14 | Admin 后台注册所有模型 | ✅ 完成 | `admin.py` |
+| EX-15 | **事件循环基础处理** | 🟡 部分完成 | `services.py`；关联开发任务：5.1.3-2、5.1.3-4 |
+| EX-16 | **事件匹配逻辑（Event → Edge 路由）** | 🟡 基础完成 | `services.py`；关联开发任务：5.1.3-2 |
+| EX-17 | **Plan 触发接口（创建 SuiteRun）** | ✅ 完成 | `views.py`, `services.py` |
+| EX-18 | **SuiteRun 状态流转逻辑** | ✅ 完成 | `services.py` |
+| EX-19 | **委托单状态回写（对接交易接口）** | 🟡 已接入 gm 适配器，生产回报验证待完善 | `runner/gm_adapter.py`；关联开发任务：5.1.2-4 |
 
 #### API 端点
 
