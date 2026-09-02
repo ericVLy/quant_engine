@@ -1,8 +1,8 @@
 # 量化交易系统 · 全模块需求文档
 
-> 版本：v2.1  
+> 版本：v2.2  
 > 日期：2026-09-02  
-> 状态：需求设计阶段 · 核心模块已实现并已通过回归验证
+> 状态：实现基线已稳定 · 以代码为准，文档已同步校正
 
 
 ## 一、项目概述
@@ -145,11 +145,11 @@ class User(AbstractUser):
 | W-02 | 标的搜索（按代码/名称模糊搜索） | `views.py` (search_fields) |
 | W-03 | 标的过滤（按市场/交易所精确过滤） | `views.py` (filterset_fields) |
 | W-04 | 批量导入标的（JSON 数组） | `views.py` (batch_import) |
-| W-05 | 全市场 A 股标的同步（AkShare `stock_info_a_code_name`） | `services.py` (sync_market_data) |
+| W-05 | 同步公开市场基础标的信息（按市场/交易所更新 symbol 基础数据） | `services.py` (sync_market_data) |
 | W-06 | 分组 CRUD（名称唯一） | `models.py`, `views.py` |
 | W-07 | 分组内批量添加/移除标的 | `views.py` (add_symbols, remove_symbols) |
 | W-08 | 用户自选池（绑定分组列表，每个用户仅一个） | `models.py`, `views.py` |
-| W-09 | 解析 `symbol_scope` 配置（供 Plan 调用） | `services.py` (resolve_symbol_scope) |
+| W-09 | 解析 symbol 编码与名称（供前端和 Plan 调用） | `views.py` (`resolve-name`), `services.py` |
 
 #### API 端点
 
@@ -157,6 +157,7 @@ class User(AbstractUser):
 |------|------|------|
 | GET/POST | `/api/watchlists/symbols/` | 标的列表/创建 |
 | GET/PUT/DELETE | `/api/watchlists/symbols/{id}/` | 标的详情/更新/删除 |
+| GET | `/api/watchlists/symbols/resolve-name/?code=000001&market=A` | 根据 code 解析中文名称 |
 | POST | `/api/watchlists/symbols/sync/` | 全市场同步（管理员） |
 | POST | `/api/watchlists/symbols/batch-import/` | 批量导入 |
 | GET/POST | `/api/watchlists/groups/` | 分组列表/创建 |
@@ -209,15 +210,15 @@ class Watchlist(models.Model):
 
 #### 分表设计
 
-当前 K 线存储已从“按市场共表”调整为“按标的编码分表”方案，并进一步拆成独立 K 线数据库：
+当前 K 线存储实现采用“按 symbol 运行时分表 + 兼容 legacy 表”的模式，实际代码中通过 `get_kline_table_name()` 与 `ensure_kline_table()` 动态创建或复用独立分表：
 
 - 默认主库：`default`，保留 Django 业务数据（用户、策略、案例等）
-- 独立 K 线库：`kline`，默认使用 SQLite 本地实现；在生产环境可切换为 MariaDB/MySQL
+- 运行时 K 线库：默认使用 `kline` 别名，当前本地环境由 SQLite 提供；可在设置中切换到 MySQL/MariaDB
 - 表名规则：`kline_{market}_{symbol_code}`，例如 `kline_a_000001`
-- 运行时创建：当首次同步或查询某个 symbol 时，自动检查并创建该 symbol 对应的表
+- 运行时创建：首次同步或查询某个 symbol 时，自动检查并创建该 symbol 对应的表
 - 查询时按 `symbol_id + date range` 定位目标表
-- 兼容策略：旧的市场级 legacy 表仍保留，查询/同步时优先命中新分表，若新表未落数据则回退到 legacy 表
-- 开关方式：设置 `USE_KLINE_MARIADB=true`，并提供 `KLINE_DB_HOST`、`KLINE_DB_PORT`、`KLINE_DB_NAME` 等环境变量即可切换到 MariaDB
+- 兼容策略：代码中优先查询运行时分表；若分表为空，则回退到 legacy 业务模型（`AStockKLine` / `HKStockKLine` / `USStockKLine`）
+- 生产切换：当前实现通过 `settings.KLINE_DB_ALIAS` 及 `connections[db_alias]` 统一接入，不强依赖硬编码表名
 
 #### API 端点
 
@@ -315,7 +316,7 @@ cd c:\Users\linye\Documents\quant_engine
 - 具体子类：如 `SuiteInitEvent`、`SuiteStartEvent`、`CaseCompletedEvent` 等，表示某一类事件的定义。
 - 事件实例：`SuiteInitEvent(source='plan', payload={'symbol': '000001'})` 表示一条真实的具体事件，有明确的事件类型和业务参数。
 
-这意味着上层代码既可以继续传递字符串事件类型，也可以直接传递事件对象实例；`enqueue_event()` 统一做类型归一化和 payload 合并，最后写入数据库的 `Event` 表仍保持单条事件记录结构。
+这意味着上层代码既可以继续传递字符串事件类型，也可以直接传递事件对象实例；`enqueue_event()` 统一做类型归一化和 payload 合并，最后写入数据库的 `Event` 表仍保持单条事件记录结构。实际实现中，事件对象通过 `BaseEvent.payload` + 子类专属属性共同承载业务字段，并以 `event_condition` 做简单键值匹配进行路由。
 
 此外，针对不同事件类型已设计专属字段与方法，便于事件分发和策略判断：
 
@@ -402,7 +403,7 @@ class EventTypeRegistry(models.Model):
 - 消费队列事件，按 `Edge.event_condition` 做简单键值匹配并路由后续事件。
 - 事件处理异常时，将 Event 和 SuiteRun 标记为失败。
 
-该实现是执行层的同步基础服务，不等同于独立进程中的完整 EventLoop；Case 匹配和 CaseExecutor 仍需在 `runner` 与 `cases` 模块完成后接入。
+该实现是执行层的同步基础服务，是 `runner` 事件驱动执行的基础骨架；当前代码中仍保留同步处理入口，不等同于独立进程内的完整 long-running EventLoop。真实 `CaseExecutor`、生产数据上下文和交易回报链路仍需在 `runner` / `cases` 模块中继续补齐。
 
 
 ### 模块5：`cases`（原子策略节点）🟡 P0 基础能力已完成
