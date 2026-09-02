@@ -4,7 +4,7 @@ from django.utils import timezone
 from apps.plans.models import Plan
 from apps.suites.models import Edge
 
-from .events import EventType
+from .events import BaseEvent, EventType
 from .models import Event, SuiteRun
 from .registry import EventRegistry
 
@@ -56,15 +56,32 @@ def stop_suite_run(run):
 
 
 def enqueue_event(run, event_type, source='', payload=None):
-    """Persist an event and append its id to the run queue."""
-    if not EventRegistry.validate(event_type):
-        raise ExecutionError(f'未注册的事件类型: {event_type}')
+    """Persist an event and append its id to the run queue.
+
+    支持两种调用方式：
+    - 传入 `EventType` 常量字符串；
+    - 传入具体的 `BaseEvent` 实例对象。
+    """
+    event_name = event_type
+    event_source = source
+    event_payload = payload or {}
+
+    if isinstance(event_type, BaseEvent):
+        event_name = event_type.event_type
+        event_source = event_type.source or source
+        event_payload = {
+            **(event_type.payload or {}),
+            **(payload or {}),
+        }
+
+    if not EventRegistry.validate(event_name):
+        raise ExecutionError(f'未注册的事件类型: {event_name}')
 
     event = Event.objects.create(
         run=run,
-        event_type=event_type,
-        source=source,
-        payload=payload or {},
+        event_type=event_name,
+        source=event_source,
+        payload=event_payload,
         status='pending',
     )
     run.event_queue = [*run.event_queue, event.pk]

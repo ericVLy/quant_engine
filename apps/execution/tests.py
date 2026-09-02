@@ -109,6 +109,50 @@ class EventRegistryTest(TestLoggingMixin, TestCase):
         EventRegistry.clear_cache()
 
 
+class EventObjectPatternTest(TestLoggingMixin, TestCase):
+    """测试事件类型类 + 事件对象实例模式"""
+
+    def test_event_instance_is_built_from_class_definition(self):
+        from .events import SuiteInitEvent
+
+        event = SuiteInitEvent(
+            source='plan',
+            payload={'symbol': '000001'},
+            metadata={'trigger': 'manual'},
+        )
+
+        self.assertEqual(event.event_type, EventType.SUITE_INIT)
+        self.assertEqual(event.source, 'plan')
+        self.assertEqual(event.payload['symbol'], '000001')
+        self.assertEqual(event.metadata['trigger'], 'manual')
+
+    def test_event_specific_attributes_and_helpers(self):
+        from .events import PriceSurgeEvent, TimerEvent
+
+        price_event = PriceSurgeEvent(
+            symbol='000001',
+            market='A',
+            price=12.5,
+            change_pct=2.1,
+            volume=120000,
+            source='market',
+        )
+
+        self.assertEqual(price_event.symbol, '000001')
+        self.assertEqual(price_event.price, 12.5)
+        self.assertTrue(price_event.is_upward())
+        self.assertIn('000001', price_event.summary())
+
+        timer_event = TimerEvent(
+            trigger_time='2026-09-02 12:00:00',
+            interval_seconds=60,
+            source='scheduler',
+        )
+
+        self.assertEqual(timer_event.interval_seconds, 60)
+        self.assertEqual(timer_event.trigger_time, '2026-09-02 12:00:00')
+
+
 class SuiteRunAPITest(TestLoggingMixin, APITestCase):
     """测试 SuiteRun API"""
 
