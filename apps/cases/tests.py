@@ -46,6 +46,20 @@ class CaseAPITest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('params', response.data)
 
+    def test_reject_case_params_with_unknown_fields(self):
+        response = self.client.post(self.url, {
+            'name': '非法参数字段',
+            'node_type': 'signal',
+            'params': {
+                'trigger': {'event_type': EventType.SUITE_INIT},
+                'period': 14,
+                'random_extra': 'not-allowed',
+            },
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('params', response.data)
+
     def test_list_filter_and_search_cases(self):
         Case.objects.create(name='RSI 信号', node_type='signal')
         Case.objects.create(name='均线过滤', node_type='filter')

@@ -36,12 +36,20 @@ def validate_case_schema(node_type, value):
     def invalid(path, message):
         raise serializers.ValidationError(f'{node_type} 参数 {path}: {message}')
 
+    allowed_keys = {'trigger', 'period', 'threshold_oversold', 'threshold_overbought', 'direction', 'result', 'order'}
     if not isinstance(value, dict):
         invalid('params', '必须是对象')
+
+    unknown = set(value.keys()) - allowed_keys
+    if unknown:
+        invalid('params', f'不允许的字段: {", ".join(sorted(unknown))}')
+
     if 'trigger' in value:
         trigger = value['trigger']
         if not isinstance(trigger, dict) or not isinstance(trigger.get('event_type'), str) or not trigger['event_type']:
             invalid('trigger', '必须是包含非空 event_type 的对象')
+        if set(trigger.keys()) - {'event_type'}:
+            invalid('trigger', '只允许 event_type 字段')
     if 'period' in value and (isinstance(value['period'], bool) or not isinstance(value['period'], int) or value['period'] < 1):
         invalid('period', '必须是大于等于 1 的整数')
     if 'direction' in value and value['direction'] not in (-1, 0, 1):
@@ -52,7 +60,11 @@ def validate_case_schema(node_type, value):
     if order is not None:
         if not isinstance(order, dict):
             invalid('order', '必须是对象')
-        missing = {'direction', 'price', 'volume'} - order.keys()
+        allowed_order_keys = {'direction', 'price', 'volume'}
+        unknown_order = set(order.keys()) - allowed_order_keys
+        if unknown_order:
+            invalid('order', f'不允许的字段: {", ".join(sorted(unknown_order))}')
+        missing = allowed_order_keys - order.keys()
         if missing:
             invalid('order', f'缺少字段: {", ".join(sorted(missing))}')
         if order.get('direction') not in ('buy', 'sell'):
