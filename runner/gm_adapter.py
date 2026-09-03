@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.db import transaction
 
 from apps.execution.models import Order
+from django.conf import settings
 
 
 class GmBrokerAdapter:
@@ -19,8 +20,11 @@ class GmBrokerAdapter:
             from gm import api as gm_api
             api = gm_api
         self.api = api
+        detault_token = getattr(settings, 'gm_token', None)
         if token:
             self.api.set_token(token)
+        elif detault_token:
+            self.api.set_token(detault_token)
 
     def subscribe(self, symbols, frequency='1d', count=1, fields=None,
                   data_format='df'):

@@ -17,6 +17,7 @@ ALLOWED_HOSTS = ["*"]
 try:
     from .local import *
 except ImportError:
+    gm_token = os.getenv('GM_TOKEN', '')
     # SECURITY WARNING: keep the secret key used in production secret!
     SECRET_KEY = 'django-insecure-7ya^@-)^rrgxn!!)r(r)#^eo^zu3d_#r$0ibpyv@$_a$nmvgdp'
     # Database (development default: SQLite for both main app DB and K-line DB)
