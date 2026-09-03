@@ -1,6 +1,6 @@
 ﻿import re
 from django.conf import settings
-from django.db import models, connections
+from django.db import models, connections, transaction
 from apps.watchlists.models import Symbol
 
 # ============================================================
@@ -137,31 +137,49 @@ def get_kline_database_alias():
     return getattr(settings, 'KLINE_DB_ALIAS', 'kline')
 
 
+_RUNTIME_KLINE_MODELS = {}
+
+
 def get_runtime_kline_model(symbol):
     """根据 symbol 生成一个运行时 K 线模型，并确保该分表存在。"""
     table_name = get_kline_table_name(symbol)
+    if table_name in _RUNTIME_KLINE_MODELS:
+        return _RUNTIME_KLINE_MODELS[table_name]
+
     db_alias = get_kline_database_alias()
     db = connections[db_alias]
-
-    exists = table_name in db.introspection.table_names()
-    if exists:
-        return _build_runtime_kline_model(symbol, table_name)
-
     model = _build_runtime_kline_model(symbol, table_name)
-    if db.vendor == 'sqlite':
-        field_sql = [
-            'id INTEGER PRIMARY KEY AUTOINCREMENT',
-            'symbol_id BIGINT NOT NULL',
-            'date DATE NOT NULL',
-            'open DECIMAL(12,4) NOT NULL',
-            'high DECIMAL(12,4) NOT NULL',
-            'low DECIMAL(12,4) NOT NULL',
-            'close DECIMAL(12,4) NOT NULL',
-            'volume BIGINT NOT NULL',
-            'amount DECIMAL(20,2)',
-            'created_at DATETIME NOT NULL',
-            'updated_at DATETIME NOT NULL',
-        ]
+
+    if table_name not in db.introspection.table_names():
+        if db.vendor == 'sqlite':
+            field_sql = [
+                'id INTEGER PRIMARY KEY AUTOINCREMENT',
+                'symbol_id BIGINT NOT NULL',
+                'date DATE NOT NULL',
+                'open DECIMAL(12,4) NOT NULL',
+                'high DECIMAL(12,4) NOT NULL',
+                'low DECIMAL(12,4) NOT NULL',
+                'close DECIMAL(12,4) NOT NULL',
+                'volume BIGINT NOT NULL',
+                'amount DECIMAL(20,2)',
+                'created_at DATETIME NOT NULL',
+                'updated_at DATETIME NOT NULL',
+            ]
+        else:
+            field_sql = [
+                'id BIGINT PRIMARY KEY AUTO_INCREMENT',
+                'symbol_id BIGINT NOT NULL',
+                'date DATE NOT NULL',
+                'open DECIMAL(12,4) NOT NULL',
+                'high DECIMAL(12,4) NOT NULL',
+                'low DECIMAL(12,4) NOT NULL',
+                'close DECIMAL(12,4) NOT NULL',
+                'volume BIGINT NOT NULL',
+                'amount DECIMAL(20,2)',
+                'created_at DATETIME NOT NULL',
+                'updated_at DATETIME NOT NULL',
+            ]
+
         if str(symbol.market).upper() == 'A':
             field_sql += [
                 'adj_factor DECIMAL(12,6) NOT NULL DEFAULT 1.0',
@@ -180,16 +198,26 @@ def get_runtime_kline_model(symbol):
                 'pre_market_price DECIMAL(12,4)',
                 'after_hours_price DECIMAL(12,4)',
             ]
-        field_sql.extend([
-            'UNIQUE(symbol_id, date)',
-        ])
-        with db.cursor() as cursor:
-            cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(field_sql)})")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol_date ON {table_name}(symbol_id, date)")
-        return model
+        field_sql.append('UNIQUE(symbol_id, date)')
 
-    with db.schema_editor() as schema_editor:
-        schema_editor.create_model(model)
+        if db.vendor != 'sqlite':
+            try:
+                transaction.set_autocommit(True, using=db_alias)
+            except Exception:
+                pass
+
+        try:
+            with db.cursor() as cursor:
+                cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(field_sql)})")
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol_date ON {table_name}(symbol_id, date)")
+        finally:
+            if db.vendor != 'sqlite':
+                try:
+                    transaction.set_autocommit(False, using=db_alias)
+                except Exception:
+                    pass
+
+    _RUNTIME_KLINE_MODELS[table_name] = model
     return model
 
 

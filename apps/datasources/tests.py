@@ -1,19 +1,20 @@
 import logging
-from django.test import TestCase
-from rest_framework.test import APITestCase, APIClient
+from django.test import TestCase, TransactionTestCase
+from rest_framework.test import APITestCase, APIClient, APITransactionTestCase
 from rest_framework import status
 from decimal import Decimal
 from datetime import date, datetime, timedelta
 import pandas as pd
 from unittest.mock import patch
+from django.db import connections
 
 from apps.watchlists.models import Symbol
 from apps.datasources.models import (
     DataSource, RealtimeSnapshot, KLineSyncLog,
-    AStockKLine, HKStockKLine, USStockKLine
+    ensure_kline_table, get_runtime_kline_model
 )
 from apps.datasources.services import (
-    get_kline_model, sync_kline_for_symbol, sync_all_symbols,
+    sync_kline_for_symbol, sync_all_symbols,
     get_kline_table_name, query_kline_table, fetch_kline_from_ashare
 )
 from apps.datasources.ashare import get_price_day_tx, get_price_sina
@@ -216,7 +217,7 @@ class AshareKLineFetchTest(TestCase):
         self.assertEqual(str(result.index[0]), '2024-01-02 00:00:00')
 
 
-class KLineAPITest(APITestCase):
+class KLineAPITest(APITransactionTestCase):
     """测试 K 线查询和同步接口"""
     databases = ['default', 'kline']
 
@@ -226,10 +227,11 @@ class KLineAPITest(APITestCase):
         self.symbol = Symbol.objects.create(
             code='000001', name='平安银行', market='A', exchange='SZSE'
         )
-        # 预置 K 线数据，日期从 2024-01-10 开始
+        table_name = ensure_kline_table(self.symbol)
+        runtime_model = get_runtime_kline_model(self.symbol)
         for i in range(1, 6):
-            AStockKLine.objects.create(
-                symbol=self.symbol,
+            runtime_model.objects.using('kline').create(
+                symbol_id=self.symbol.id,
                 date=date(2024, 1, 10 + i),
                 open=Decimal('10.0') + Decimal(i),
                 high=Decimal('10.5') + Decimal(i),
@@ -238,7 +240,7 @@ class KLineAPITest(APITestCase):
                 volume=1000000 * i,
                 amount=Decimal('1000000') * i,
                 adj_factor=Decimal('1.0'),
-                turnover_rate=Decimal('0.5') * i
+                turnover_rate=Decimal('0.5') * Decimal(i),
             )
         logger.info(f"预置 5 条 K 线数据，日期 2024-01-11 至 2024-01-15")
         self.query_url = '/api/datasources/kline/query/'
@@ -305,7 +307,7 @@ class KLineAPITest(APITestCase):
         self.assertEqual(response.data['added'], 2)
         self.assertEqual(response.data['skipped'], 0)
         self.assertIsNone(response.data['error'])
-        self.assertEqual(AStockKLine.objects.count(), 7)
+        self.assertEqual(len(query_kline_table(self.symbol, date(2024, 1, 1), date(2024, 1, 15))), 7)
         log = KLineSyncLog.objects.latest('created_at')
         self.assertEqual(log.records_added, 2)
         self.assertEqual(log.status, 'success')
@@ -342,7 +344,7 @@ class KLineAPITest(APITestCase):
         logger.info(f"同步所有完成，标的 {result['symbol']} 新增 {result['added']} 条")
 
 
-class ServicesTest(TestCase):
+class ServicesTest(TransactionTestCase):
     """测试数据服务函数"""
     databases = ['default', 'kline']
 
@@ -353,20 +355,15 @@ class ServicesTest(TestCase):
         )
         logger.info(f"创建测试标的: {self.symbol_a.code}")
 
-    def test_get_kline_model(self):
-        logger.info("测试获取 K 线模型类")
-        model = get_kline_model(self.symbol_a)
-        self.assertEqual(model, AStockKLine)
-        logger.info(f"返回模型: {model.__name__}")
-
     def test_dynamic_kline_table_name_and_query(self):
         logger.info("测试按股票编码创建动态分表和查询")
         table_name = get_kline_table_name(self.symbol_a)
         self.assertEqual(table_name, 'kline_a_000001')
         self.assertTrue(table_name.startswith('kline_'))
 
-        AStockKLine.objects.create(
-            symbol=self.symbol_a,
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        runtime_model.objects.using('kline').create(
+            symbol_id=self.symbol_a.id,
             date=date(2024, 1, 5),
             open=Decimal('10.1'),
             high=Decimal('10.8'),
@@ -374,8 +371,10 @@ class ServicesTest(TestCase):
             close=Decimal('10.6'),
             volume=2000000,
             amount=Decimal('20000000'),
-            adj_factor=Decimal('1.0')
+            adj_factor=Decimal('1.0'),
+            turnover_rate=Decimal('0.5'),
         )
+
 
         rows = query_kline_table(self.symbol_a, date(2024, 1, 5), date(2024, 1, 5))
         self.assertEqual(len(rows), 1)
@@ -407,15 +406,15 @@ class ServicesTest(TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(skipped, 0)
         self.assertIsNone(error)
-        self.assertTrue(AStockKLine.objects.filter(symbol=self.symbol_a, date=date(2024,1,1)).exists())
+        self.assertEqual(len(query_kline_table(self.symbol_a, date(2024, 1, 1), date(2024, 1, 1))), 1)
         logger.info(f"新增 {added} 条，跳过 {skipped} 条")
 
     @patch('apps.datasources.services.ak.stock_zh_a_hist')
     def test_sync_kline_for_symbol_skip_existing(self, mock_hist):
         logger.info("测试同步已存在的数据（应跳过）")
-        # 先创建一条已有数据
-        AStockKLine.objects.create(
-            symbol=self.symbol_a,
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        runtime_model.objects.using('kline').create(
+            symbol_id=self.symbol_a.id,
             date=date(2024, 1, 1),
             open=Decimal('10.0'),
             high=Decimal('10.5'),
@@ -423,7 +422,8 @@ class ServicesTest(TestCase):
             close=Decimal('10.2'),
             volume=1000000,
             amount=Decimal('10200000'),
-            adj_factor=Decimal('1.0')
+            adj_factor=Decimal('1.0'),
+            turnover_rate=Decimal('0.5'),
         )
         df = pd.DataFrame({
             '日期': ['2024-01-01'],
