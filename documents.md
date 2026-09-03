@@ -89,6 +89,67 @@ users（用户权限）
 ```
 
 
+## 三、关键数据契约与 JSON 白名单
+
+为避免用户随意填写自由 JSON 导致事件网关、调度器和策略执行链断裂，系统在后端和前端都实施了“固定字段名 + 固定结构”的校验。
+
+### 3.1 Case.params 白名单
+
+允许字段仅为：
+
+- `trigger`
+- `period`
+- `threshold_oversold`
+- `threshold_overbought`
+- `direction`
+- `result`
+- `order`
+
+其中：
+
+- `trigger` 必须是对象，且只允许 `event_type`；对应事件必须已在 `EventRegistry` 中注册。
+- `period` 必须是大于等于 1 的整数。
+- `direction` 必须是 `-1`、`0` 或 `1`。
+- `result` 必须是对象。
+- `order` 必须包含：`direction`、`price`、`volume`，且 `direction` 仅允许 `buy` / `sell`，`volume` 必须大于等于 1 的整数。
+
+### 3.2 Plan.symbol_scope 白名单
+
+允许字段仅为：
+
+- `type`
+- `group_ids`
+- `symbol_codes`
+
+`type` 仅允许：
+
+- `all`
+- `groups`
+- `symbols`
+
+且：
+
+- `all` 只能包含 `type`
+- `groups` 必须提供 `group_ids` 数组
+- `symbols` 必须提供 `symbol_codes` 数组
+
+### 3.3 Suite Edge.event_condition 白名单
+
+允许字段仅为：
+
+- `event_type`
+- `case_id`
+- `next_event`
+
+其中：
+
+- `event_type` 必须存在且为非空字符串
+- `case_id` 若提供，必须为整数
+- `next_event` 若提供，必须为非空字符串
+
+> 这些规则已写入后端序列化器，并同步纳入前端表单校验逻辑，避免“字段随意扩展”造成运行时错误。
+
+
 ## 三、模块详细需求
 
 ### 模块1：`users`（用户与权限）✅ 已完成

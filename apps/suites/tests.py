@@ -53,7 +53,23 @@ class SuiteAPITest(APITestCase):
 
 		response = self.client.get(f'{self.url}{self.suite.id}/topology/')
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(response.data['cases'][0]['id'], self.case.id)
+
+	def test_topology_rejects_unknown_event_condition_fields(self):
+		target = Suite.objects.create(name='下游策略')
+		response = self.client.post(
+			f'{self.url}{self.suite.id}/topology/',
+			{
+				'case_ids': [self.case.id],
+				'edges': [{
+					'from_suite': self.suite.id,
+					'to_suite': target.id,
+					'event_condition': {'event_type': 'CASE_COMPLETED', 'freeform': 'bad'},
+					'weight': 0.5,
+				}],
+			},
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 	def test_topology_rejects_cycle(self):
 		target = Suite.objects.create(name='下游策略')

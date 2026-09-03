@@ -7,6 +7,28 @@ class SuiteError(Exception):
     """Raised when a Suite cannot be changed or published."""
 
 
+def validate_event_condition_obj(value):
+    """Strictly validate event_condition JSON for topology edges."""
+    if not isinstance(value, dict):
+        raise SuiteError('event_condition 必须是 JSON 对象')
+
+    allowed_keys = {'event_type', 'case_id', 'next_event'}
+    unknown = set(value.keys()) - allowed_keys
+    if unknown:
+        raise SuiteError(f'event_condition 不允许的字段: {", ".join(sorted(unknown))}')
+
+    if 'event_type' not in value or not value['event_type']:
+        raise SuiteError('event_condition.event_type 是必填字段')
+
+    if 'case_id' in value and (not isinstance(value['case_id'], int) or isinstance(value['case_id'], bool)):
+        raise SuiteError('event_condition.case_id 必须是整数')
+
+    if 'next_event' in value and (not isinstance(value['next_event'], str) or not value['next_event']):
+        raise SuiteError('event_condition.next_event 必须是非空字符串')
+
+    return value
+
+
 def event_condition_matches(condition, payload):
     """Return whether every configured condition equals the event payload."""
     if not condition:
@@ -102,10 +124,14 @@ def update_topology(suite, case_ids, edges):
             raise SuiteError('包含不存在的目标 Suite')
         if to_id == suite.pk:
             raise SuiteError('Suite 不能连接到自身')
+
+        event_condition = edge_data.get('event_condition') or {}
+        validate_event_condition_obj(event_condition)
+
         edge_records.append({
             'to_suite_id': to_id,
             'condition': edge_data.get('condition') or {},
-            'event_condition': edge_data.get('event_condition') or {},
+            'event_condition': event_condition,
             'weight': edge_data.get('weight', 1.0),
         })
 

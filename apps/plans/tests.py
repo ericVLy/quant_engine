@@ -85,6 +85,15 @@ class PlanAPITest(APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertIn('symbol_scope', response.data)
 
+	def test_reject_symbol_scope_with_unknown_fields(self):
+		response = self.client.post(
+			self.url,
+			self.plan_data(symbol_scope={'type': 'symbols', 'symbol_codes': ['000001'], 'extra': 'bad'}),
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('symbol_scope', response.data)
+
 	def test_publish_requires_published_root_suite(self):
 		plan = self.create_plan()
 		response = self.client.post(f'{self.url}{plan.id}/publish/')
