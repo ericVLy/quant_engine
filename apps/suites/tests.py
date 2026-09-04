@@ -125,3 +125,25 @@ class SuiteServiceTest(TestCase):
 		suite.cases.add(case)
 		with self.assertRaises(SuiteError):
 			publish_suite(suite)
+
+	def test_publish_creates_immutable_topology_snapshot(self):
+		from apps.suites.models import SuiteVersion
+
+		root = Suite.objects.create(name='快照根')
+		child = Suite.objects.create(name='快照子', parent=root, status='published')
+		published_case = Case.objects.create(name='已发布', node_type='signal', status='published')
+		root.cases.add(published_case)
+		Edge.objects.create(
+			from_suite=root, to_suite=child,
+			event_condition={'event_type': 'CASE_COMPLETED'},
+		)
+
+		publish_suite(root)
+
+		snapshot = SuiteVersion.objects.get(suite=root, version=root.version)
+		data = snapshot.snapshot
+		self.assertEqual(data['suite_id'], root.pk)
+		self.assertEqual(data['case_ids'], [published_case.id])
+		self.assertEqual(data['edges'][0]['to_suite_id'], child.pk)
+		self.assertEqual(data['children'][0]['suite_id'], child.pk)
+		self.assertEqual(data['children'][0]['cases'], [])

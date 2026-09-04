@@ -26,6 +26,24 @@ class Suite(models.Model):
 
     def __str__(self):
         return self.name
+class SuiteVersion(models.Model):
+    """发布时的不可变拓扑快照，运行时引擎只读快照以保证执行一致性。"""
+    suite = models.ForeignKey(Suite, on_delete=models.CASCADE, related_name='versions')
+    version = models.PositiveIntegerField()
+    snapshot = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-version',)
+        constraints = [
+            models.UniqueConstraint(fields=('suite', 'version'), name='unique_suite_version'),
+        ]
+
+    def __str__(self):
+        return f"{self.suite.name} v{self.version}"
+
+
+
 
 class Edge(models.Model):
     from_suite = models.ForeignKey(Suite, on_delete=models.CASCADE, related_name='out_edges')

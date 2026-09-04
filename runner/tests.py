@@ -124,7 +124,7 @@ class SuiteRuntimeTest(TestCase):
 
     def test_runner_routes_to_downstream_suite(self):
         root = Suite.objects.create(name='根', status='published')
-        downstream = Suite.objects.create(name='下游', status='published')
+        downstream = Suite.objects.create(name='下游', status='published', parent=root)
         Edge.objects.create(
             from_suite=root, to_suite=downstream,
             event_condition={'event_type': 'CASE_COMPLETED'},
@@ -143,7 +143,8 @@ class SuiteRuntimeTest(TestCase):
 
         log = SuiteRunner().run(plan, '000003')
 
-        self.assertEqual(log.final_direction, -1)
+        # 新编排语义：final_direction 为根节点聚合（root case +1 与下游分支 -1 汇合抵消）
+        self.assertEqual(log.final_direction, 0)
 
 
 class GmOrderReportTest(TestCase):

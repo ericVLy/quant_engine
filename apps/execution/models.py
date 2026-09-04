@@ -37,6 +37,32 @@ class SuiteRun(models.Model):
         return f"{self.suite.name if self.suite else '?'} @ {self.symbol} - {self.status}"
 
 
+class NodeRun(models.Model):
+    """编排树中每个节点（Suite/Case）的运行实例，支持父子层级与执行轨迹回放。"""
+    NODE_TYPE_CHOICES = [('suite', 'Suite 节点'), ('case', 'Case 节点')]
+    STATUS_CHOICES = [
+        ('pending', '待执行'),
+        ('running', '执行中'),
+        ('completed', '已完成'),
+        ('failed', '失败'),
+        ('skipped', '已跳过'),
+    ]
+    run = models.ForeignKey(SuiteRun, on_delete=models.CASCADE, related_name='node_runs')
+    parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='children')
+    node_type = models.CharField(max_length=10, choices=NODE_TYPE_CHOICES)
+    suite = models.ForeignKey(Suite, on_delete=models.SET_NULL, null=True, blank=True, related_name='node_runs')
+    case = models.ForeignKey('cases.Case', on_delete=models.SET_NULL, null=True, blank=True, related_name='node_runs')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    direction = models.SmallIntegerField(default=0)
+    result = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        target = self.suite_id if self.node_type == 'suite' else self.case_id
+        return f"{self.node_type}:{target} - {self.status}"
+
+
 class Event(models.Model):
     """
     事件模型，event_type 不再限制 choices，由注册中心校验合法性

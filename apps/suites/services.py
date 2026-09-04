@@ -1,6 +1,6 @@
 from django.db import transaction
 
-from .models import Edge, Suite
+from .models import Edge, Suite, SuiteVersion
 
 
 class SuiteError(Exception):
@@ -100,10 +100,45 @@ def validate_publishable(suite):
 
 def publish_suite(suite):
     validate_publishable(suite)
-    suite.status = 'published'
-    suite.version += 1
-    suite.save(update_fields=('status', 'version', 'updated_at'))
+    with transaction.atomic():
+        suite.status = 'published'
+        suite.version += 1
+        suite.save(update_fields=('status', 'version', 'updated_at'))
+        # 发布即固化拓扑快照，运行时引擎只读快照（S-09 / SuiteVersion）
+        SuiteVersion.objects.create(
+            suite=suite, version=suite.version,
+            snapshot=build_topology_snapshot(suite),
+        )
     return suite
+
+
+def build_topology_snapshot(suite):
+    """递归构建 Suite 编排树的不可变快照（含 Case 成员、出边、子 Suite）。"""
+    data = {
+        'suite_id': suite.pk,
+        'name': suite.name,
+        'aggregate_method': suite.aggregate_method,
+        'version': suite.version,
+        'case_ids': list(suite.cases.values_list('id', flat=True)),
+        'cases': [
+            {
+                'id': case.id, 'name': case.name, 'node_type': case.node_type,
+                'status': case.status, 'params': case.params or {},
+            }
+            for case in suite.cases.all()
+        ],
+        'edges': [
+            {
+                'to_suite_id': edge.to_suite_id,
+                'condition': edge.condition or {},
+                'event_condition': edge.event_condition or {},
+                'weight': edge.weight,
+            }
+            for edge in suite.out_edges.all()
+        ],
+        'children': [build_topology_snapshot(child) for child in suite.children.all()],
+    }
+    return data
 
 
 def update_topology(suite, case_ids, edges):
