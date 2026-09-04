@@ -1,7 +1,7 @@
 # 量化交易系统 · 全模块需求文档
 
-> 版本：v2.2  
-> 日期：2026-09-02  
+> 版本：v2.3  
+> 日期：2026-09-04  
 > 状态：实现基线已稳定 · 以代码为准，文档已同步校正
 
 
@@ -532,11 +532,11 @@ class Case(models.Model):
 当前实现文件：`models.py`、`serializers.py`、`views.py`、`urls.py`。`Suite.cases` 已建立多对多引用，用于删除保护和后续工作流调度。
 
 
-### 模块6：`suites`（工作流编排）🟡 P0 基础能力已完成
+### 模块6：`suites`（工作流编排）🟢 编排核心能力已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | 🟡 已完成 CRUD、拓扑读写、DAG 校验、发布校验和 Plan 引用删除保护；聚合执行与并行调度待完善 |
+| **状态** | 🟢 已完成 CRUD、拓扑读写、DAG 校验、发布校验、发布拓扑快照（SuiteVersion）、子 Suite 递归执行、树形运行时聚合、并行分支 join；画布前端对接与边条件操作符扩展待完善 |
 | **优先级** | P0 |
 | **依赖** | `cases.Case` |
 
@@ -552,9 +552,9 @@ class Case(models.Model):
 | S-06 | 拓扑更新接口（批量增删节点和边） | ✅ 完成 |
 | S-07 | Suite 发布（递归校验所有引用 Case/Suite 已发布） | ✅ 完成 |
 | S-08 | 删除保护（被 Plan 引用时返回 409 Conflict） | ✅ 完成 |
-| S-09 | 条件路由支持（`Edge.event_condition` 匹配事件类型） | 🟡 基础完成；关联开发任务：5.1.2-6 |
-| S-10 | 聚合方式支持（加权求和 / 投票 / 逻辑与 / 逻辑或） | 🟡 字段已支持，运行时聚合待实现；关联开发任务：5.1.2-6 |
-| S-11 | 并行节点执行支持 | ❌ 待实现；关联开发任务：5.1.2-6 |
+| S-09 | 条件路由支持（`Edge.event_condition` 匹配事件类型） | ✅ 完成（快照驱动路由，出边按 CASE_COMPLETED 匹配递归触发） |
+| S-10 | 聚合方式支持（加权求和 / 投票 / 逻辑与 / 逻辑或） | ✅ 完成（节点内 Case 聚合 + 父子 Suite 树形聚合，分支结果按边权重汇合） |
+| S-11 | 并行节点执行支持 | ✅ 完成（parallel 模式多分支线程并发执行，join 汇合；fail_stop 失败传播已贯彻） |
 
 #### 数据模型
 
@@ -596,7 +596,7 @@ class Edge(models.Model):
 | POST | `/api/suites/{id}/topology/` | 更新拓扑 |
 | POST | `/api/suites/{id}/publish/` | 发布 Suite |
 
-当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。拓扑更新在事务中替换 Case 关联和当前 Suite 出边，并在提交前执行 DAG 校验。
+当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。拓扑更新在事务中替换 Case 关联和当前 Suite 出边，并在提交前执行 DAG 校验。发布时同步生成不可变拓扑快照（`SuiteVersion`，含递归子树 Case/边/聚合方式），运行引擎只读快照保证执行一致性；执行期每个节点（Suite/Case）落 `NodeRun` 运行实例支持轨迹回放。`final_direction` 语义为根节点完整聚合（本节点 Case 结果 + 所有子 Suite 分支结果按边权重汇合）。
 
 
 ### 模块7：`plans`（调度管理）🟡 P0 基础能力已完成
@@ -681,8 +681,8 @@ class Plan(models.Model):
 | R-01 | **Scheduler（调度器）**：定时扫描 Plan，按 Cron 表达式触发执行 | P0 |
 | R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | ✅ 基础完成 |
 | R-03 | **Worker Pool**：固定数量协程并发执行任务 | ✅ 基础完成 |
-| R-04 | **SuiteRunner**：加载 Suite 拓扑，创建 SuiteRun 实例 | ✅ 基础完成 |
-| R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | ✅ 基础完成 |
+| R-04 | **SuiteRunner**：加载 Suite 拓扑，创建 SuiteRun 实例 | ✅ 完成；优先读取发布快照（SuiteVersion），支持子 Suite 递归执行 |
+| R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | ✅ 完成；快照驱动编排：子 Suite 递归执行、树形聚合、parallel 分支并发 join、fail_stop 失败传播、NodeRun 轨迹记录 |
 | R-06 | **CaseExecutor**：执行单个 Case 的运算逻辑（因子计算/过滤/裁决） | ✅ 技术指标引擎已接入（MA/EMA/MACD/RSI/KDJ/BOLL/ROC/波动率/涨跌幅 + 过滤 + 综合裁决）；兼容声明式 result |
 | R-07 | **数据夹具（Fixture）**：为 Case 执行提供数据上下文（K线/基本面/实时快照） | ✅ DB 分表 K线 + RealtimeSnapshot 实时快照 + gm SDK 行情回退 已接入（`DataContextBuilder`）；基本面数据仍为占位待扩展 |
 | R-08 | **风控拦截器**：在 Executor 节点输出前校验仓位/资金限制 | ✅ 单向持仓（long_only/short_only/flat）、单笔数量/金额上限、每日累计金额上限、交易时段校验已接入（`RiskController`） |
@@ -699,18 +699,23 @@ class Plan(models.Model):
    → 3. 为每个 (Plan, Symbol) 创建任务入队
    → 4. Worker 从队列取出任务
    → 5. 创建 SuiteRun 实例（状态: pending）
-   → 6. 加载 Suite 拓扑（从数据库读取）
+   → 6. 加载 Suite 编排树（优先发布快照 SuiteVersion，回退实时构建）
    → 7. 注入 INIT 事件到 event_queue
    → 8. 进入事件循环（EventLoop）：
         while event_queue:
             event = event_queue.pop(0)
-            匹配订阅该事件的 Case
+            定位事件目标节点（根 Suite 或 target_suite_id 指向的子 Suite）
+            匹配订阅该事件的 Case（按节点快照内 trigger 过滤）
             for each matched Case:
-                执行 Case
-                产出新事件 (CASE_COMPLETED / CASE_FAILED)
-                追加到 event_queue
-   → 9. Suite 完成 → 写入 ExecutionLog
-   → 10. 若为 Executor 节点 → 生成 Order
+                执行 Case（parallel 模式线程并发；fail_stop 失败即终止）
+                记录 NodeRun（case 节点）
+                产出 CASE_COMPLETED 事件
+            节点内聚合 Case 结果
+            按 CASE_COMPLETED 匹配出边 → 递归执行子 Suite 分支
+              （parallel 模式多分支并发；全部分支完成即 join 汇合）
+            分支结果按边权重并入父节点聚合，更新 NodeRun（suite 节点）
+   → 9. Suite 完成 → 写入 ExecutionLog（final_direction = 根节点完整聚合）
+   → 10. 若为 Executor 节点 → 风控校验 → 生成 Order
 ```
 
 
@@ -721,11 +726,11 @@ class Plan(models.Model):
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 15 通过 | 100% |
 | `datasources` | ✅ 已完成 | 18 通过 | 100% |
-| `execution` | ⚠️ 基础闭环完成 | 12 通过 | 75%（生产回报和完整编排增强待完善） |
-| `cases` | 🟡 P0 基础能力完成 | 9 通过 | 85%（复杂 Schema 规则和真实因子引擎待完善） |
-| `suites` | 🟡 P0 基础能力完成 | 9 通过 | 90%（完整画布拓扑待完善） |
+| `execution` | ⚠️ 基础闭环完成 | 12 通过 | 80%（生产回报字段待完善；NodeRun 已就绪） |
+| `cases` | 🟡 P0 基础能力完成 | 9 通过 | 85%（复杂 Schema 规则待完善） |
+| `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（画布前端对接、边条件操作符扩展待完善） |
 | `plans` | 🟡 P0 基础能力完成 | 10 通过 | 90%（持久化调度进程和版本回滚待完善） |
-| `runner` | 🟢 核心能力完成 | 43 通过 | 85%（真实交易回报、基本面契约与总仓位风控待完善） |
+| `runner` | 🟢 核心能力完成 | 50 通过 | 90%（真实交易回报、基本面契约与总仓位风控待完善） |
 
 
 ## 五、待办事项汇总
@@ -742,28 +747,36 @@ class Plan(models.Model):
 | gm SDK 行情查询、订阅、调度、下单和订单回报适配 | `runner`, `execution` | ✅ 已完成 | R-01、R-07、R-11、EX-18 |
 | gm 订单外部 ID 关联与本地状态回写 | `runner`, `execution` | ✅ 基础完成 | EX-18、R-11 |
 | 基础行情 Fixture、数量/金额风控、可注入 Case 计算 | `runner`, `cases`, `datasources` | ✅ 基础完成 | R-06、R-07、R-08 |
+| 技术指标因子引擎（MA/EMA/MACD/RSI/KDJ/BOLL/ROC 等）与过滤/裁决 | `runner`, `cases` | ✅ 已完成 | C-09、R-06 |
+| 数据上下文构建（DB 分表 K线 + 实时快照 + gm 回退） | `runner`, `datasources` | ✅ 已完成（基本面待补） | R-07 |
+| 复杂风控（单向持仓/单笔与每日限额/交易时段） | `runner` | ✅ 已完成（总仓位上限待补） | R-08 |
+| Plan 热加载注册中心（PlanRegistry，冷启动自愈） | `runner`, `plans` | ✅ 已完成 | R-09 |
+| Suite 发布拓扑快照（SuiteVersion，不可变、递归子树） | `suites` | ✅ 已完成 | S-09 |
+| 节点级运行实例（NodeRun，父子层级 + 轨迹回放） | `execution` | ✅ 已完成 | EX-15 |
+| 跨 Suite 递归编排（子 Suite 执行、树形聚合、parallel 分支 join、fail_stop） | `runner`, `suites`, `execution` | ✅ 已完成 | S-09、S-10、S-11、EX-15 |
 
 #### 5.1.2 待开发任务
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P0（阻塞） | 扩展真实行情、基本面和实时快照数据上下文 | `runner`, `datasources` | R-07、D-02、D-09；**本轮已完成 DB K线 + 快照 + gm 回退**；基本面数据仍为占位待补 |
-| P0（阻塞） | 扩展真实因子计算、过滤、裁决逻辑（基础声明式计算已完成） | `cases`, `runner` | C-09、R-06；**本轮已完成技术指标引擎与过滤/裁决，参数 Schema 已同步扩展** |
-| P1 | 完善复杂仓位、资金和交易时段风控 | `runner`, `execution` | R-08；**本轮已完成单向持仓、每日限额、交易时段；仓位总持仓上限待补** |
-| P1 | 完善真实交易环境回报字段和订单生命周期适配 | `runner`, `execution` | EX-18 |
-| P0（阻塞） | 扩展 Case 参数 JSON Schema 规则和真实 CaseExecutor（基础校验、版本快照已完成） | `cases`, `runner` | C-07、C-09、R-06；阻塞稳定的 Suite/Runner 配置 |
-| P0（阻塞） | 完善跨 Suite 条件路由和运行时编排（基础聚合、并行执行已完成） | `suites`, `execution` | S-09、S-10、S-11、EX-15；阻塞完整 Runner 编排 |
+| P0（阻塞） | 接入基本面数据上下文（`_fundamentals` 占位待补） | `runner`, `datasources` | R-07、D-02、D-09 |
 | P0（阻塞） | 完善持久化 Cron 调度和配置刷新（基础 Cron、快照、执行模式、热加载已完成） | `plans`, `runner` | P-03、P-05、P-08、P-09、P-10、R-09；阻塞自动调度 |
+| P0（阻塞） | 扩展 Case 参数 JSON Schema 深层校验（白名单与基础校验已完成） | `cases` | C-07、C-09 |
+| P1 | 完善真实交易环境回报字段和订单生命周期适配 | `runner`, `execution` | EX-18 |
+| P1 | 补充账户总仓位/总资金上限风控 | `runner`, `execution` | R-08 |
+| P1 | 边条件操作符扩展（op: eq/gt/lt/between 等，前后端契约同步） | `suites`, 前端 | S-09 |
+| P1 | 拓扑校验增强（孤立节点、跨树入边校验） | `suites` | S-09 |
+| P2 | 画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图） | `quant-frontend` | S-09、EX-15 |
 
 #### 5.1.3 开发顺序
 
-| 顺序 | 开发阶段 | 主要交付物 | 关联需求 |
-|------|----------|------------|----------|
-| 1 | P0 阻塞：`cases` 剩余能力 | 参数 Schema、版本历史、真实 CaseExecutor | C-07、C-09、R-06 |
-| 2 | P0 阻塞：`suites` 剩余能力 | 条件路由、运行时聚合、并行节点执行 | S-09、S-10、S-11、EX-15 |
-| 3 | P0 阻塞：`plans` 剩余能力 | 完整 Cron、版本快照、执行模式、热加载 | P-03、P-05、P-08、P-09、P-10、R-09 |
-| 4 | P0 阻塞：`runner` 数据能力 | 真实数据上下文、真实 Case 计算 | R-06、R-07、D-02、D-09 |
-| 5 | P1 生产增强：`runner` 交易能力 | 复杂风控、真实交易回报适配 | R-08、EX-18 |
+| 顺序 | 开发阶段 | 主要交付物 | 关联需求 | 状态 |
+|------|----------|------------|----------|------|
+| 1 | P0 阻塞：`cases` 剩余能力 | 参数 Schema、版本历史、真实 CaseExecutor | C-07、C-09、R-06 | ✅ 基本完成（深层校验待补） |
+| 2 | P0 阻塞：`suites` 剩余能力 | 条件路由、运行时聚合、并行节点执行 | S-09、S-10、S-11、EX-15 | ✅ 已完成（2026-09-04：SuiteVersion 快照 + NodeRun + 递归编排） |
+| 3 | P0 阻塞：`plans` 剩余能力 | 完整 Cron、版本快照、执行模式、热加载 | P-03、P-05、P-08、P-09、P-10、R-09 | 🟡 持久化调度进程待落地 |
+| 4 | P0 阻塞：`runner` 数据能力 | 真实数据上下文、真实 Case 计算 | R-06、R-07、D-02、D-09 | 🟡 基本面待接入 |
+| 5 | P1 生产增强：`runner` 交易能力 | 复杂风控、真实交易回报适配 | R-08、EX-18 | 🟡 总仓位上限与回报字段待补 |
 
 ### 5.2 测试任务
 
@@ -772,11 +785,11 @@ class Plan(models.Model):
 | 阶段 | 测试任务 | 当前结果 | 待补验证 |
 |------|----------|----------|----------|
 | P0 阶段1 | `execution` 基础功能与 API 测试 | ✅ 12 个通过 | Order 真实交易回报集成测试 |
-| P0 阶段2 | `cases` CRUD、发布和触发校验测试 | ✅ 9 个通过 | 复杂 Schema、真实计算测试 |
-| P0 阶段3 | `suites` CRUD、拓扑和 DAG 测试 | ✅ 9 个通过 | 完整画布拓扑测试 |
+| P0 阶段2 | `cases` CRUD、发布和触发校验测试 | ✅ 9 个通过 | 复杂 Schema 测试 |
+| P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | 画布前端拓扑测试、边条件操作符测试 |
 | P0 阶段4 | `plans` CRUD、发布和标的解析测试 | ✅ 10 个通过 | 持久化调度、版本回滚测试 |
-| P0 阶段5 | `runner`、gm SDK 和 execution 联动测试 | ✅ 43 个通过 | 生产行情、风控边界、真实交易环境测试 |
-| 阶段6 | 全项目回归测试 | ✅ 128 个通过（2 个 watchlists 测试存在预存顺序失败，与本次 runner 改动无关） | 持续回归新增功能 |
+| P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 50 个通过（含 7 个编排用例：子 Suite 递归、树形聚合、并行 join、fail_stop、快照驱动执行） | 生产行情、风控边界、真实交易环境测试 |
+| 阶段6 | 全项目回归测试 | ✅ 136 个通过（另有 2 个 watchlists 测试存在预存顺序失败，已归档为测试基建问题，生产不触发） | 持续回归新增功能 |
 
 #### 测试验收标准
 
