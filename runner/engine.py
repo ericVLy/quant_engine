@@ -17,12 +17,13 @@ from .risk import RiskController
 
 class EventLoop:
     def __init__(self, run, case_executor=None, context=None, broker=None,
-                 risk_controller=None):
+                 risk_controller=None, context_builder=None, **kwargs):
         self.run = run
         self.case_executor = case_executor or CaseExecutor()
         self.context = context or {}
         self.broker = broker
         self.risk_controller = risk_controller
+        self.context_builder = context_builder
         self.node_snapshots = {}
         self.direction = 0
         self.orders = []
@@ -76,6 +77,12 @@ class EventLoop:
         if self.run.status == 'pending':
             start_suite_run(self.run)
             self.run.refresh_from_db()
+        if self.context_builder is not None and not self.context.get('market_data'):
+            from .fixture import DataContextBuilder
+            builder = self.context_builder if isinstance(
+                self.context_builder, DataContextBuilder
+            ) else DataContextBuilder(broker=self.context_builder)
+            self.context = builder.build(self.run.symbol, context=self.context)
         try:
             while self.run.event_queue:
                 event = Event.objects.get(pk=self.run.event_queue[0], run=self.run)
@@ -166,15 +173,18 @@ class EventLoop:
 
 
 class SuiteRunner:
-    def __init__(self, case_executor=None, broker=None, risk_controller=None):
+    def __init__(self, case_executor=None, broker=None, risk_controller=None,
+                 data_context_builder=None):
         self.case_executor = case_executor
         self.broker = broker
         self.risk_controller = risk_controller
+        self.data_context_builder = data_context_builder
 
     def run(self, plan, symbol, payload=None):
         run = create_suite_run(plan, symbol, payload)
         return EventLoop(
-            run, self.case_executor, payload, self.broker, self.risk_controller
+            run, self.case_executor, payload, self.broker, self.risk_controller,
+            context_builder=self.data_context_builder,
         ).run_to_completion()
 
     async def arun(self, plan, symbol, payload=None):

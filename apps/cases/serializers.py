@@ -27,6 +27,35 @@ CASE_SCHEMA = {
             },
             'additionalProperties': True,
         },
+        'calculation': {'type': 'string'},
+        'indicator': {'type': 'string'},
+        'field': {'type': 'string'},
+        'high_field': {'type': 'string'},
+        'low_field': {'type': 'string'},
+        'fast': {'type': 'integer', 'minimum': 1},
+        'slow': {'type': 'integer', 'minimum': 1},
+        'signal': {'type': 'integer', 'minimum': 1},
+        'threshold': {'type': 'number'},
+        'weight': {'type': 'number'},
+        'node_type': {'type': 'string'},
+        'filter': {
+            'type': 'object',
+            'properties': {
+                'op': {'type': 'string', 'enum': ['keep', 'drop']},
+                'field': {'type': 'string'},
+                'threshold': {'type': 'number'},
+                'value': {'type': 'number'},
+            },
+            'additionalProperties': True,
+        },
+        'verdict': {
+            'type': 'object',
+            'properties': {
+                'method': {'type': 'string', 'enum': ['weighted_sum', 'vote']},
+                'components': {'type': 'array'},
+            },
+            'additionalProperties': True,
+        },
     },
     'additionalProperties': True,
 }
@@ -36,7 +65,14 @@ def validate_case_schema(node_type, value):
     def invalid(path, message):
         raise serializers.ValidationError(f'{node_type} 参数 {path}: {message}')
 
-    allowed_keys = {'trigger', 'period', 'threshold_oversold', 'threshold_overbought', 'direction', 'result', 'order'}
+    allowed_keys = {
+        'trigger', 'period', 'threshold_oversold', 'threshold_overbought',
+        'direction', 'result', 'order',
+        # 真实因子计算字段（signal/filter/verdict）
+        'calculation', 'indicator', 'field', 'high_field', 'low_field',
+        'fast', 'slow', 'signal', 'threshold', 'weight', 'filter',
+        'verdict', 'node_type',
+    }
     if not isinstance(value, dict):
         invalid('params', '必须是对象')
 

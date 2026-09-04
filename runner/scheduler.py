@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from apps.plans.models import Plan
 from apps.watchlists.services import resolve_symbol_scope
 
 from .queue import TaskQueue
+from .registry import PlanRegistry
 
 
 class Scheduler:
@@ -14,8 +14,9 @@ class Scheduler:
         self._enqueued = set()
 
     def due_plans(self, now):
-        plans = Plan.objects.filter(status='published', trigger_type='time')
-        return [plan for plan in plans if self._matches_cron(plan.cron_expr, now)]
+        """从注册中心（热加载）读取已发布的时间驱动 Plan，命中 Cron 者返回。"""
+        return [plan for plan in PlanRegistry.published_plans()
+                if plan.trigger_type == 'time' and self._matches_cron(plan.cron_expr, now)]
 
     @staticmethod
     def _matches_cron(expression, value):
