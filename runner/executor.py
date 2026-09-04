@@ -25,7 +25,7 @@ class CaseExecutor:
             return CaseResult(status='skipped')
         if self.calculator:
             result = self.calculator(case, context)
-        elif params.get('calculation'):
+        elif params.get('calculation') or params.get('indicator') or params.get('verdict'):
             from .factors import calculate
             result = calculate(params, context)
         else:
