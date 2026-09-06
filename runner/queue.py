@@ -10,6 +10,9 @@ class TaskQueue:
     async def put(self, plan, symbol, payload=None):
         await self._queue.put((plan, symbol, payload or {}))
 
+    def put_nowait(self, plan, symbol, payload=None):
+        self._queue.put_nowait((plan, symbol, payload or {}))
+
     async def get(self):
         return await self._queue.get()
 

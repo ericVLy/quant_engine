@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from threading import Event
 
 from django.test import TestCase
 
@@ -14,6 +15,7 @@ from .engine import SuiteRunner
 from .gm_adapter import GmBrokerAdapter
 from .risk import RiskController
 from .scheduler import Scheduler
+from .registry import PlanRegistry
 
 
 class RunnerIntegrationTest(TestCase):
@@ -83,6 +85,9 @@ class RunnerIntegrationTest(TestCase):
 
 
 class SchedulerTest(TestCase):
+    def setUp(self):
+        PlanRegistry._plans = {}
+
     def test_matches_cron_and_enqueues_symbols(self):
         suite = Suite.objects.create(name='Scheduled Suite', status='published')
         Symbol.objects.create(code='000001', name='测试标的', market='A')
@@ -113,6 +118,43 @@ class SchedulerTest(TestCase):
         scheduler.poll_once(now)
 
         self.assertEqual(scheduler.task_queue._queue.qsize(), 1)
+
+    def test_poll_once_refreshes_changed_and_removes_archived_plans(self):
+        suite = Suite.objects.create(name='刷新 Suite', status='published')
+        plan = Plan.objects.create(
+            name='刷新 Plan', root_suite=suite, status='published',
+            trigger_type='time', cron_expr='30 10 * * *',
+            symbol_scope={'type': 'symbols', 'symbol_codes': []},
+        )
+        scheduler = Scheduler()
+        scheduler.poll_once(datetime(2026, 8, 26, 10, 30))
+        self.assertEqual(PlanRegistry.get(plan.pk)['version'], 1)
+
+        plan.version = 2
+        plan.save(update_fields=('version', 'updated_at'))
+        scheduler.poll_once(datetime(2026, 8, 26, 10, 31))
+        self.assertEqual(PlanRegistry.get(plan.pk)['version'], 2)
+
+        plan.status = 'archived'
+        plan.save(update_fields=('status', 'updated_at'))
+        scheduler.poll_once(datetime(2026, 8, 26, 10, 32))
+        self.assertIsNone(PlanRegistry.get(plan.pk))
+
+    def test_run_forever_can_be_stopped(self):
+        stop_event = Event()
+        calls = []
+
+        class Clock:
+            def __call__(self):
+                calls.append(True)
+                stop_event.set()
+                return datetime(2026, 8, 26, 10, 30)
+
+        Scheduler(poll_interval=1).run_forever(
+            stop_event=stop_event,
+            clock=Clock(),
+        )
+        self.assertEqual(len(calls), 1)
 
 
 class SuiteRuntimeTest(TestCase):

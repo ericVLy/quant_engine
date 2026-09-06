@@ -1,4 +1,5 @@
 from datetime import datetime
+from threading import Event
 
 from apps.watchlists.services import resolve_symbol_scope
 
@@ -9,9 +10,13 @@ from .registry import PlanRegistry
 class Scheduler:
     """Polling scheduler for published time-triggered plans."""
 
-    def __init__(self, task_queue=None):
+    def __init__(self, task_queue=None, poll_interval=60):
         self.task_queue = task_queue or TaskQueue()
+        if poll_interval <= 0:
+            raise ValueError('poll_interval 必须大于 0')
+        self.poll_interval = poll_interval
         self._enqueued = set()
+        self._stop_event = Event()
 
     def due_plans(self, now):
         """从注册中心（热加载）读取已发布的时间驱动 Plan，命中 Cron 者返回。"""
@@ -59,11 +64,23 @@ class Scheduler:
                 key = (plan.pk, plan.version, symbol.code, now.year, now.month, now.day, now.hour, now.minute)
                 if key in self._enqueued:
                     continue
-                self.task_queue._queue.put_nowait((plan, symbol.code, {}))
+                self.task_queue.put_nowait(plan, symbol.code)
                 self._enqueued.add(key)
                 enqueued += 1
         return self.task_queue
 
     def poll_once(self, now=None):
         """Poll published time plans once; repeated polls in one minute are idempotent."""
+        PlanRegistry.sync_from_database()
         return self.enqueue_due_plans(now or datetime.now())
+
+    def stop(self):
+        """请求常驻调度循环在当前轮询结束后退出。"""
+        self._stop_event.set()
+
+    def run_forever(self, stop_event=None, clock=datetime.now):
+        """持续刷新数据库配置并轮询 Cron，直到收到停止请求。"""
+        event = stop_event or self._stop_event
+        while not event.is_set():
+            self.poll_once(clock())
+            event.wait(self.poll_interval)

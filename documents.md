@@ -603,7 +603,7 @@ class Edge(models.Model):
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | 🟡 已完成 CRUD、触发校验、标的解析、发布和删除保护；Cron 完整校验与调度器待完善 |
+| **状态** | 🟢 已完成 CRUD、触发校验、标的解析、发布、配置刷新和持久化 Cron 调度；版本回滚待完善 |
 | **优先级** | P0 |
 | **依赖** | `suites.Suite`, `watchlists`（解析 symbol_scope） |
 
@@ -613,12 +613,12 @@ class Edge(models.Model):
 |------|----------|--------|
 | P-01 | Plan 模型（名称、根 Suite、触发方式、Cron 表达式、标的范围、执行模式、重试策略、状态、版本） | ✅ 完成 |
 | P-02 | Plan CRUD API | ✅ 完成 |
-| P-03 | Plan 发布（校验根 Suite 已发布 + 创建版本快照 + 通知异步引擎热加载） | 🟡 基础完成；关联开发任务：5.1.2-7、5.3-N-03 |
+| P-03 | Plan 发布（校验根 Suite 已发布 + 创建版本快照 + 通知异步引擎热加载） | ✅ 基础完成；版本回滚待完善 |
 | P-04 | 标的范围解析（all / 分组 / 指定列表 → 调用 `watchlists.services.resolve_symbol_scope`） | ✅ 完成 |
-| P-05 | Cron 表达式校验 | 🟡 基础完成（5 字段和字符校验）；关联开发任务：5.1.2-7 |
+| P-05 | Cron 表达式校验 | ✅ 基础完成（5 字段和字符校验） |
 | P-06 | Plan 删除保护（已有执行记录时返回 409 Conflict） | ✅ 完成 |
 | P-07 | 触发方式支持（时间驱动 / 事件驱动 / 手动触发） | ✅ 完成 |
-| P-08 | 执行模式支持（串行 / 并行 / 失败停止） | P1；关联开发任务：5.1.2-7 |
+| P-08 | 执行模式支持（串行 / 并行 / 失败停止） | 🟡 基础字段已支持，调度运行策略待完善 |
 | P-09 | 重试策略配置（重试次数 + 延迟秒数） | P2；关联开发任务：5.1.2-7 |
 | P-10 | Plan 历史版本回滚 | P2；关联开发任务：5.1.2-7 |
 
@@ -663,7 +663,20 @@ class Plan(models.Model):
 | POST | `/api/plans/{id}/publish/` | 发布 Plan |
 | GET | `/api/plans/{id}/symbols/` | 解析 Plan 的标的范围 |
 
-当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`。Plan 只能在发布时要求根 Suite 已发布，创建和编辑阶段允许保存草稿配置。
+当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`、`management/commands/run_scheduler.py`。Plan 只能在发布时要求根 Suite 已发布，创建和编辑阶段允许保存草稿配置。
+
+#### 持久化 Cron 调度与配置刷新
+
+- `runner.scheduler.Scheduler.run_forever()` 提供可停止的常驻轮询循环，默认每 60 秒检查一次。
+- `runner.registry.PlanRegistry.sync_from_database()` 每轮从数据库加载已发布 Plan，按 `version` 刷新配置，并移除已归档或取消发布的 Plan。
+- `apps/plans/management/commands/run_scheduler.py` 提供 Django 进程入口：
+
+```bash
+.\venv\Scripts\python.exe .\manage.py run_scheduler --interval 60
+```
+
+- 同一分钟内同一 `(Plan, Symbol)` 任务只入队一次；进程收到停止信号后退出轮询。
+- 当前能力覆盖自动 Cron 触发和配置热刷新；Plan 历史版本回滚、跨进程分布式去重和多实例领导者选举仍属于后续增强范围。
 
 
 ### 模块8：`runner`（独立异步引擎）🟢 核心能力已完成
@@ -729,8 +742,8 @@ class Plan(models.Model):
 | `execution` | ⚠️ 基础闭环完成 | 12 通过 | 80%（生产回报字段待完善；NodeRun 已就绪） |
 | `cases` | 🟡 P0 基础能力完成 | 9 通过 | 85%（复杂 Schema 规则待完善） |
 | `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（画布前端对接、边条件操作符扩展待完善） |
-| `plans` | 🟡 P0 基础能力完成 | 10 通过 | 90%（持久化调度进程和版本回滚待完善） |
-| `runner` | 🟢 核心能力完成 | 50 通过 | 90%（真实交易回报、基本面契约与总仓位风控待完善） |
+| `plans` | 🟢 P0 核心能力完成 | 10 通过 | 95%（版本回滚待完善） |
+| `runner` | 🟢 核心能力完成 | 52 通过 | 92%（真实交易回报、基本面契约与总仓位风控待完善） |
 
 
 ## 五、待办事项汇总
@@ -760,7 +773,7 @@ class Plan(models.Model):
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
 | P0（阻塞） | 接入基本面数据上下文（`_fundamentals` 占位待补） | `runner`, `datasources` | R-07、D-02、D-09 |
-| P0（阻塞） | 完善持久化 Cron 调度和配置刷新（基础 Cron、快照、执行模式、热加载已完成） | `plans`, `runner` | P-03、P-05、P-08、P-09、P-10、R-09；阻塞自动调度 |
+| P0（已完成基础能力） | 持久化 Cron 调度和配置刷新（常驻轮询、版本刷新、归档清理已完成） | `plans`, `runner` | P-03、P-05、R-01、R-09；版本回滚、多实例调度治理待完善 |
 | P0（阻塞） | 扩展 Case 参数 JSON Schema 深层校验（白名单与基础校验已完成） | `cases` | C-07、C-09 |
 | P1 | 完善真实交易环境回报字段和订单生命周期适配 | `runner`, `execution` | EX-18 |
 | P1 | 补充账户总仓位/总资金上限风控 | `runner`, `execution` | R-08 |
@@ -774,7 +787,7 @@ class Plan(models.Model):
 |------|----------|------------|----------|------|
 | 1 | P0 阻塞：`cases` 剩余能力 | 参数 Schema、版本历史、真实 CaseExecutor | C-07、C-09、R-06 | ✅ 基本完成（深层校验待补） |
 | 2 | P0 阻塞：`suites` 剩余能力 | 条件路由、运行时聚合、并行节点执行 | S-09、S-10、S-11、EX-15 | ✅ 已完成（2026-09-04：SuiteVersion 快照 + NodeRun + 递归编排） |
-| 3 | P0 阻塞：`plans` 剩余能力 | 完整 Cron、版本快照、执行模式、热加载 | P-03、P-05、P-08、P-09、P-10、R-09 | 🟡 持久化调度进程待落地 |
+| 3 | P0 阻塞：`plans` 剩余能力 | 持久化 Cron、配置刷新、执行模式和版本管理 | P-03、P-05、P-08、P-09、P-10、R-09 | 🟢 基础调度与刷新已完成；版本回滚及多实例治理待补 |
 | 4 | P0 阻塞：`runner` 数据能力 | 真实数据上下文、真实 Case 计算 | R-06、R-07、D-02、D-09 | 🟡 基本面待接入 |
 | 5 | P1 生产增强：`runner` 交易能力 | 复杂风控、真实交易回报适配 | R-08、EX-18 | 🟡 总仓位上限与回报字段待补 |
 
