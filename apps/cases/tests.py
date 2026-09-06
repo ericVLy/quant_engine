@@ -1,12 +1,14 @@
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework.exceptions import ValidationError
 
 from apps.execution.events import EventType
 from apps.execution.registry import EventRegistry
 from apps.suites.models import Suite
 
 from .models import Case, CaseVersion
+from .serializers import validate_case_schema
 
 
 class CaseAPITest(APITestCase):
@@ -59,6 +61,58 @@ class CaseAPITest(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('params', response.data)
+
+    def test_reject_nested_result_with_invalid_order(self):
+        response = self.client.post(self.url, {
+            'name': '非法订单',
+            'node_type': 'executor',
+            'params': {
+                'trigger': {'event_type': EventType.SUITE_INIT},
+                'result': {
+                    'direction': 1,
+                    'payload': {'score': 1},
+                    'order': {'direction': 'buy', 'price': 0, 'volume': 0},
+                },
+            },
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('params', response.data)
+
+    def test_reject_filter_field_without_threshold(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('filter', {
+                'filter': {'op': 'keep', 'field': 'rsi'},
+            })
+
+    def test_reject_unknown_filter_operator(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('filter', {
+                'filter': {'op': 'greater_than', 'threshold': 70},
+            })
+
+    def test_reject_invalid_verdict_component(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('verdict', {
+                'verdict': {'method': 'vote', 'components': [
+                    {'indicator': 'rsi', 'period': 0},
+                ]},
+            })
+
+    def test_accept_valid_deep_verdict_configuration(self):
+        validate_case_schema('verdict', {
+            'verdict': {
+                'method': 'weighted_sum',
+                'components': [
+                    {'indicator': 'rsi', 'period': 14, 'weight': 1.0},
+                    {'calculation': 'mean', 'period': 5, 'weight': 0.5},
+                ],
+            },
+        })
+
+    def test_reject_boolean_as_numeric_parameter(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('signal', {'period': True})
 
     def test_list_filter_and_search_cases(self):
         Case.objects.create(name='RSI 信号', node_type='signal')
