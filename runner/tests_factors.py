@@ -4,6 +4,9 @@
 """
 
 from datetime import date
+from unittest.mock import patch
+
+import pandas as pd
 
 from django.test import SimpleTestCase, TestCase
 
@@ -13,6 +16,7 @@ from apps.watchlists.models import Symbol
 from . import indicators as ind
 from .factors import calculate, values_from
 from .fixture import DataContextBuilder
+from .fundamentals import AkshareFundamentalsProvider, normalize_stock_code
 
 
 def kline_context(count=60, base=50, step=1):
@@ -169,3 +173,33 @@ class DataContextBuilderTest(TestCase):
         ctx = builder.build(self.symbol, context={'custom_key': 'x'})
         self.assertEqual(ctx['custom_key'], 'x')
         self.assertEqual(ctx['trigger_payload']['custom_key'], 'x')
+
+    def test_fundamentals_are_normalized_into_context(self):
+        frame = pd.DataFrame([
+            {'item': '总市值', 'value': '123456789'},
+            {'item': '行业', 'value': '银行'},
+            {'item': '上市时间', 'value': '19910403'},
+        ])
+        with patch('runner.fundamentals.ak.stock_individual_info_em', return_value=frame):
+            ctx = DataContextBuilder(enable_fundamentals=True).build(self.symbol)
+
+        self.assertEqual(ctx['fundamentals']['provider'], 'akshare')
+        self.assertEqual(ctx['fundamentals']['metrics']['market_cap'], 123456789.0)
+        self.assertEqual(ctx['fundamentals']['metrics']['industry'], '银行')
+
+    def test_fundamentals_provider_skips_non_a_share(self):
+        symbol = Symbol(code='00700', name='腾讯', market='HK')
+        with patch('runner.fundamentals.ak.stock_individual_info_em') as fetch:
+            self.assertEqual(AkshareFundamentalsProvider().fetch(symbol), {})
+        fetch.assert_not_called()
+
+    def test_fundamentals_provider_degrades_on_upstream_error(self):
+        with patch(
+            'runner.fundamentals.ak.stock_individual_info_em',
+            side_effect=RuntimeError('upstream unavailable'),
+        ):
+            self.assertEqual(AkshareFundamentalsProvider().fetch(self.symbol), {})
+
+    def test_normalize_stock_code(self):
+        self.assertEqual(normalize_stock_code('sz000001'), '000001')
+        self.assertEqual(normalize_stock_code('000001.XSHE'), '000001')

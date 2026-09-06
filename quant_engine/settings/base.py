@@ -93,6 +93,7 @@ WSGI_APPLICATION = 'quant_engine.wsgi.application'
 # See: quant_engine/settings/dev.py and quant_engine/settings/production.py
 
 KLINE_DB_ALIAS = 'kline'
+FUNDAMENTALS_ENABLED = False
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators

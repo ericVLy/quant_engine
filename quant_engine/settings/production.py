@@ -9,6 +9,7 @@ except ImportError:  # pragma: no cover - optional for SQLite/dev environments
     pass
 
 DEBUG = False
+FUNDAMENTALS_ENABLED = os.getenv('FUNDAMENTALS_ENABLED', '1').lower() in {'1', 'true', 'yes'}
 
 
 

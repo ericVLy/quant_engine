@@ -17,6 +17,8 @@ from apps.datasources.models import RealtimeSnapshot
 from apps.datasources.services import query_kline_table
 from apps.watchlists.models import Symbol
 
+from .fundamentals import AkshareFundamentalsProvider
+
 
 def _db_kline(symbol, count=50, end_time=None):
     """从本地 K 线分表查询最近 ``count`` 条记录，返回 list[dict]。"""
@@ -68,9 +70,12 @@ class MarketDataFixture:
 class DataContextBuilder:
     """通过多数据源构建稳定、统一的 Case 执行上下文。"""
 
-    def __init__(self, broker=None, prefer_db=True):
+    def __init__(self, broker=None, prefer_db=True, fundamentals_provider=None,
+                 enable_fundamentals=None):
         self.broker = broker
         self.prefer_db = prefer_db
+        self.fundamentals_provider = fundamentals_provider
+        self.enable_fundamentals = enable_fundamentals
 
     def _snapshot(self, symbol):
         if symbol is None:
@@ -99,11 +104,23 @@ class DataContextBuilder:
         }
 
     def _fundamentals(self, symbol):
-        """基本面占位：后续可从数据源扩展。
+        """返回统一基本面上下文；外部数据源失败时安全降级。"""
+        from django.conf import settings
 
-        返回 ``None`` 表示暂无基本面数据，因子计算将安全降级。
-        """
-        return None
+        enabled = self.enable_fundamentals
+        if enabled is None:
+            enabled = getattr(settings, 'FUNDAMENTALS_ENABLED', False)
+        if not enabled or symbol is None:
+            return {}
+        provider = self.fundamentals_provider or AkshareFundamentalsProvider()
+        try:
+            return provider.context(symbol)
+        except Exception:
+            return {
+                'provider': getattr(provider, 'name', 'unknown'),
+                'symbol': getattr(symbol, 'code', None),
+                'metrics': {},
+            }
 
     def _resolve_symbol(self, symbol):
         if isinstance(symbol, Symbol):
@@ -177,8 +194,13 @@ class DataContextBuilder:
 
 
 def build_data_context(symbol, context=None, broker=None, frequency='1d',
-                       count=50, end_time=None):
+                       count=50, end_time=None, fundamentals_provider=None,
+                       enable_fundamentals=None):
     """便捷入口：一次性构建 Case 数据上下文。"""
-    return DataContextBuilder(broker=broker).build(
+    return DataContextBuilder(
+        broker=broker,
+        fundamentals_provider=fundamentals_provider,
+        enable_fundamentals=enable_fundamentals,
+    ).build(
         symbol, context=context, frequency=frequency, count=count, end_time=end_time,
     )
