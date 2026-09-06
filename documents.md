@@ -703,7 +703,35 @@ class Plan(models.Model):
 | R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 基础完成 |
 | R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 基础完成 |
 
-当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`、`runner/gm_adapter.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；`GmBrokerAdapter` 已封装 gm SDK 的 `set_token`、`subscribe`、`history`、`history_n`、`schedule`、`order_volume`、`get_orders` 及订单状态回调。真实因子、行情 Fixture、风控和交易回报的生产策略仍可在该适配边界上继续扩展。
+当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`、`runner/gm_adapter.py`、`runner/fundamentals.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；`GmBrokerAdapter` 已封装 gm SDK 的 `set_token`、`subscribe`、`history`、`history_n`、`schedule`、`order_volume`、`get_orders` 及订单状态回调。真实因子、行情 Fixture、风控和交易回报的生产策略仍可在该适配边界上继续扩展。
+
+#### 基本面数据上下文设计
+
+当前基本面数据源选择 **AkShare**，原因是项目已有 AkShare 依赖、当前业务以 A 股为主，且 `stock_individual_info_em` 可直接返回个股基础信息和市值字段。适配器位于 `runner/fundamentals.py`，不让 AkShare 中文字段名进入 Case 执行层。
+
+- 数据入口：`AkshareFundamentalsProvider.fetch(symbol)`
+- 当前接口：`ak.stock_individual_info_em(symbol=<六位代码>)`
+- 当前规范化字段：`symbol`、`name`、`shares_outstanding`、`shares_float`、`market_cap`、`float_market_cap`、`industry`、`listing_date`
+- 上下文结构：
+
+```python
+{
+    'provider': 'akshare',
+    'symbol': '000001',
+    'asof': '2026-09-06T12:00:00',
+    'metrics': {
+        'market_cap': 123456789.0,
+        'industry': '银行',
+    },
+}
+```
+
+- `DataContextBuilder` 通过 `fundamentals_provider` 支持依赖注入，后续可替换 TuShare、本地缓存或数据库 Provider。
+- 开发环境默认 `FUNDAMENTALS_ENABLED=False`，避免测试和离线策略执行访问外部网络。
+- 生产环境默认开启，也可通过 `FUNDAMENTALS_ENABLED=0` 关闭。
+- 数据源异常、空响应、非 A 股标的均安全降级为 `metrics={}`，不阻塞 Case 执行。
+
+当前版本定位为“个股基础信息/估值基础字段”接入，不代表完整财务报表能力。后续应增加财务指标、资产负债表/利润表/现金流量表、历史时点缓存和数据有效期校验，并为基本面数据增加独立缓存或持久化表。
 
 #### 执行流程
 
@@ -743,7 +771,7 @@ class Plan(models.Model):
 | `cases` | 🟡 P0 基础能力完成 | 9 通过 | 85%（复杂 Schema 规则待完善） |
 | `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（画布前端对接、边条件操作符扩展待完善） |
 | `plans` | 🟢 P0 核心能力完成 | 10 通过 | 95%（版本回滚待完善） |
-| `runner` | 🟢 核心能力完成 | 52 通过 | 92%（真实交易回报、基本面契约与总仓位风控待完善） |
+| `runner` | 🟢 核心能力完成 | 56 通过 | 94%（真实交易回报、基本面扩展指标与总仓位风控待完善） |
 
 
 ## 五、待办事项汇总
@@ -760,6 +788,7 @@ class Plan(models.Model):
 | gm SDK 行情查询、订阅、调度、下单和订单回报适配 | `runner`, `execution` | ✅ 已完成 | R-01、R-07、R-11、EX-18 |
 | gm 订单外部 ID 关联与本地状态回写 | `runner`, `execution` | ✅ 基础完成 | EX-18、R-11 |
 | 基础行情 Fixture、数量/金额风控、可注入 Case 计算 | `runner`, `cases`, `datasources` | ✅ 基础完成 | R-06、R-07、R-08 |
+| AkShare 基本面上下文适配器（个股信息、估值基础字段、异常降级） | `runner`, `datasources` | ✅ 基础完成 | R-07 |
 | 技术指标因子引擎（MA/EMA/MACD/RSI/KDJ/BOLL/ROC 等）与过滤/裁决 | `runner`, `cases` | ✅ 已完成 | C-09、R-06 |
 | 数据上下文构建（DB 分表 K线 + 实时快照 + gm 回退） | `runner`, `datasources` | ✅ 已完成（基本面待补） | R-07 |
 | 复杂风控（单向持仓/单笔与每日限额/交易时段） | `runner` | ✅ 已完成（总仓位上限待补） | R-08 |
@@ -772,7 +801,7 @@ class Plan(models.Model):
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P0（阻塞） | 接入基本面数据上下文（`_fundamentals` 占位待补） | `runner`, `datasources` | R-07、D-02、D-09 |
+| P0（已完成基础能力） | 接入基本面数据上下文（AkShare 个股信息适配器已接入） | `runner`, `datasources` | R-07；财务报表、缓存和历史时点数据待扩展 |
 | P0（已完成基础能力） | 持久化 Cron 调度和配置刷新（常驻轮询、版本刷新、归档清理已完成） | `plans`, `runner` | P-03、P-05、R-01、R-09；版本回滚、多实例调度治理待完善 |
 | P0（阻塞） | 扩展 Case 参数 JSON Schema 深层校验（白名单与基础校验已完成） | `cases` | C-07、C-09 |
 | P1 | 完善真实交易环境回报字段和订单生命周期适配 | `runner`, `execution` | EX-18 |
@@ -788,7 +817,7 @@ class Plan(models.Model):
 | 1 | P0 阻塞：`cases` 剩余能力 | 参数 Schema、版本历史、真实 CaseExecutor | C-07、C-09、R-06 | ✅ 基本完成（深层校验待补） |
 | 2 | P0 阻塞：`suites` 剩余能力 | 条件路由、运行时聚合、并行节点执行 | S-09、S-10、S-11、EX-15 | ✅ 已完成（2026-09-04：SuiteVersion 快照 + NodeRun + 递归编排） |
 | 3 | P0 阻塞：`plans` 剩余能力 | 持久化 Cron、配置刷新、执行模式和版本管理 | P-03、P-05、P-08、P-09、P-10、R-09 | 🟢 基础调度与刷新已完成；版本回滚及多实例治理待补 |
-| 4 | P0 阻塞：`runner` 数据能力 | 真实数据上下文、真实 Case 计算 | R-06、R-07、D-02、D-09 | 🟡 基本面待接入 |
+| 4 | P0 阻塞：`runner` 数据能力 | 真实数据上下文、真实 Case 计算 | R-06、R-07、D-02、D-09 | 🟢 行情、快照与 AkShare 基本面已接入；财务扩展待补 |
 | 5 | P1 生产增强：`runner` 交易能力 | 复杂风控、真实交易回报适配 | R-08、EX-18 | 🟡 总仓位上限与回报字段待补 |
 
 ### 5.2 测试任务

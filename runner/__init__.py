@@ -3,11 +3,12 @@
 from .engine import EventLoop, SuiteRunner
 from .factors import calculate
 from .fixture import DataContextBuilder, build_data_context
+from .fundamentals import AkshareFundamentalsProvider
 from .gm_adapter import GmBrokerAdapter
 from .queue import TaskQueue, WorkerPool
 from .risk import RiskController
 from .scheduler import Scheduler
 
-__all__ = ['DataContextBuilder', 'EventLoop', 'GmBrokerAdapter', 'RiskController',
+__all__ = ['AkshareFundamentalsProvider', 'DataContextBuilder', 'EventLoop', 'GmBrokerAdapter', 'RiskController',
            'Scheduler', 'SuiteRunner', 'TaskQueue', 'WorkerPool', 'build_data_context',
            'calculate']
