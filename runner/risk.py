@@ -117,7 +117,9 @@ class RiskController:
     """聚合多个风控策略，全部通过才允许下单。"""
 
     def __init__(self, max_volume=None, max_value=None, position_mode='both',
-                 allowed_sessions=None, max_daily_value=None):
+                 allowed_sessions=None, max_daily_value=None,
+                 max_account_value=None, max_position_value=None,
+                 max_position_volume=None, account_provider=None):
         self.position_policy = PositionPolicy(
             mode=position_mode, max_volume=max_volume, max_value=max_value,
         )
@@ -126,6 +128,17 @@ class RiskController:
             else [(9, 30, 11, 30), (13, 0, 15, 0)]
         )
         self.daily_limit = DailyLimitPolicy(max_daily_value=max_daily_value)
+        self.max_account_value = max_account_value
+        self.max_position_value = max_position_value
+        self.max_position_volume = max_position_volume
+        self.account_provider = account_provider
+
+    def _account_snapshot(self):
+        if self.account_provider is None:
+            return {}, []
+        account = self.account_provider.get_account() or {}
+        positions = self.account_provider.get_positions() or []
+        return account, positions
 
     def check(self, order_data):
         if not self.trade_window.allows():
@@ -136,4 +149,23 @@ class RiskController:
         decision = self.daily_limit.check(order_data)
         if not decision.allowed:
             return decision
+        account, positions = self._account_snapshot()
+        order_value = float(order_data.get('price', 0)) * int(order_data.get('volume', 0))
+        available = account.get('available') or account.get('cash')
+        if order_data.get('direction') == 'buy' and self.max_account_value is not None:
+            if available is not None and float(available) < order_value:
+                return RiskDecision(False, '账户可用资金不足')
+        if self.max_position_value is not None or self.max_position_volume is not None:
+            position_value = 0.0
+            position_volume = 0
+            for position in positions:
+                position_value += float(position.get('market_value', position.get('value', 0)) or 0)
+                position_volume += int(position.get('volume', position.get('quantity', 0)) or 0)
+            direction_factor = 1 if order_data.get('direction') == 'buy' else -1
+            projected_value = max(0.0, position_value + direction_factor * order_value)
+            projected_volume = max(0, position_volume + direction_factor * int(order_data.get('volume', 0)))
+            if projected_value > (self.max_position_value or float('inf')):
+                return RiskDecision(False, '账户总仓位金额超过风控上限')
+            if projected_volume > (self.max_position_volume or float('inf')):
+                return RiskDecision(False, '账户总仓位数量超过风控上限')
         return RiskDecision(True)

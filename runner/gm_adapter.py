@@ -73,6 +73,15 @@ class GmBrokerAdapter:
     def get_orders(self):
         return self.api.get_orders()
 
+    def get_account(self):
+        """Return the broker account snapshot when the SDK exposes it."""
+        getter = getattr(self.api, 'get_cash', None) or getattr(self.api, 'get_account', None)
+        return getter() if getter else {}
+
+    def get_positions(self):
+        getter = getattr(self.api, 'get_positions', None)
+        return getter() if getter else []
+
     @staticmethod
     def _status(value):
         if hasattr(value, 'value'):
@@ -97,6 +106,10 @@ class GmBrokerAdapter:
         }.get(value)
 
     @staticmethod
+    def _status_rank(status):
+        return {'pending': 0, 'sent': 1, 'canceled': 2, 'rejected': 2, 'filled': 3}.get(status, -1)
+
+    @staticmethod
     def _report_value(report, *names):
         for name in names:
             value = report.get(name) if isinstance(report, dict) else getattr(report, name, None)
@@ -117,15 +130,29 @@ class GmBrokerAdapter:
         if local_order is None:
             return None
         status = self._status(self._report_value(report, 'status', 'order_status'))
-        if status:
+        if status and self._status_rank(status) >= self._status_rank(local_order.status):
             local_order.status = status
         price = self._report_value(report, 'price', 'filled_price', 'avg_price')
         if price is not None:
             local_order.price = Decimal(str(price))
+        filled_volume = self._report_value(report, 'filled_volume', 'filled_qty', 'filled_quantity')
+        if filled_volume is not None:
+            local_order.filled_volume = max(
+                local_order.filled_volume,
+                max(0, min(int(filled_volume), local_order.volume)),
+            )
+        report_data = dict(report) if isinstance(report, dict) else {
+            key: getattr(report, key) for key in ('cl_ord_id', 'order_id', 'symbol', 'status', 'price')
+            if getattr(report, key, None) is not None
+        }
+        local_order.report_payload = report_data
         if external_id and local_order.external_order_id != str(external_id):
             local_order.external_order_id = str(external_id)
-        if status or price is not None or external_id:
-            local_order.save(update_fields=['status', 'price', 'external_order_id', 'updated_at'])
+        if status or price is not None or external_id or filled_volume is not None:
+            local_order.save(update_fields=[
+                'status', 'price', 'external_order_id', 'filled_volume',
+                'report_payload', 'updated_at',
+            ])
         return local_order
 
     def on_error(self, callback):
