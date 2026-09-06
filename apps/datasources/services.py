@@ -31,22 +31,22 @@ def query_kline_table(symbol, start_date, end_date):
     table_name = ensure_kline_table(symbol)
     db_alias = get_kline_database_alias()
     if symbol.market == 'A':
-        select_sql = "SELECT date, open, high, low, close, volume, amount, adj_factor, turnover_rate, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
+        select_sql = "SELECT date, open, high, low, close, volume, amount, adj_factor, turnover_rate FROM {} WHERE date BETWEEN %s AND %s ORDER BY date".format(table_name)
     elif symbol.market == 'HK':
-        select_sql = "SELECT date, open, high, low, close, volume, amount, prev_close, currency, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
+        select_sql = "SELECT date, open, high, low, close, volume, amount, prev_close, currency FROM {} WHERE date BETWEEN %s AND %s ORDER BY date".format(table_name)
     elif symbol.market == 'US':
-        select_sql = "SELECT date, open, high, low, close, volume, amount, split_factor, pre_market_price, after_hours_price, symbol_id FROM {} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date".format(table_name)
+        select_sql = "SELECT date, open, high, low, close, volume, amount, split_factor, pre_market_price, after_hours_price FROM {} WHERE date BETWEEN %s AND %s ORDER BY date".format(table_name)
     else:
         raise ValueError(f"不支持的市场类型: {symbol.market}")
 
     with connections[db_alias].cursor() as cursor:
-        cursor.execute(select_sql, [symbol.id, start_date, end_date])
+        cursor.execute(select_sql, [start_date, end_date])
         rows = cursor.fetchall()
 
     results = []
     for row in rows:
         if symbol.market == 'A':
-            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, adj_factor, turnover_rate, _ = row
+            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, adj_factor, turnover_rate = row
             item = {
                 'symbol': symbol.code,
                 'date': date_val,
@@ -59,7 +59,7 @@ def query_kline_table(symbol, start_date, end_date):
                 'extra': {'adj_factor': adj_factor, 'turnover_rate': turnover_rate},
             }
         elif symbol.market == 'HK':
-            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, prev_close, currency, _ = row
+            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, prev_close, currency = row
             item = {
                 'symbol': symbol.code,
                 'date': date_val,
@@ -72,7 +72,7 @@ def query_kline_table(symbol, start_date, end_date):
                 'extra': {'prev_close': prev_close, 'currency': currency},
             }
         else:
-            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, split_factor, pre_market_price, after_hours_price, _ = row
+            date_val, open_val, high_val, low_val, close_val, volume_val, amount_val, split_factor, pre_market_price, after_hours_price = row
             item = {
                 'symbol': symbol.code,
                 'date': date_val,

@@ -229,6 +229,7 @@ class KLineAPITest(APITransactionTestCase):
         )
         table_name = ensure_kline_table(self.symbol)
         runtime_model = get_runtime_kline_model(self.symbol)
+        runtime_model.objects.using('kline').all().delete()
         for i in range(1, 6):
             runtime_model.objects.using('kline').create(
                 symbol_id=self.symbol.id,
@@ -353,6 +354,8 @@ class ServicesTest(TransactionTestCase):
         self.symbol_a = Symbol.objects.create(
             code='000001', name='平安银行', market='A', exchange='SZSE'
         )
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        runtime_model.objects.using('kline').all().delete()
         logger.info(f"创建测试标的: {self.symbol_a.code}")
 
     def test_dynamic_kline_table_name_and_query(self):
@@ -381,6 +384,26 @@ class ServicesTest(TransactionTestCase):
         self.assertEqual(rows[0]['symbol'], '000001')
         self.assertEqual(str(rows[0]['close']), '10.6000')
         logger.info(f"动态分表查询返回 {len(rows)} 条，表名为 {table_name}")
+
+    def test_runtime_table_query_uses_table_and_date_only(self):
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        runtime_model.objects.using('kline').create(
+            symbol_id=self.symbol_a.id + 999,
+            date=date(2024, 1, 6),
+            open=Decimal('10.1'),
+            high=Decimal('10.8'),
+            low=Decimal('9.9'),
+            close=Decimal('10.6'),
+            volume=2000000,
+            amount=Decimal('20000000'),
+            adj_factor=Decimal('1.0'),
+            turnover_rate=Decimal('0.5'),
+        )
+
+        rows = query_kline_table(self.symbol_a, date(2024, 1, 6), date(2024, 1, 6))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['date'], date(2024, 1, 6))
 
     @patch('apps.datasources.services.ak.stock_zh_a_hist')
     def test_sync_kline_for_symbol_new_data(self, mock_hist):
