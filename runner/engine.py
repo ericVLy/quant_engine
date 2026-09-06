@@ -195,6 +195,7 @@ class EventLoop:
 
     def run_to_completion(self):
         started = time.monotonic()
+        log = None
         if self.run.status == 'pending':
             start_suite_run(self.run)
             self.run.refresh_from_db()
@@ -228,6 +229,7 @@ class EventLoop:
 
             log = ExecutionLog.objects.create(
                 plan=self.run.plan, symbol=self.run.symbol,
+                task_id=f'suite-run-{self.run.pk}',
                 duration_ms=int((time.monotonic() - started) * 1000),
                 final_direction=self.direction, node_snapshots=self.node_snapshots,
                 status='success',
@@ -240,17 +242,25 @@ class EventLoop:
                     if not decision.allowed:
                         log.status = 'blocked'
                         log.error_msg = decision.reason
-                        log.save(update_fields=['status', 'error_msg'])
+                        log.error_code = 'RISK_BLOCKED'
+                        log.save(update_fields=['status', 'error_msg', 'error_code'])
                         self.run.status = 'failed'
                         self.run.ended_at = timezone.now()
                         self.run.save(update_fields=['status', 'ended_at'])
                         return log
                 if self.broker:
-                    response = self.broker.submit_order(self.run.symbol, item)
+                    try:
+                        response = self.broker.submit_order(self.run.symbol, item)
+                    except Exception as exc:
+                        order.status = 'rejected'
+                        order.last_error = str(exc)
+                        order.save(update_fields=['status', 'last_error', 'updated_at'])
+                        raise
                     external_id = self._external_order_id(response)
                     if external_id:
                         order.external_order_id = external_id
-                    order.status = 'sent'
+                    response_status = self._response_status(response)
+                    order.status = response_status or 'sent'
                     order.save(update_fields=['status', 'external_order_id', 'updated_at'])
             self.run.status = 'completed'
             self.run.ended_at = timezone.now()
@@ -260,13 +270,34 @@ class EventLoop:
             self.run.status = 'failed'
             self.run.ended_at = timezone.now()
             self.run.save(update_fields=['status', 'ended_at'])
-            ExecutionLog.objects.create(
-                plan=self.run.plan, symbol=self.run.symbol,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                final_direction=self.direction, node_snapshots=self.node_snapshots,
-                status='failed', error_msg=str(exc),
-            )
+            if log is None:
+                log = ExecutionLog.objects.create(
+                    plan=self.run.plan, symbol=self.run.symbol,
+                    task_id=f'suite-run-{self.run.pk}',
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    final_direction=self.direction, node_snapshots=self.node_snapshots,
+                    status='failed', error_msg=str(exc), error_code='EXECUTION_FAILED',
+                )
+            else:
+                log.status = 'failed'
+                log.error_msg = str(exc)
+                log.error_code = 'EXECUTION_FAILED'
+                log.duration_ms = int((time.monotonic() - started) * 1000)
+                log.save(update_fields=['status', 'error_msg', 'error_code', 'duration_ms'])
             raise
+
+    @staticmethod
+    def _response_status(response):
+        value = response.get('status') if isinstance(response, dict) else getattr(response, 'status', None)
+        if isinstance(value, str):
+            normalized = value.lower()
+            if normalized in ('rejected', 'reject', 'failed'):
+                return 'rejected'
+            if normalized in ('canceled', 'cancelled'):
+                return 'canceled'
+            if normalized in ('filled', 'completed'):
+                return 'filled'
+        return None
 
     @staticmethod
     def _external_order_id(response):

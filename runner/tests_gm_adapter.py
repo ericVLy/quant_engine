@@ -40,7 +40,17 @@ class GmBrokerAdapterTest(SimpleTestCase):
             position_effect=1, price=12.34,
         )
 
+    def test_account_and_position_interfaces_are_forwarded(self):
+        self.api.get_cash.return_value = {'available': 1000}
+        self.api.get_positions.return_value = [{'symbol': 'SHSE.600000', 'volume': 100}]
+        self.assertEqual(self.adapter.get_account(), {'available': 1000})
+        self.assertEqual(self.adapter.get_positions()[0]['volume'], 100)
+
     def test_gm_status_values_are_translated(self):
         self.assertEqual(self.adapter._status(3), 'filled')
         self.assertEqual(self.adapter._status(8), 'rejected')
         self.assertIsNone(self.adapter._status(99))
+
+    def test_order_report_does_not_regress_filled_order(self):
+        self.assertEqual(self.adapter._status_rank('filled'), 3)
+        self.assertGreater(self.adapter._status_rank('filled'), self.adapter._status_rank('sent'))

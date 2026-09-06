@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 import asyncio
 from threading import Event
+from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -84,6 +85,62 @@ class RunnerIntegrationTest(TestCase):
 
         self.assertEqual(log.status, 'blocked')
         self.assertEqual(Order.objects.get(log=log).status, 'pending')
+
+    def test_broker_failure_updates_existing_log_and_order(self):
+        case = Case.objects.create(
+            name='Broker failure', node_type='executor', status='published',
+            params={'trigger': {'event_type': 'SUITE_INIT'}, 'result': {
+                'direction': 1, 'order': {'direction': 'buy', 'price': 10, 'volume': 1},
+            }},
+        )
+        self.suite.cases.add(case)
+
+        class Broker:
+            def submit_order(self, *_args):
+                raise RuntimeError('模拟账户拒单')
+
+        with self.assertRaisesRegex(RuntimeError, '模拟账户拒单'):
+            SuiteRunner(broker=Broker()).run(self.plan, '000001')
+        log = ExecutionLog.objects.get(symbol='000001')
+        order = Order.objects.get(log=log)
+        self.assertEqual(log.status, 'failed')
+        self.assertEqual(log.error_code, 'EXECUTION_FAILED')
+        self.assertEqual(order.status, 'rejected')
+        self.assertEqual(order.last_error, '模拟账户拒单')
+
+    def test_account_level_risk_blocks_insufficient_cash(self):
+        class AccountProvider:
+            def get_account(self):
+                return {'available': 50}
+
+            def get_positions(self):
+                return []
+
+        controller = RiskController(
+            max_account_value=1000, account_provider=AccountProvider(),
+            allowed_sessions=[(0, 0, 23, 59)],
+        )
+        with patch('runner.risk.timezone.localtime', return_value=datetime(2026, 9, 7, 10)):
+            decision = controller.check({'direction': 'buy', 'price': 10, 'volume': 6})
+        self.assertFalse(decision.allowed)
+        self.assertIn('可用资金不足', decision.reason)
+
+    def test_account_level_risk_blocks_position_limit(self):
+        class AccountProvider:
+            def get_account(self):
+                return {'available': 100000}
+
+            def get_positions(self):
+                return [{'market_value': 900, 'volume': 90}]
+
+        controller = RiskController(
+            max_position_value=1000, max_position_volume=100,
+            account_provider=AccountProvider(), allowed_sessions=[(0, 0, 23, 59)],
+        )
+        with patch('runner.risk.timezone.localtime', return_value=datetime(2026, 9, 7, 10)):
+            decision = controller.check({'direction': 'buy', 'price': 10, 'volume': 20})
+        self.assertFalse(decision.allowed)
+        self.assertIn('总仓位金额', decision.reason)
 
 
 class SchedulerTest(TestCase):
@@ -234,3 +291,19 @@ class GmOrderReportTest(TestCase):
         self.assertEqual(updated.pk, order.pk)
         self.assertEqual(order.status, 'filled')
         self.assertEqual(order.price, Decimal('12.5000'))
+
+    def test_old_report_cannot_regress_filled_order(self):
+        suite = Suite.objects.create(name='Idempotent Report Suite')
+        log = ExecutionLog.objects.create(symbol='000002', final_direction=1)
+        order = Order.objects.create(
+            log=log, symbol='000002', direction='buy', price='12.0000',
+            volume=100, filled_volume=100, external_order_id='gm-456', status='filled',
+        )
+        adapter = GmBrokerAdapter(api=object())
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-456', 'symbol': '000002', 'status': 1,
+            'price': 12.1, 'filled_volume': 20,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'filled')
+        self.assertEqual(order.filled_volume, 100)

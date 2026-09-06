@@ -123,6 +123,8 @@ class ExecutionLog(models.Model):
     final_direction = models.SmallIntegerField(choices=DIRECTION_CHOICES)
     node_snapshots = models.JSONField(default=dict, blank=True)
     error_msg = models.TextField(blank=True)
+    task_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+    error_code = models.CharField(max_length=50, blank=True)
     status = models.CharField(max_length=20, choices=[('success','成功'),('failed','失败'),('blocked','风控拦截')], default='success')
 
     class Meta:
@@ -143,8 +145,11 @@ class Order(models.Model):
     direction = models.CharField(max_length=10, choices=DIRECTION_CHOICES)
     price = models.DecimalField(max_digits=12, decimal_places=4)
     volume = models.PositiveIntegerField()
+    filled_volume = models.PositiveIntegerField(default=0)
     external_order_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    last_error = models.TextField(blank=True)
+    report_payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
