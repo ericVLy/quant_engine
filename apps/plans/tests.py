@@ -7,6 +7,9 @@ from apps.execution.models import ExecutionLog, SuiteRun
 from apps.watchlists.models import Group, Symbol
 
 from .models import Plan
+from .models import PlanVersion
+from .serializers import PlanSerializer
+from .services import rollback_plan
 from apps.suites.models import Suite
 
 
@@ -144,3 +147,43 @@ class PlanAPITest(APITestCase):
 		response = self.client.delete(f'{self.url}{plan.id}/')
 		self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
 		self.assertFalse(Plan.objects.filter(pk=plan.id).exists())
+
+	def test_validate_retry_policy(self):
+		response = self.client.post(
+			self.url,
+			self.plan_data(retry_policy={'max_retries': -1}),
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('retry_policy', response.data)
+
+	def test_rollback_plan_creates_new_published_version(self):
+		plan = self.create_plan(root_suite=self.published_suite)
+		plan.status = 'published'
+		plan.version = 2
+		plan.name = '当前版本'
+		plan.save(update_fields=['status', 'version', 'name', 'updated_at'])
+		PlanVersion.objects.create(
+			plan=plan, version=1,
+			snapshot={
+				'name': '历史版本', 'root_suite_id': self.published_suite.id,
+				'trigger_type': 'manual', 'symbol_scope': {'type': 'all'},
+				'exec_mode': 'serial', 'retry_policy': {}, 'status': 'published',
+			},
+		)
+
+		response = self.client.post(
+			f'{self.url}{plan.id}/rollback/', {'version': 1}, format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		plan.refresh_from_db()
+		self.assertEqual(plan.name, '历史版本')
+		self.assertEqual(plan.version, 3)
+		self.assertTrue(PlanVersion.objects.filter(plan=plan, version=3).exists())
+
+	def test_rollback_rejects_unknown_version(self):
+		plan = self.create_plan()
+		response = self.client.post(
+			f'{self.url}{plan.id}/rollback/', {'version': 99}, format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

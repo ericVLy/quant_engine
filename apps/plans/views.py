@@ -4,7 +4,7 @@ from rest_framework.response import Response
 
 from .models import Plan, PlanVersion
 from .serializers import PlanSerializer
-from .services import PlanError, delete_plan, publish_plan, resolve_plan_symbols
+from .services import PlanError, delete_plan, publish_plan, resolve_plan_symbols, rollback_plan
 
 
 class PlanViewSet(viewsets.ModelViewSet):
@@ -54,3 +54,15 @@ class PlanViewSet(viewsets.ModelViewSet):
              'snapshot': version.snapshot, 'created_at': version.created_at}
             for version in PlanVersion.objects.filter(plan=plan)
         ])
+
+    @action(detail=True, methods=['post'])
+    def rollback(self, request, pk=None):
+        try:
+            version = int(request.data.get('version'))
+        except (TypeError, ValueError) as exc:
+            return Response({'detail': 'version 必须是整数'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            plan = rollback_plan(self.get_object(), version)
+        except PlanError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(plan).data)
