@@ -281,6 +281,15 @@ class Watchlist(models.Model):
 - 兼容策略：代码中优先查询运行时分表；若分表为空，则回退到 legacy 业务模型（`AStockKLine` / `HKStockKLine` / `USStockKLine`）
 - 生产切换：当前实现通过 `settings.KLINE_DB_ALIAS` 及 `connections[db_alias]` 统一接入，不强依赖硬编码表名
 
+#### 分表查询约束审计
+
+运行时表名已经由 `market + symbol.code` 唯一确定（如 `kline_a_000001`），且 `Symbol.code` 为全局唯一。因此，单张运行时分表设计上只属于一个标的，读取时再使用 `symbol_id` 作为 `WHERE` 条件属于重复过滤。
+
+- 运行时分表查询仅按 `date BETWEEN start_date AND end_date` 过滤
+- `symbol_id` 继续保留在表结构中，用于写入、去重、数据追溯和兼容既有数据
+- 写入阶段仍按 `symbol_id + date` 检查重复记录
+- 若未来改为多标的共表，必须恢复查询约束并重新评估唯一索引
+
 #### API 端点
 
 | 方法 | 端点 | 功能 |
