@@ -75,33 +75,57 @@ class GmBrokerAdapter:
 
     @staticmethod
     def _status(value):
+        if hasattr(value, 'value'):
+            value = value.value
+        if isinstance(value, str):
+            return {
+                'new': 'pending', 'pending': 'pending', 'created': 'pending',
+                'submitted': 'sent', 'sent': 'sent', 'accepted': 'sent',
+                'partial_filled': 'sent', 'part_filled': 'sent',
+                'filled': 'filled', 'completed': 'filled',
+                'rejected': 'rejected', 'reject': 'rejected',
+                'canceled': 'canceled', 'cancelled': 'canceled',
+            }.get(value.strip().lower())
         return {
+            0: 'pending',
             1: 'sent',
             2: 'sent',
             3: 'filled',
             8: 'rejected',
             5: 'rejected',
+            6: 'canceled',
         }.get(value)
+
+    @staticmethod
+    def _report_value(report, *names):
+        for name in names:
+            value = report.get(name) if isinstance(report, dict) else getattr(report, name, None)
+            if value is not None:
+                return value
+        return None
 
     @transaction.atomic
     def on_order_status(self, report):
         """Apply a gm order report to a local Order, when identifiable."""
-        external_id = report.get('cl_ord_id') or report.get('order_id')
+        external_id = self._report_value(report, 'cl_ord_id', 'order_id', 'order_id_str')
         local_order = Order.objects.filter(external_order_id=external_id).first()
         if local_order is None:
             local_order = Order.objects.filter(
-                symbol=report.get('symbol', ''),
+                symbol=self._report_value(report, 'symbol') or '',
                 status__in=('pending', 'sent'),
             ).order_by('-created_at').first()
         if local_order is None:
             return None
-        status = self._status(report.get('status'))
+        status = self._status(self._report_value(report, 'status', 'order_status'))
         if status:
             local_order.status = status
-        if report.get('price') is not None:
-            local_order.price = Decimal(str(report['price']))
-        if status or report.get('price') is not None:
-            local_order.save(update_fields=['status', 'price', 'updated_at'])
+        price = self._report_value(report, 'price', 'filled_price', 'avg_price')
+        if price is not None:
+            local_order.price = Decimal(str(price))
+        if external_id and local_order.external_order_id != str(external_id):
+            local_order.external_order_id = str(external_id)
+        if status or price is not None or external_id:
+            local_order.save(update_fields=['status', 'price', 'external_order_id', 'updated_at'])
         return local_order
 
     def on_error(self, callback):

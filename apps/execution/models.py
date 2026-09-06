@@ -134,7 +134,10 @@ class ExecutionLog(models.Model):
 
 class Order(models.Model):
     DIRECTION_CHOICES = [('buy','买入'),('sell','卖出')]
-    STATUS_CHOICES = [('pending','待发送'),('sent','已发送'),('filled','已成交'),('rejected','已拒绝')]
+    STATUS_CHOICES = [
+        ('pending', '待发送'), ('sent', '已发送'), ('filled', '已成交'),
+        ('rejected', '已拒绝'), ('canceled', '已撤单'),
+    ]
     log = models.ForeignKey(ExecutionLog, on_delete=models.CASCADE, related_name='orders')
     symbol = models.CharField(max_length=20)
     direction = models.CharField(max_length=10, choices=DIRECTION_CHOICES)
