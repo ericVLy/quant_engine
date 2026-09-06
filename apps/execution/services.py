@@ -103,34 +103,54 @@ def process_next_event(run):
     if not run.event_queue:
         return None
 
-    event_id = run.event_queue[0]
-    event = Event.objects.get(pk=event_id, run=run)
-    event.status = 'processing'
-    event.save(update_fields=['status'])
-
     try:
-        matching_edges = Edge.objects.filter(from_suite=run.suite)
-        for edge in matching_edges:
-            if _event_condition_matches(edge.event_condition, event.payload):
-                enqueue_event(
-                    run,
-                    edge.event_condition.get('next_event', EventType.CASE_START),
-                    source=f'edge:{edge.pk}',
-                    payload=event.payload,
-                )
-        event.status = 'done'
-        event.processed_at = timezone.now()
-        event.save(update_fields=['status', 'processed_at'])
-        run.event_queue = run.event_queue[1:]
-        run.save(update_fields=['event_queue'])
-        return event
+        with transaction.atomic():
+            locked_run = SuiteRun.objects.select_for_update().select_related('suite').get(pk=run.pk)
+            if locked_run.status not in ('running', 'pending'):
+                raise ExecutionError(f'运行 {locked_run.pk} 当前状态为 {locked_run.status}，不能处理事件')
+            if not locked_run.event_queue:
+                return None
+
+            event_id = locked_run.event_queue[0]
+            event = Event.objects.select_for_update().get(pk=event_id, run=locked_run)
+            if event.status == 'done':
+                locked_run.event_queue = locked_run.event_queue[1:]
+                locked_run.save(update_fields=['event_queue'])
+                return event
+            if event.status == 'failed':
+                raise ExecutionError(f'事件 {event.pk} 已失败，不能重复处理')
+
+            event.status = 'processing'
+            event.save(update_fields=['status'])
+            event_payload = {'event_type': event.event_type, **(event.payload or {})}
+            source_suite_id = event_payload.get('target_suite_id') or locked_run.suite_id
+            matching_edges = Edge.objects.filter(from_suite_id=source_suite_id)
+            for edge in matching_edges:
+                if _event_condition_matches(edge.event_condition, event_payload):
+                    next_payload = dict(event.payload or {})
+                    next_payload['target_suite_id'] = edge.to_suite_id
+                    enqueue_event(
+                        locked_run,
+                        (edge.event_condition or {}).get('next_event', EventType.CASE_START),
+                        source=f'edge:{edge.pk}',
+                        payload=next_payload,
+                    )
+            event.status = 'done'
+            event.processed_at = timezone.now()
+            event.save(update_fields=['status', 'processed_at'])
+            locked_run.event_queue = locked_run.event_queue[1:]
+            locked_run.save(update_fields=['event_queue'])
+            run.refresh_from_db()
+            return event
     except Exception:
-        event.status = 'failed'
-        event.processed_at = timezone.now()
-        event.save(update_fields=['status', 'processed_at'])
-        run.status = 'failed'
-        run.ended_at = timezone.now()
-        run.save(update_fields=['status', 'ended_at'])
+        event = locals().get('event')
+        if event is not None and event.pk:
+            Event.objects.filter(pk=event.pk).update(
+                status='failed', processed_at=timezone.now(),
+            )
+        SuiteRun.objects.filter(pk=run.pk).update(
+            status='failed', ended_at=timezone.now(),
+        )
         raise
 
 

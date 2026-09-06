@@ -1,7 +1,7 @@
 # 量化交易系统 · 全模块需求文档
 
 > 版本：v2.3  
-> 日期：2026-09-04  
+> 日期：2026-09-06  
 > 状态：实现基线已稳定 · 以代码为准，文档已同步校正
 
 
@@ -377,11 +377,11 @@ cd c:\Users\linye\Documents\quant_engine
 - 该兼容层已改为“保留接口名称、切换数据实现”，后续其他模块可继续按已有 `Symbol + start/end` 的协议调用，不需要大面积改动上层代码
 
 
-### 模块4：`execution`（事件与执行基础设施）⚠️ 基础闭环已完成
+### 模块4：`execution`（事件与执行基础设施）🟢 执行闭环已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ⚠️ 数据层和基础执行闭环已完成，独立 runner 与 Case 执行待开发 |
+| **状态** | 🟢 同步执行闭环与事件路由已完成，真实交易回报验证待完善 |
 | **优先级** | P0 |
 | **依赖** | `plans.Plan`, `suites.Suite`（外键允许空） |
 
@@ -424,8 +424,8 @@ cd c:\Users\linye\Documents\quant_engine
 | EX-12 | ExecutionLog 只读 API | ✅ 完成 | `views.py` |
 | EX-13 | Order CRUD API | ✅ 完成 | `views.py` |
 | EX-14 | Admin 后台注册所有模型 | ✅ 完成 | `admin.py` |
-| EX-15 | **事件循环基础处理** | 🟡 部分完成 | `services.py`；关联开发任务：5.1.3-2、5.1.3-4 |
-| EX-16 | **事件匹配逻辑（Event → Edge 路由）** | 🟡 基础完成 | `services.py`；关联开发任务：5.1.3-2 |
+| EX-15 | **事件循环基础处理** | ✅ 完成 | `services.py`；独立 runner 负责 Case 执行与异步编排 |
+| EX-16 | **事件匹配逻辑（Event → Edge 路由）** | ✅ 完成 | `services.py`；支持事件类型、目标 Suite 与后续事件传递 |
 | EX-17 | **Plan 触发接口（创建 SuiteRun）** | ✅ 完成 | `views.py`, `services.py` |
 | EX-18 | **SuiteRun 状态流转逻辑** | ✅ 完成 | `services.py` |
 | EX-19 | **委托单状态回写（对接交易接口）** | 🟡 已接入 gm 适配器，生产回报验证待完善 | `runner/gm_adapter.py`；关联开发任务：5.1.2-4 |
@@ -478,10 +478,10 @@ class EventTypeRegistry(models.Model):
 - 校验已发布 Plan 并创建 SuiteRun，同时注入 `SUITE_INIT` 事件。
 - 启动、停止和完成 SuiteRun，并记录开始/结束时间。
 - 校验事件类型、持久化 Event，并维护 `event_queue` 中的事件 ID。
-- 消费队列事件，按 `Edge.event_condition` 做简单键值匹配并路由后续事件。
+- 消费队列事件时使用行级锁，按 `Edge.event_condition` 匹配事件类型和载荷，并将目标 Suite 与后续事件传递到队列。
 - 事件处理异常时，将 Event 和 SuiteRun 标记为失败。
 
-该实现是执行层的同步基础服务，是 `runner` 事件驱动执行的基础骨架；当前代码中仍保留同步处理入口，不等同于独立进程内的完整 long-running EventLoop。真实 `CaseExecutor`、生产数据上下文和交易回报链路仍需在 `runner` / `cases` 模块中继续补齐。
+该实现是执行层的同步事件消费服务；独立 runner 负责真实 `CaseExecutor`、生产数据上下文和异步编排。订单回报适配已支持外部 ID、状态字符串/枚举、成交价和撤单状态归一化，但生产交易环境的完整回报字段仍需使用沙盒或实盘联调验证。
 
 
 ### 模块5：`cases`（原子策略节点）🟡 P0 基础能力已完成
@@ -784,7 +784,7 @@ class Plan(models.Model):
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 15 通过 | 100% |
 | `datasources` | ✅ 已完成 | 18 通过 | 100% |
-| `execution` | ⚠️ 基础闭环完成 | 12 通过 | 80%（生产回报字段待完善；NodeRun 已就绪） |
+| `execution` | 🟢 执行闭环完成 | 14 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
 | `cases` | 🟢 P0 核心能力完成 | 16 通过 | 95%（业务指标目录和更深层语义校验待完善） |
 | `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（画布前端对接、边条件操作符扩展待完善） |
 | `plans` | 🟢 P0 核心能力完成 | 10 通过 | 95%（版本回滚待完善） |
@@ -821,7 +821,7 @@ class Plan(models.Model):
 | P0（已完成基础能力） | 接入基本面数据上下文（AkShare 个股信息适配器已接入） | `runner`, `datasources` | R-07；财务报表、缓存和历史时点数据待扩展 |
 | P0（已完成基础能力） | 持久化 Cron 调度和配置刷新（常驻轮询、版本刷新、归档清理已完成） | `plans`, `runner` | P-03、P-05、R-01、R-09；版本回滚、多实例调度治理待完善 |
 | P0（已完成基础能力） | 扩展 Case 参数 JSON Schema 深层校验（白名单与基础校验已完成） | `cases` | C-07、C-09；指标目录和更深层语义校验待完善 |
-| P1 | 完善真实交易环境回报字段和订单生命周期适配 | `runner`, `execution` | EX-18 |
+| P1 | 使用沙盒完善真实交易环境回报字段和订单生命周期联调 | `runner`, `execution` | EX-18 |
 | P1 | 补充账户总仓位/总资金上限风控 | `runner`, `execution` | R-08 |
 | P1 | 边条件操作符扩展（op: eq/gt/lt/between 等，前后端契约同步） | `suites`, 前端 | S-09 |
 | P1 | 拓扑校验增强（孤立节点、跨树入边校验） | `suites` | S-09 |
