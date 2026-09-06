@@ -34,6 +34,8 @@ class WorkerPool:
         self.worker_count = worker_count
 
     async def run(self, task_queue):
+        errors = []
+
         async def worker():
             while True:
                 try:
@@ -42,7 +44,9 @@ class WorkerPool:
                     return
                 try:
                     policy = plan.retry_policy or {}
-                    max_retries = max(0, int(policy.get('max_retries', 0)))
+                    max_retries = int(policy.get('max_retries', 0))
+                    if max_retries < 0:
+                        raise ValueError('max_retries 必须大于等于 0')
                     for attempt in range(max_retries + 1):
                         try:
                             await self.runner.arun(plan, symbol, payload)
@@ -53,6 +57,8 @@ class WorkerPool:
                             delay = max(0, float(policy.get('delay_seconds', 0)))
                             if delay:
                                 await asyncio.sleep(delay)
+                except Exception as exc:
+                    errors.append(exc)
                 finally:
                     task_queue.task_done()
 
@@ -61,3 +67,5 @@ class WorkerPool:
         for worker_task in workers:
             worker_task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        if errors:
+            raise errors[0]

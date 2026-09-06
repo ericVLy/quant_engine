@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+import asyncio
 from threading import Event
 
 from django.test import TestCase
@@ -16,6 +17,7 @@ from .gm_adapter import GmBrokerAdapter
 from .risk import RiskController
 from .scheduler import Scheduler
 from .registry import PlanRegistry
+from .queue import TaskQueue, WorkerPool
 
 
 class RunnerIntegrationTest(TestCase):
@@ -155,6 +157,30 @@ class SchedulerTest(TestCase):
             clock=Clock(),
         )
         self.assertEqual(len(calls), 1)
+
+    def test_sunday_cron_matches_zero_and_seven(self):
+        sunday = datetime(2026, 8, 30, 10, 0)
+        self.assertTrue(Scheduler._matches_cron('0 10 * * 0', sunday))
+        self.assertTrue(Scheduler._matches_cron('0 10 * * 7', sunday))
+
+
+class WorkerPoolTest(TestCase):
+    def test_failed_task_is_reported_after_retries(self):
+        calls = []
+
+        class PlanStub:
+            retry_policy = {'max_retries': 1, 'delay_seconds': 0}
+
+        class RunnerStub:
+            async def arun(self, plan, symbol, payload):
+                calls.append(symbol)
+                raise RuntimeError('task failed')
+
+        queue = TaskQueue()
+        queue.put_nowait(PlanStub(), '000001')
+        with self.assertRaisesRegex(RuntimeError, 'task failed'):
+            asyncio.run(WorkerPool(RunnerStub()).run(queue))
+        self.assertEqual(calls, ['000001', '000001'])
 
 
 class SuiteRuntimeTest(TestCase):

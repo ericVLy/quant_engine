@@ -700,11 +700,11 @@ class Plan(models.Model):
 - 当前能力覆盖自动 Cron 触发、配置热刷新、重试策略校验和历史版本回滚；跨进程分布式去重和多实例领导者选举仍属于后续增强范围。
 
 
-### 模块8：`runner`（独立异步引擎）🟢 核心能力已完成
+### 模块8：`runner`（独立异步引擎）✅ P0 核心能力已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | 🟢 EventLoop、SuiteRunner、Scheduler、TaskQueue、WorkerPool、真实数据上下文、技术指标因子引擎、复杂风控、热加载注册中心已完成；真实交易环境回报字段与基本面数据仍待扩展 |
+| **状态** | ✅ EventLoop、SuiteRunner、Scheduler、TaskQueue、WorkerPool、真实行情数据上下文、技术指标因子引擎、基础风控、热加载注册中心和执行日志链路已完成；真实交易回报、总仓位风控和基本面扩展属于 P1 增强 |
 | **优先级** | P0 |
 | **依赖** | `execution.SuiteRun`, `execution.Event`, `cases.Case`, `suites.Suite`, `plans.Plan` |
 
@@ -712,17 +712,17 @@ class Plan(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| R-01 | **Scheduler（调度器）**：定时扫描 Plan，按 Cron 表达式触发执行 | P0 |
-| R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | ✅ 基础完成 |
-| R-03 | **Worker Pool**：固定数量协程并发执行任务 | ✅ 基础完成 |
+| R-01 | **Scheduler（调度器）**：定时扫描 Plan，按 Cron 表达式触发执行 | ✅ 完成 |
+| R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | ✅ 完成 |
+| R-03 | **Worker Pool**：固定数量协程并发执行任务 | ✅ 完成（并发、重试和失败传播） |
 | R-04 | **SuiteRunner**：加载 Suite 拓扑，创建 SuiteRun 实例 | ✅ 完成；优先读取发布快照（SuiteVersion），支持子 Suite 递归执行 |
 | R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | ✅ 完成；快照驱动编排：子 Suite 递归执行、树形聚合、parallel 分支并发 join、fail_stop 失败传播、NodeRun 轨迹记录 |
 | R-06 | **CaseExecutor**：执行单个 Case 的运算逻辑（因子计算/过滤/裁决） | ✅ 技术指标引擎已接入（MA/EMA/MACD/RSI/KDJ/BOLL/ROC/波动率/涨跌幅 + 过滤 + 综合裁决）；兼容声明式 result |
-| R-07 | **数据夹具（Fixture）**：为 Case 执行提供数据上下文（K线/基本面/实时快照） | ✅ DB 分表 K线 + RealtimeSnapshot 实时快照 + gm SDK 行情回退 已接入（`DataContextBuilder`）；基本面数据仍为占位待扩展 |
+| R-07 | **数据夹具（Fixture）**：为 Case 执行提供数据上下文（K线/基本面/实时快照） | ✅ DB 分表 K线 + RealtimeSnapshot 实时快照 + gm SDK 行情回退 + AkShare 基本面基础字段已接入（`DataContextBuilder`） |
 | R-08 | **风控拦截器**：在 Executor 节点输出前校验仓位/资金限制 | ✅ 单向持仓（long_only/short_only/flat）、单笔数量/金额上限、每日累计金额上限、交易时段校验已接入（`RiskController`） |
 | R-09 | **热加载**：Plan 发布后自动刷新内存中的 DAG 配置 | ✅ `PlanRegistry` 已固化可执行快照并支持冷启动自愈；Scheduler 经注册中心读取已发布 Plan |
-| R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 基础完成 |
-| R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 基础完成 |
+| R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 完成 |
+| R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 完成 |
 
 当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`、`runner/gm_adapter.py`、`runner/fundamentals.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；`GmBrokerAdapter` 已封装 gm SDK 的 `set_token`、`subscribe`、`history`、`history_n`、`schedule`、`order_volume`、`get_orders` 及订单状态回调。真实因子、行情 Fixture、风控和交易回报的生产策略仍可在该适配边界上继续扩展。
 
@@ -792,7 +792,7 @@ class Plan(models.Model):
 | `cases` | ✅ P0 能力完成 | 21 通过 | 100%（后续仅保留扩展指标目录的兼容性维护） |
 | `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（画布前端对接、边条件操作符扩展待完善） |
 | `plans` | ✅ P0 能力完成 | 13 通过 | 100%（后续仅保留多实例调度治理） |
-| `runner` | 🟢 核心能力完成 | 56 通过 | 94%（真实交易回报、基本面扩展指标与总仓位风控待完善） |
+| `runner` | ✅ P0 能力完成 | 58 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 
 
 ## 五、待办事项汇总
@@ -808,11 +808,11 @@ class Plan(models.Model):
 | EventRegistry 数据库回退与缓存回填 | `execution` | ✅ 已完成 | EX-02 |
 | gm SDK 行情查询、订阅、调度、下单和订单回报适配 | `runner`, `execution` | ✅ 已完成 | R-01、R-07、R-11、EX-18 |
 | gm 订单外部 ID 关联与本地状态回写 | `runner`, `execution` | ✅ 基础完成 | EX-18、R-11 |
-| 基础行情 Fixture、数量/金额风控、可注入 Case 计算 | `runner`, `cases`, `datasources` | ✅ 基础完成 | R-06、R-07、R-08 |
+| 基础行情 Fixture、数量/金额风控、可注入 Case 计算 | `runner`, `cases`, `datasources` | ✅ 已完成 | R-06、R-07、R-08 |
 | AkShare 基本面上下文适配器（个股信息、估值基础字段、异常降级） | `runner`, `datasources` | ✅ 基础完成 | R-07 |
 | 技术指标因子引擎（MA/EMA/MACD/RSI/KDJ/BOLL/ROC 等）与过滤/裁决 | `runner`, `cases` | ✅ 已完成 | C-09、R-06 |
-| 数据上下文构建（DB 分表 K线 + 实时快照 + gm 回退） | `runner`, `datasources` | ✅ 已完成（基本面待补） | R-07 |
-| 复杂风控（单向持仓/单笔与每日限额/交易时段） | `runner` | ✅ 已完成（总仓位上限待补） | R-08 |
+| 数据上下文构建（DB 分表 K线 + 实时快照 + gm 回退） | `runner`, `datasources` | ✅ 已完成（基本面基础字段已接入） | R-07 |
+| 复杂风控（单向持仓/单笔与每日限额/交易时段） | `runner` | ✅ P0 已完成（总仓位上限为 P1） | R-08 |
 | Plan 热加载注册中心（PlanRegistry，冷启动自愈） | `runner`, `plans` | ✅ 已完成 | R-09 |
 | Suite 发布拓扑快照（SuiteVersion，不可变、递归子树） | `suites` | ✅ 已完成 | S-09 |
 | 节点级运行实例（NodeRun，父子层级 + 轨迹回放） | `execution` | ✅ 已完成 | EX-15 |
@@ -851,7 +851,7 @@ class Plan(models.Model):
 | P0 阶段2 | `cases` CRUD、发布和深层参数校验测试 | ✅ 21 个通过 | 持续维护新增指标的目录兼容性 |
 | P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | 画布前端拓扑测试、边条件操作符测试 |
 | P0 阶段4 | `plans` CRUD、发布、标的解析、调度与版本管理测试 | ✅ 13 个通过 | 多实例调度治理测试 |
-| P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 50 个通过（含 7 个编排用例：子 Suite 递归、树形聚合、并行 join、fail_stop、快照驱动执行） | 生产行情、风控边界、真实交易环境测试 |
+| P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 58 个通过（含编排、Cron 边界、WorkerPool 重试失败传播和数据上下文用例） | 生产行情、风控边界、真实交易环境测试 |
 | 阶段6 | 全项目回归测试 | ✅ 136 个通过（另有 2 个 watchlists 测试存在预存顺序失败，已归档为测试基建问题，生产不触发） | 持续回归新增功能 |
 
 #### 测试验收标准
