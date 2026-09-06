@@ -41,22 +41,26 @@ class PlanRegistry:
     @classmethod
     def published_plans(cls):
         """返回按注册中心缓存的已发布 Plan 实例（模拟 session）。"""
-        from apps.plans.models import Plan
+        cls.sync_from_database()
         for entry in cls._plans.values():
             plan = entry.get('plan')
-            if plan is not None and getattr(plan, 'status', None) == 'published':
+            if plan is not None:
                 yield plan
-        # 进程冷启动时回退到数据库，并顺带把缺失实例刷新进缓存（自愈加载）
-        refreshed = False
-        for plan in Plan.objects.filter(status='published'):
+
+    @classmethod
+    def sync_from_database(cls):
+        """同步已发布 Plan，清理已下线配置并刷新版本变化。"""
+        from apps.plans.models import Plan
+
+        published = list(Plan.objects.filter(status='published'))
+        published_ids = {plan.pk for plan in published}
+        for plan_id in set(cls._plans) - published_ids:
+            cls.remove(plan_id)
+        for plan in published:
             existing = cls._plans.get(plan.pk)
-            if existing is None:
-                cls.refresh(plan)
-                refreshed = True
-                yield plan
-            elif plan.version != existing.get('version'):
-                cls.refresh(plan)
-                yield plan
+            if existing is None or existing.get('version') != plan.version:
+                cls.refresh(plan, force=True)
+        return len(published)
 
     @classmethod
     def remove(cls, plan_id):
