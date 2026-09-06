@@ -114,6 +114,40 @@ class CaseAPITest(APITestCase):
         with self.assertRaises(ValidationError):
             validate_case_schema('signal', {'period': True})
 
+    def test_reject_unknown_indicator(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('signal', {'indicator': 'unknown_indicator'})
+
+    def test_reject_invalid_macd_period_order(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('signal', {
+                'indicator': 'macd', 'fast': 26, 'slow': 12, 'signal': 9,
+            })
+
+    def test_reject_inverted_rsi_thresholds(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('signal', {
+                'indicator': 'rsi', 'threshold_oversold': 80,
+                'threshold_overbought': 20,
+            })
+
+    def test_reject_zero_verdict_weights(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('verdict', {
+                'verdict': {'method': 'weighted_sum', 'components': [
+                    {'indicator': 'rsi', 'period': 14, 'weight': 0},
+                ]},
+            })
+
+    def test_reject_duplicate_verdict_indicators(self):
+        with self.assertRaises(ValidationError):
+            validate_case_schema('verdict', {
+                'verdict': {'method': 'vote', 'components': [
+                    {'indicator': 'rsi', 'period': 14},
+                    {'indicator': 'rsi', 'period': 7},
+                ]},
+            })
+
     def test_list_filter_and_search_cases(self):
         Case.objects.create(name='RSI 信号', node_type='signal')
         Case.objects.create(name='均线过滤', node_type='filter')

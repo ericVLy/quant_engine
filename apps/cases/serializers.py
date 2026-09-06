@@ -63,6 +63,24 @@ CASE_SCHEMA = {
 }
 
 
+# Keep this catalog aligned with runner.factors._signal and its legacy API.
+INDICATOR_CATALOG = {
+    'ma': 1,
+    'sma': 1,
+    'mean': 1,
+    'ema': 1,
+    'macd': 1,
+    'rsi': 2,
+    'kdj': 1,
+    'boll': 2,
+    'roc': 1,
+    'momentum': 1,
+    'pct_change': 1,
+    'volatility': 2,
+}
+LEGACY_CALCULATIONS = {'last', 'mean', 'compare'}
+
+
 def validate_case_schema(node_type, value):
     def invalid(path, message):
         raise serializers.ValidationError(f'{node_type} 参数 {path}: {message}')
@@ -158,6 +176,8 @@ def validate_case_schema(node_type, value):
         components = verdict_cfg.get('components')
         if not isinstance(components, list) or not components:
             invalid('verdict.components', '必须是非空数组')
+        weights = []
+        configured_indicators = set()
         component_keys = {
             'indicator', 'calculation', 'field', 'high_field', 'low_field',
             'period', 'fast', 'slow', 'signal', 'threshold',
@@ -172,6 +192,12 @@ def validate_case_schema(node_type, value):
                 invalid(path, f'不允许的字段: {", ".join(sorted(unknown_component))}')
             if not (component.get('indicator') or component.get('calculation')):
                 invalid(path, '必须提供 indicator 或 calculation')
+            if component.get('indicator') and component.get('calculation'):
+                invalid(path, 'indicator 与 calculation 只能配置一个')
+            configured_name = component.get('indicator') or component.get('calculation')
+            if configured_name in configured_indicators:
+                invalid(path, f'不允许重复配置指标: {configured_name}')
+            configured_indicators.add(configured_name)
             for key in ('field', 'high_field', 'low_field'):
                 if key in component:
                     validate_string(f'{path}.{key}', component[key])
@@ -183,6 +209,45 @@ def validate_case_schema(node_type, value):
                     validate_number(f'{path}.{key}', component[key])
             if 'weight' in component and float(component['weight']) < 0:
                 invalid(f'{path}.weight', '不能小于 0')
+            if component.get('indicator'):
+                validate_indicator(path, component)
+            else:
+                validate_calculation(path, component)
+            weights.append(float(component.get('weight', 1.0)))
+        if sum(weights) <= 0:
+            invalid('verdict.components', '权重总和必须大于 0')
+
+    def validate_indicator(path, config):
+        indicator = config.get('indicator')
+        if indicator not in INDICATOR_CATALOG:
+            invalid(f'{path}.indicator', f'不支持的指标: {indicator}')
+        period = config.get('period')
+        minimum = INDICATOR_CATALOG[indicator]
+        if period is not None and period < minimum:
+            invalid(f'{path}.period', f'{indicator} 周期必须大于等于 {minimum}')
+        if indicator == 'macd':
+            fast = config.get('fast', 12)
+            slow = config.get('slow', 26)
+            if fast >= slow:
+                invalid(f'{path}.fast', '必须小于 slow')
+        if indicator in ('rsi', 'kdj'):
+            validate_threshold_range(path, config)
+
+    def validate_calculation(path, config):
+        calculation = config.get('calculation')
+        if calculation not in LEGACY_CALCULATIONS and calculation not in INDICATOR_CATALOG:
+            invalid(f'{path}.calculation', f'不支持的计算方式: {calculation}')
+        if calculation in INDICATOR_CATALOG:
+            validate_indicator(path, {'indicator': calculation, **config})
+
+    def validate_threshold_range(path, config):
+        oversold = config.get('threshold_oversold')
+        overbought = config.get('threshold_overbought')
+        for name, value in (('threshold_oversold', oversold), ('threshold_overbought', overbought)):
+            if value is not None and not 0 <= float(value) <= 100:
+                invalid(f'{path}.{name}', '必须在 0 到 100 之间')
+        if oversold is not None and overbought is not None and oversold >= overbought:
+            invalid(f'{path}.threshold_oversold', '必须小于 threshold_overbought')
 
     allowed_keys = {
         'trigger', 'period', 'threshold_oversold', 'threshold_overbought',
@@ -205,6 +270,8 @@ def validate_case_schema(node_type, value):
             invalid('trigger', '必须是包含非空 event_type 的对象')
         if set(trigger.keys()) - {'event_type'}:
             invalid('trigger', '只允许 event_type 字段')
+    if value.get('indicator') and value.get('calculation'):
+        invalid('params', 'indicator 与 calculation 只能配置一个')
     if 'period' in value:
         validate_integer('period', value['period'], minimum=1)
     if 'direction' in value and (isinstance(value['direction'], bool) or value['direction'] not in (-1, 0, 1)):
@@ -212,12 +279,18 @@ def validate_case_schema(node_type, value):
     for key in ('threshold_oversold', 'threshold_overbought', 'threshold', 'weight'):
         if key in value:
             validate_number(key, value[key])
+    if value.get('indicator') in ('rsi', 'kdj'):
+        validate_threshold_range('', value)
     for key in ('calculation', 'indicator', 'field', 'high_field', 'low_field', 'node_type'):
         if key in value:
             validate_string(key, value[key])
     for key in ('fast', 'slow', 'signal'):
         if key in value:
             validate_integer(key, value[key], minimum=1)
+    if 'indicator' in value:
+        validate_indicator('indicator', value)
+    if 'calculation' in value:
+        validate_calculation('calculation', value)
     if 'result' in value:
         validate_result(value['result'])
     order = value.get('order')
