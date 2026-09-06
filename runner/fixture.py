@@ -9,7 +9,7 @@
 ``DataContextBuilder.build`` 返回统一结构，供 ``CaseExecutor`` 的因子计算使用。
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.utils import timezone
 
@@ -37,7 +37,7 @@ def _db_kline(symbol, count=50, end_time=None):
     # 数据不足时向前扩大窗口重试
     attempts = 0
     while len(rows) < count and attempts < 5:
-        start_date = start_date.replace(day=1)  # 向前扩到月初
+        start_date = end_date - timedelta(days=30 * (attempts + 1))
         next_rows = query_kline_table(symbol, start_date, end_date)
         if not next_rows or len(next_rows) == len(rows):
             break

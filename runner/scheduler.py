@@ -30,12 +30,14 @@ class Scheduler:
         fields = expression.split()
         if len(fields) != 5:
             return False
-        values = [value.minute, value.hour, value.day, value.month, value.weekday()]
-        return all(Scheduler._matches_field(field, current)
-                   for field, current in zip(fields, values))
+        values = [value.minute, value.hour, value.day, value.month,
+                  (value.weekday() + 1) % 7]
+        bounds = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+        return all(Scheduler._matches_field(field, current, *limit)
+                   for field, current, limit in zip(fields, values, bounds))
 
     @staticmethod
-    def _matches_field(field, value):
+    def _matches_field(field, value, minimum=None, maximum=None):
         for part in field.split(','):
             try:
                 base, _, step_text = part.partition('/')
@@ -48,10 +50,20 @@ class Scheduler:
                     continue
                 if '-' in base:
                     start, end = (int(item) for item in base.split('-', 1))
-                    if start <= value <= end and (value - start) % step == 0:
+                    if minimum is not None and (start < minimum or end > maximum or start > end):
+                        return False
+                    if minimum == 0 and maximum == 7 and value == 0 and end == 7:
+                        current = 7
+                    else:
+                        current = value
+                    if start <= current <= end and (current - start) % step == 0:
                         return True
                     continue
-                if step == 1 and value == int(base):
+                point = int(base)
+                if minimum is not None and not minimum <= point <= maximum:
+                    return False
+                is_sunday_alias = minimum == 0 and maximum == 7 and value == 0 and point == 7
+                if step == 1 and (value == point or is_sunday_alias):
                     return True
             except (TypeError, ValueError):
                 return False
