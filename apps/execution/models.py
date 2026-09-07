@@ -134,6 +134,50 @@ class ExecutionLog(models.Model):
         return f"{self.symbol} @ {self.trigger_time}"
 
 
+class FundAllocation(models.Model):
+    """分级资金申请：Plan 占用账户资金，Suite 向 Plan 申请，Case 向 Suite 申请。
+
+    - plan 级：suite/case 均为空，额度上限为 Plan.allocated_capital；
+    - suite 级：挂在 (plan, suite)，同一 Plan 下所有 suite 级申请之和不得超过 plan 级额度；
+    - case 级：挂在 (plan, suite, case)，同一 suite 下所有 case 级申请之和不得超过该 suite 级额度。
+    运行时下单按 case → suite → plan 就近扣减 ``used_amount``（行级锁保证并发安全）。
+    """
+    LEVEL_CHOICES = [('plan', 'Plan 级'), ('suite', 'Suite 级'), ('case', 'Case 级')]
+    STATUS_CHOICES = [('active', '生效中'), ('released', '已释放')]
+
+    level = models.CharField(max_length=10, choices=LEVEL_CHOICES)
+    plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name='fund_allocations')
+    suite = models.ForeignKey(Suite, on_delete=models.CASCADE, null=True, blank=True, related_name='fund_allocations')
+    case = models.ForeignKey('cases.Case', on_delete=models.CASCADE, null=True, blank=True, related_name='fund_allocations')
+    amount = models.DecimalField(max_digits=16, decimal_places=2, verbose_name='申请额度')
+    used_amount = models.DecimalField(max_digits=16, decimal_places=2, default=0, verbose_name='已占用金额')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['plan'], condition=models.Q(level='plan'),
+                name='unique_plan_level_allocation',
+            ),
+            models.UniqueConstraint(
+                fields=['plan', 'suite'],
+                condition=models.Q(level='suite'),
+                name='unique_suite_level_allocation',
+            ),
+            models.UniqueConstraint(
+                fields=['plan', 'suite', 'case'],
+                condition=models.Q(level='case'),
+                name='unique_case_level_allocation',
+            ),
+        ]
+
+    def __str__(self):
+        target = self.case_id or self.suite_id or self.plan_id
+        return f'{self.level}:{target} amount={self.amount} used={self.used_amount}'
+
+
 class Order(models.Model):
     DIRECTION_CHOICES = [('buy','买入'),('sell','卖出')]
     STATUS_CHOICES = [
@@ -150,6 +194,11 @@ class Order(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     last_error = models.TextField(blank=True)
     report_payload = models.JSONField(default=dict, blank=True)
+    # 下单时从哪个资金额度扣减（FundAllocation），用于失败回退与审计
+    fund_allocation = models.ForeignKey(
+        'FundAllocation', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='orders',
+    )
     # 已处理的回报指纹（外部 order id + 状态 + 累计成交量 + 价格），用于重复回报幂等去重
     processed_report_keys = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

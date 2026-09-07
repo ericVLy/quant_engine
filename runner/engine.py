@@ -118,7 +118,11 @@ class EventLoop:
                 'weight': (case.params or {}).get('weight', 1.0),
             })
             if result.order:
-                self.orders.append(result.order)
+                # 订单携带产生它的 case/suite 来源，用于分级资金占用扣减
+                order_item = dict(result.order)
+                order_item['case_id'] = case.pk
+                order_item['suite_id'] = node['suite_id']
+                self.orders.append(order_item)
         # 同步递归路由出边（出边按 CASE_COMPLETED 匹配）：子 Suite 分支执行
         # 完毕（join）后并入本节点聚合
         self._route_edges(SimpleNamespace(event_type=EventType.CASE_COMPLETED,
@@ -191,6 +195,24 @@ class EventLoop:
             log=log, symbol=self.run.symbol, direction=direction,
             price=Decimal(str(order_data['price'])), volume=int(order_data['volume']),
         )
+        # 分级资金占用：case → suite → plan 就近扣减；未配置额度时保持旧行为
+        order_value = Decimal(str(order_data['price'])) * int(order_data['volume'])
+        from apps.execution.funds import InsufficientFunds, reserve_for_order
+        try:
+            allocation = reserve_for_order(
+                self.run.plan,
+                suite=order_data.get('suite_id'),
+                case=order_data.get('case_id'),
+                value=order_value,
+            )
+        except InsufficientFunds as exc:
+            order.status = 'rejected'
+            order.last_error = str(exc)
+            order.save(update_fields=['status', 'last_error', 'updated_at'])
+            raise CaseExecutionError(f'资金占用失败：{exc}') from exc
+        if allocation is not None:
+            order.fund_allocation = allocation
+            order.save(update_fields=['fund_allocation'])
         return order
 
     def run_to_completion(self):

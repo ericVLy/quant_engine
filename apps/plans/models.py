@@ -26,6 +26,12 @@ class Plan(models.Model):
     symbol_scope = models.JSONField(default=dict)
     exec_mode = models.CharField(max_length=20, choices=EXEC_MODE_CHOICES, default='serial')
     retry_policy = models.JSONField(default=dict, blank=True)
+    # 资金占用：Plan 实例是账户资金的唯一占用者，向下按 Suite/Case 分级申请
+    account_id = models.CharField(max_length=64, blank=True, verbose_name='交易账户ID')
+    allocated_capital = models.DecimalField(
+        max_digits=16, decimal_places=2, null=True, blank=True,
+        verbose_name='占用资金总额',
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     version = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
