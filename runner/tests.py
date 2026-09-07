@@ -15,6 +15,13 @@ from apps.watchlists.models import Symbol
 
 from .engine import SuiteRunner
 from .gm_adapter import GmBrokerAdapter
+
+
+class _GmStubAPI(object):
+    """测试桩：仅提供无副作用的 set_token，屏蔽真实 GM_TOKEN 配置。"""
+
+    def set_token(self, token):
+        return None
 from .risk import RiskController
 from .scheduler import Scheduler
 from .registry import PlanRegistry
@@ -282,7 +289,7 @@ class GmOrderReportTest(TestCase):
             volume=100, external_order_id='gm-123',
         )
 
-        adapter = GmBrokerAdapter(api=object())
+        adapter = GmBrokerAdapter(api=_GmStubAPI())
         updated = adapter.on_order_status({
             'cl_ord_id': 'gm-123', 'symbol': '000001', 'status': 3, 'price': 12.5,
         })
@@ -299,7 +306,7 @@ class GmOrderReportTest(TestCase):
             log=log, symbol='000002', direction='buy', price='12.0000',
             volume=100, filled_volume=100, external_order_id='gm-456', status='filled',
         )
-        adapter = GmBrokerAdapter(api=object())
+        adapter = GmBrokerAdapter(api=_GmStubAPI())
         adapter.on_order_status({
             'cl_ord_id': 'gm-456', 'symbol': '000002', 'status': 1,
             'price': 12.1, 'filled_volume': 20,
@@ -307,3 +314,105 @@ class GmOrderReportTest(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'filled')
         self.assertEqual(order.filled_volume, 100)
+
+
+class GmOrderLifecycleTest(TestCase):
+    """P1 真实交易回报与订单生命周期联调 —— 模拟回报全链路。
+
+    覆盖：受理(→sent) → 部分成交(→累计 filled_volume) → 完全成交(→filled)，
+    以及拒单、撤单、以及重复回报幂等去重。
+    """
+
+    def _make_order(self, symbol='000003', external_id='gm-LC-001', volume=200,
+                    status='pending'):
+        suite = Suite.objects.create(name='LC Suite')
+        log = ExecutionLog.objects.create(symbol=symbol, final_direction=1)
+        return Order.objects.create(
+            log=log, symbol=symbol, direction='buy', price='12.0000',
+            volume=volume, external_order_id=external_id, status=status,
+        ), GmBrokerAdapter(api=_GmStubAPI())
+
+    def test_partial_fills_accumulate_to_full_fill(self):
+        order, adapter = self._make_order()
+        # 受理 → sent
+        adapter.on_order_status({'cl_ord_id': 'gm-LC-001', 'status': 'accepted'})
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'sent')
+        # 部分成交 60/200
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'partial_filled',
+            'filled_volume': 60, 'price': 12.3,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'sent')
+        self.assertEqual(order.filled_volume, 60)
+        # 部分成交累加到 120/200（仍在 sent）
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'partial_filled',
+            'filled_volume': 120, 'price': 12.4,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'sent')
+        self.assertEqual(order.filled_volume, 120)
+        # 最后一笔部分成交达到 200/200 → 自动推进为 filled
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'partial_filled',
+            'filled_volume': 200, 'price': 12.5,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'filled')
+        self.assertEqual(order.filled_volume, 200)
+
+    def test_rejection_sets_status_and_records_error_context(self):
+        order, adapter = self._make_order(external_id='gm-LC-REJ')
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-REJ', 'status': 'rejected', 'price': 12.0,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'rejected')
+
+    def test_cancel_report_marks_order_canceled(self):
+        order, adapter = self._make_order(external_id='gm-LC-CXL')
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-CXL', 'status': 'canceled', 'price': 12.0,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'canceled')
+
+    def test_duplicate_report_is_idempotent(self):
+        order, adapter = self._make_order()
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'filled',
+            'filled_volume': 200, 'price': 12.5,
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'filled')
+        self.assertEqual(order.filled_volume, 200)
+        # 相同指纹的重复回报 → 标记 duplicate，不产生状态/成交量回退
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'filled',
+            'filled_volume': 200, 'price': 12.5, 'exec_id': 'dup-echo',
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'filled')
+        self.assertEqual(order.filled_volume, 200)
+        self.assertTrue(order.report_payload['duplicate'])
+        self.assertIn(order.report_payload['fingerprint'],
+                      order.processed_report_keys)
+
+    def test_progressed_report_is_not_mistaken_for_duplicate(self):
+        """不同累计成交量/状态/价格的回报必须被继续处理，不能误判为重复。"""
+        order, adapter = self._make_order()
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'accepted',
+        })
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'sent')
+        adapter.on_order_status({
+            'cl_ord_id': 'gm-LC-001', 'status': 'partial_filled',
+            'filled_volume': 90, 'price': 12.3,
+        })
+        order.refresh_from_db()
+        self.assertFalse(order.report_payload['duplicate'])
+        self.assertEqual(order.filled_volume, 90)
+        self.assertEqual(order.status, 'sent')

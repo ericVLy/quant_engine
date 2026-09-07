@@ -150,6 +150,8 @@ class Order(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     last_error = models.TextField(blank=True)
     report_payload = models.JSONField(default=dict, blank=True)
+    # 已处理的回报指纹（外部 order id + 状态 + 累计成交量 + 价格），用于重复回报幂等去重
+    processed_report_keys = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
