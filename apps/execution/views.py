@@ -5,10 +5,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 
-from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order
+from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation
 from .serializers import (
     EventTypeRegistrySerializer, EventSerializer,
-    SuiteRunSerializer, ExecutionLogSerializer, OrderSerializer
+    SuiteRunSerializer, ExecutionLogSerializer, OrderSerializer,
+    FundAllocationSerializer,
 )
 from .registry import EventRegistry
 from .events import EventType
@@ -129,6 +130,15 @@ class ExecutionLogViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ExecutionLog.objects.select_related('plan').all().order_by('-trigger_time')
     serializer_class = ExecutionLogSerializer
     filterset_fields = ['symbol', 'plan', 'status']
+
+
+class FundAllocationViewSet(viewsets.ModelViewSet):
+    """分级资金申请 CRUD（Plan 占用 → Suite 申请 → Case 申请）。"""
+    queryset = FundAllocation.objects.select_related(
+        'plan', 'suite', 'case',
+    ).all().order_by('-created_at')
+    serializer_class = FundAllocationSerializer
+    filterset_fields = ['plan', 'suite', 'case', 'level', 'status']
 
 
 class OrderViewSet(viewsets.ModelViewSet):

@@ -813,6 +813,7 @@ class Plan(models.Model):
 | 技术指标因子引擎（MA/EMA/MACD/RSI/KDJ/BOLL/ROC 等）与过滤/裁决 | `runner`, `cases` | ✅ 已完成 | C-09、R-06 |
 | 数据上下文构建（DB 分表 K线 + 实时快照 + gm 回退） | `runner`, `datasources` | ✅ 已完成（基本面基础字段已接入） | R-07 |
 | 复杂风控（单向持仓/单笔与每日限额/交易时段） | `runner` | ✅ P0 已完成（总仓位上限为 P1） | R-08 |
+| 分级资金占用（Plan.account_id/allocated_capital 占用账户资金；Suite 向 Plan 申请、Case 向 Suite 申请，层级总额校验 + 下单原子扣减/回退） | `plans`, `execution`, `runner` | ✅ 已完成（FundAllocation + funds 服务 + `/api/execution/fund-allocations/`；14 个专项测试） | R-08 |
 | Plan 热加载注册中心（PlanRegistry，冷启动自愈） | `runner`, `plans` | ✅ 已完成 | R-09 |
 | Suite 发布拓扑快照（SuiteVersion，不可变、递归子树） | `suites` | ✅ 已完成 | S-09 |
 | 节点级运行实例（NodeRun，父子层级 + 轨迹回放） | `execution` | ✅ 已完成 | EX-15 |
@@ -846,7 +847,7 @@ class Plan(models.Model):
 | 顺序 | 优先级 | 开发任务 | 影响模块 | 主要交付物 | 验收标准 |
 |------|--------|----------|----------|------------|----------|
 | 1 | P1 | gm 模拟账户订单生命周期联调 | `runner`, `execution` | 订单提交、受理、部分成交、完全成交、拒单、撤单和重复回报适配 | ✅ 真实模拟账户链路已跑通（2026-09-07，账户 efd94fdb-…：提交→受理→完全成交 100 股回报归一化写库）；适配器含部分成交累加、重复回报指纹幂等、`request_cancel`（`order_cancel(wait_cancel_orders)` 真实契约）、状态码映射（1/2/3/5/6/8/10） |
-| 2 | P1 | 账户总资金与总仓位风控 | `runner`, `execution` | 账户资产查询、持仓汇总、单 Plan/全账户限额、下单前原子校验 | ✅ 账户/持仓 Provider、资金和总仓位拦截已完成；并发原子扣减待后续增强 |
+| 2 | P1 | 账户总资金与总仓位风控 | `runner`, `execution` | 账户资产查询、持仓汇总、单 Plan/全账户限额、下单前原子校验 | ✅ 账户/持仓 Provider、资金和总仓位拦截已完成；分级资金占用链（Plan 占用 → Suite 申请 → Case 申请，行级锁原子扣减）已完成（FundAllocation） |
 | 3 | P1 | 交易失败补偿与任务可观测性 | `runner`, `execution`, `plans` | 订单提交失败分类、重试上限、失败原因、任务关联 ID、告警日志 | ✅ 失败订单回写、错误码、任务 ID、重试传播已完成；告警通道待接入 |
 
 ##### 第二阶段：数据与策略能力增强
