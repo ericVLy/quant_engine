@@ -108,7 +108,7 @@ class GroupAPITest(APITestCase):
         logger.info("测试向分组添加标的")
         new_symbol = Symbol.objects.create(code='000003', name='B股', market='A')
         url = f'/api/watchlists/groups/{self.group.id}/add-symbols/'
-        response = self.client.post(url, {'symbol_ids': [new_symbol.id]})
+        response = self.client.post(url, {'symbol_ids': [new_symbol.id]}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['added'], 1)
         self.assertIn(new_symbol, self.group.symbols.all())
@@ -117,7 +117,7 @@ class GroupAPITest(APITestCase):
     def test_remove_symbols_from_group(self):
         logger.info("测试从分组移除标的")
         url = f'/api/watchlists/groups/{self.group.id}/remove-symbols/'
-        response = self.client.post(url, {'symbol_ids': [self.symbol1.id]})
+        response = self.client.post(url, {'symbol_ids': [self.symbol1.id]}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['removed'], 1)
         self.assertNotIn(self.symbol1, self.group.symbols.all())

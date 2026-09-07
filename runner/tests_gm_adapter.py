@@ -49,8 +49,36 @@ class GmBrokerAdapterTest(SimpleTestCase):
     def test_gm_status_values_are_translated(self):
         self.assertEqual(self.adapter._status(3), 'filled')
         self.assertEqual(self.adapter._status(8), 'rejected')
+        self.assertEqual(self.adapter._status(5), 'canceled')
+        self.assertEqual(self.adapter._status(10), 'pending')
+        self.assertEqual(self.adapter._status(6), 'sent')
         self.assertIsNone(self.adapter._status(99))
 
     def test_order_report_does_not_regress_filled_order(self):
         self.assertEqual(self.adapter._status_rank('filled'), 3)
         self.assertGreater(self.adapter._status_rank('filled'), self.adapter._status_rank('sent'))
+
+    def test_request_cancel_uses_wait_cancel_orders_contract(self):
+        self.api.order_cancel.return_value = {'cl_ord_id': 'gm-cxl-1', 'status': 'canceled'}
+        self.adapter.account_id = 'acct-1'
+        result = self.adapter.request_cancel('SHSE.600000', order_id='gm-cxl-1')
+        self.api.order_cancel.assert_called_once_with(
+            [{'cl_ord_id': 'gm-cxl-1', 'account_id': 'acct-1'}],
+        )
+        self.assertEqual(result['status'], 'canceled')
+
+    def test_request_cancel_requires_order_id(self):
+        self.adapter.account_id = 'acct-1'
+        with self.assertRaises(ValueError):
+            self.adapter.request_cancel('SHSE.600000')
+
+    def test_request_cancel_raises_when_sdk_has_no_cancel_api(self):
+        class _BareSDK:
+            OrderSide_Buy = 1
+            OrderSide_Sell = 2
+
+            def set_token(self, token):
+                return None
+        adapter = GmBrokerAdapter(api=_BareSDK())
+        with self.assertRaises(NotImplementedError):
+            adapter.request_cancel('SHSE.600000', order_id='gm-1')
