@@ -44,6 +44,49 @@ class RealtimeSnapshot(models.Model):
         return f"{self.symbol.code} @ {self.price} ({self.change}%)"
 
 # ============================================================
+# 2.5 基本面快照缓存（支持历史时点查询，asof 语义）
+# ============================================================
+class FundamentalSnapshot(models.Model):
+    """基本面数据持久化缓存。
+
+    - ``symbol`` + ``asof`` 唯一，同一标的按历史时点保存多条快照；
+    - 查询历史时点 (``asof_time``) 时只取 ``asof <= asof_time`` 的最新一条；
+    - 有效期由 ``CachedFundamentalsProvider.ttl`` 判定，过期后回源刷新。
+    """
+    symbol = models.ForeignKey(
+        Symbol, on_delete=models.CASCADE, related_name='fundamental_snapshots',
+    )
+    asof = models.DateTimeField(db_index=True, verbose_name="数据时点")
+    payload = models.JSONField(default=dict, blank=True, verbose_name="基本面指标快照")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = '基本面快照'
+        verbose_name_plural = '基本面快照'
+        ordering = ('-asof',)
+        constraints = [
+            models.UniqueConstraint(fields=('symbol', 'asof'), name='unique_fundamental_symbol_asof'),
+        ]
+
+    def __str__(self):
+        return f"{self.symbol.code} @ {self.asof}"
+
+
+class FundamentalCacheMeta(models.Model):
+    """记录每个标的的最新同步状态与统计，供缓存有效期判定与监控。"""
+    symbol = models.OneToOneField(
+        Symbol, on_delete=models.CASCADE, related_name='fundamental_cache_meta',
+    )
+    last_synced_at = models.DateTimeField(null=True, blank=True, verbose_name="最近同步时点")
+    hit_count = models.PositiveIntegerField(default=0, verbose_name="缓存命中次数")
+    miss_count = models.PositiveIntegerField(default=0, verbose_name="缓存未命中次数")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.symbol.code} hit={self.hit_count} miss={self.miss_count}"
+
+
+# ============================================================
 # 3. K线数据（抽象基类 + 各市场子类）
 # ============================================================
 class AbstractKLine(models.Model):

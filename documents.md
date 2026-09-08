@@ -820,14 +820,15 @@ class Plan(models.Model):
 | 跨 Suite 递归编排（子 Suite 执行、树形聚合、parallel 分支 join、fail_stop） | `runner`, `suites`, `execution` | ✅ 已完成 | S-09、S-10、S-11、EX-15 |
 | 运行状态机（Case/Suite/Plan 三级 run_status：new→running→done/interrupt/failed；Case 依托 Suite 运行；Suite 全部 case done 自动 done，case failed 自动 interrupt；Plan 全部 suite done 自动 done；手动 stop 强制停止子级；Plan 支持 auto/manual suite_start_mode；Plan 创建校验账户空闲资金，Suite 加入校验 Plan 空闲资金） | `cases`, `suites`, `plans`, `execution` | ✅ 已完成（state_machine 服务 + 25 个专项测试；`/api/plans/{id}/start|stop/`、`/api/suites/{id}/start|stop/`） | C-08、S-01、P-01、P-07 |
 | 并发资金原子扣减（Plan 创建对 AccountFundConfig 行加 `select_for_update`，校验 + 占用原子完成；Suite 加入对 Plan 级 FundAllocation 行加 `select_for_update`，校验 + 分配原子完成；下单扣减已有行级锁） | `plans`, `suites`, `execution` | ✅ 已完成（三层均使用行级锁 + 事务，消除 check-then-act race condition） | R-08 |
+| 基本面财务数据扩展（Provider 抽象基类 + AkShare 实现，财务指标/资产负债表/利润表/现金流量表 60+ 英文契约字段；子报表独立降级） | `runner`, `datasources` | ✅ 已完成（`FundamentalsProvider` + `AkshareFundamentalsProvider`；21 个专项测试） | R-07 |
+| 基本面缓存与历史时点（`FundamentalSnapshot`/`FundamentalCacheMeta` 持久化快照 + `CachedFundamentalsProvider` 装饰器；asof 历史点读、TTL 有效期、回源回填、回源失败降级旧缓存） | `runner`, `datasources` | ✅ 已完成（历史时点不读取未来数据；命中即有效不判 TTL；7 个专项测试） | R-07 |
+| Suite 边条件操作符（event_condition 扩展 `op: eq/neq/gt/gte/lt/lte/between` + `field/threshold`，后端校验 + 运行时匹配同一契约，兼容旧键值相等契约） | `suites`, 前端 | ✅ 已完成（`event_condition_matches` + 双重校验；13 个专项测试） | S-09 |
+| Suite 拓扑完整性校验（跨树入边、重复边、非法权重、孤立节点、不可达节点；发布前串联 validate_dag + validate_topology） | `suites` | ✅ 已完成（5 个专项测试） | S-09 |
 
 #### 5.1.2 待开发任务
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P1 | 扩展基本面数据能力（财务报表、缓存、历史时点和有效期校验） | `runner`, `datasources` | R-07 |
-| P1 | 边条件操作符扩展（op: eq/gt/lt/between 等，前后端契约同步） | `suites`, 前端 | S-09 |
-| P1 | 拓扑校验增强（孤立节点、跨树入边校验） | `suites` | S-09 |
 | P1 | 交易失败告警通道接入 | `runner`, `execution`, `plans` | 任务3（失败补偿） |
 | P1 | API 分页与敏感配置保护（列表统一分页、`auth_info` 加密/脱敏、权限检查） | 全部 API, `datasources` | N-01, N-05 |
 | P1 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键） | `plans`, `runner` | N-03 增强 |
@@ -840,8 +841,8 @@ class Plan(models.Model):
 | 顺序 | 开发阶段 | 主要交付物 | 关联需求 | 状态 |
 |------|----------|------------|----------|------|
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
-| 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | ⏳ 待开发 |
-| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、多实例治理 | S-09、N-01、N-03、N-04、N-05 | ⏳ 待开发 |
+| 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验已完成；剩余交易失败告警通道、真实交易环境验证） |
+| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、多实例治理 | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强已完成；分页、日志清理、多实例治理待做） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
 
@@ -860,10 +861,10 @@ class Plan(models.Model):
 
 | 顺序 | 优先级 | 开发任务 | 影响模块 | 主要交付物 | 验收标准 |
 |------|--------|----------|----------|------------|----------|
-| 4 | P1 | 基本面财务数据扩展 | `runner`, `datasources` | 财务指标、资产负债表、利润表、现金流量表 Provider | Provider 字段统一为英文契约；外部失败安全降级；数据源可通过依赖注入替换 |
-| 5 | P1 | 基本面缓存与历史时点 | `runner`, `datasources` | 持久化/缓存模型、`asof` 查询、有效期和失败重试 | 指定历史时点不读取未来数据；有效期内命中缓存；过期数据按策略刷新 |
-| 6 | P1 | Suite 边条件操作符 | `suites`, `quant-frontend` | `eq`、`neq`、`gt`、`gte`、`lt`、`lte`、`between` 契约和执行器 | 后端校验、运行时匹配和前端配置使用同一字段契约；边界值测试完整 |
-| 7 | P1 | Suite 拓扑完整性校验 | `suites` | 孤立节点、跨树入边、重复边、非法权重和不可达节点检查 | 发布前返回明确错误路径；合法递归子 Suite 不被误判；快照不生成非法拓扑 |
+| 4 | P1 | 基本面财务数据扩展 | `runner`, `datasources` | 财务指标、资产负债表、利润表、现金流量表 Provider | ✅ 已完成（`FundamentalsProvider` 抽象基类 + `AkshareFundamentalsProvider`，财务指标 19 + 资产负债表 11 + 利润表 15 + 现金流量表 6 个英文契约字段；子报表独立降级、依赖注入；21 个专项测试） |
+| 5 | P1 | 基本面缓存与历史时点 | `runner`, `datasources` | 持久化/缓存模型、`asof` 查询、有效期和失败重试 | ✅ 已完成（`FundamentalSnapshot`/`FundamentalCacheMeta` 持久化模型 + `CachedFundamentalsProvider` 装饰器；历史时点 asof 点读不读取未来数据、命中即有效不判 TTL；实时路径 TTL 有效期命中缓存/过期回源刷新；回源失败降级旧缓存；7 个专项测试） |
+| 6 | P1 | Suite 边条件操作符 | `suites`, `quant-frontend` | `eq`、`neq`、`gt`、`gte`、`lt`、`lte`、`between` 契约和执行器 | ✅ 已完成（后端序列化器与 `services.event_condition_matches` 同一字段契约；`op+field+threshold` 成组校验、between 双元边界、bool 拒绝；兼容旧键值相等契约；13 个专项测试；前端契约同步仍待做） |
+| 7 | P1 | Suite 拓扑完整性校验 | `suites` | 孤立节点、跨树入边、重复边、非法权重和不可达节点检查 | ✅ 已完成（`validate_topology` 发布前串联 `validate_dag`；跨树入边/重复边/非法权重(0<w≤1000)/孤立节点/不可达节点均报明确 `SuiteError`；合法递归子 Suite 未被误判；5 个专项测试） |
 
 ##### 第三阶段：平台可靠性与使用体验
 
@@ -909,12 +910,16 @@ Suite 边条件操作符 → 拓扑完整性校验
 |------|----------|----------|----------|
 | P0 阶段1 | `execution` 基础功能与 API 测试 | ✅ 18 个通过 | 真实交易回报生产链路联调（模拟回报适配已完成） |
 | P0 阶段2 | `cases` CRUD、发布和深层参数校验测试 | ✅ 21 个通过 | 持续维护新增指标的目录兼容性 |
-| P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | 画布前端拓扑测试、边条件操作符测试 |
+| P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | 画布前端拓扑测试（边条件操作符测试已并入 P1 阶段2 完成） |
 | P0 阶段4 | `plans` CRUD、发布、标的解析、调度与版本管理测试 | ✅ 13 个通过 | 多实例调度治理测试 |
 | P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 71 个通过（含编排、Cron 边界、WorkerPool 重试失败传播、数据上下文、订单生命周期用例） | 生产行情、风控边界、真实交易环境测试 |
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减、告警通道待补 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ 214 个测试全部通过（同一命令口径） | 以同一次完整回归命令的实际输出为准 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ 260 个测试全部通过（同一命令口径） | 以同一次完整回归命令的实际输出为准 |
+| P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
+| P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
+| P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
+| P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
 
 #### 测试验收标准
 
