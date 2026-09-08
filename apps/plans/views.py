@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from .models import Plan, PlanVersion
 from .serializers import PlanSerializer
 from .services import PlanError, delete_plan, publish_plan, resolve_plan_symbols, rollback_plan
+from apps.execution.state_machine import start_plan, stop_plan, StateMachineError
 
 
 class PlanViewSet(viewsets.ModelViewSet):
@@ -64,5 +65,21 @@ class PlanViewSet(viewsets.ModelViewSet):
         try:
             plan = rollback_plan(self.get_object(), version)
         except PlanError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(plan).data)
+
+    @action(detail=True, methods=['post'])
+    def start(self, request, pk=None):
+        try:
+            plan = start_plan(self.get_object())
+        except StateMachineError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(plan).data)
+
+    @action(detail=True, methods=['post'])
+    def stop(self, request, pk=None):
+        try:
+            plan = stop_plan(self.get_object())
+        except StateMachineError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(plan).data)

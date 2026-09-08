@@ -47,5 +47,5 @@ class SuiteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Suite
         fields = '__all__'
-        read_only_fields = ('created_at', 'updated_at', 'version', 'status')
+        read_only_fields = ('created_at', 'updated_at', 'version', 'status', 'run_status')
 

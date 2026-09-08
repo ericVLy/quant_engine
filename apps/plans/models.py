@@ -18,6 +18,16 @@ class Plan(models.Model):
         ('published', '已发布'),
         ('archived', '已归档'),
     ]
+    RUN_STATUS_CHOICES = [
+        ('new', '未运行'),
+        ('running', '运行中'),
+        ('done', '已完成'),
+        ('interrupt', '已中断'),
+    ]
+    SUITE_START_CHOICES = [
+        ('auto', 'Plan 启动时自动启动 Suite'),
+        ('manual', '手动启动 Suite'),
+    ]
     name = models.CharField(max_length=100)
     root_suite = models.ForeignKey(Suite, on_delete=models.PROTECT, related_name='plans')
     trigger_type = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default='time')
@@ -34,6 +44,10 @@ class Plan(models.Model):
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     version = models.PositiveIntegerField(default=1)
+    # 运行状态：创建即 new；树内 suite 全部完成 → done；失败/手动停止 → interrupt
+    run_status = models.CharField(max_length=10, choices=RUN_STATUS_CHOICES, default='new')
+    # Suite 启动模式：Plan 启动时自动启动根 Suite，或手动启动
+    suite_start_mode = models.CharField(max_length=10, choices=SUITE_START_CHOICES, default='manual')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)

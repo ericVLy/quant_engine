@@ -43,10 +43,62 @@ def validate_retry_policy(value):
 
 
 class PlanSerializer(serializers.ModelSerializer):
+    available_capital = serializers.SerializerMethodField()
+
     class Meta:
         model = Plan
         fields = '__all__'
-        read_only_fields = ('created_at', 'updated_at', 'version', 'status')
+        read_only_fields = ('created_at', 'updated_at', 'version', 'status', 'run_status')
+
+    def get_available_capital(self, obj):
+        if not obj.account_id or not obj.allocated_capital:
+            return None
+        from apps.execution.models import AccountFundConfig
+        try:
+            cfg = AccountFundConfig.objects.get(account_id=obj.account_id)
+        except AccountFundConfig.DoesNotExist:
+            return None
+        return str(cfg.available_capital)
+
+    def validate_allocated_capital(self, value):
+        if value is None:
+            return value
+        from decimal import Decimal
+        if Decimal(str(value)) <= 0:
+            raise serializers.ValidationError('占用资金必须大于 0')
+        return value
+
+    def validate(self, attrs):
+        trigger_type = attrs.get('trigger_type', getattr(self.instance, 'trigger_type', 'time'))
+        cron_expr = attrs.get('cron_expr', getattr(self.instance, 'cron_expr', None))
+        event_type = attrs.get('event_type', getattr(self.instance, 'event_type', None))
+
+        if trigger_type == 'time':
+            if not cron_expr:
+                raise serializers.ValidationError({'cron_expr': '时间触发的 Plan 必须提供 cron_expr'})
+            try:
+                validate_cron_expression(cron_expr)
+            except serializers.ValidationError as exc:
+                raise serializers.ValidationError({'cron_expr': exc.detail}) from exc
+        elif trigger_type == 'event':
+            if not event_type:
+                raise serializers.ValidationError({'event_type': '事件触发的 Plan 必须提供 event_type'})
+            if not EventRegistry.validate(event_type):
+                raise serializers.ValidationError({'event_type': f'未注册的事件类型: {event_type}'})
+
+        # 资金校验
+        account_id = attrs.get('account_id', getattr(self.instance, 'account_id', ''))
+        allocated = attrs.get('allocated_capital', getattr(self.instance, 'allocated_capital', None))
+        if account_id and allocated:
+            plan = Plan(pk=self.instance.pk if self.instance else None, account_id=account_id,
+                        allocated_capital=allocated)
+            from apps.execution.state_machine import validate_plan_capital
+            try:
+                validate_plan_capital(plan)
+            except Exception as exc:
+                raise serializers.ValidationError({'allocated_capital': str(exc)}) from exc
+
+        return attrs
 
     def validate_symbol_scope(self, value):
         if not isinstance(value, dict):

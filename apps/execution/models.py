@@ -134,6 +134,33 @@ class ExecutionLog(models.Model):
         return f"{self.symbol} @ {self.trigger_time}"
 
 
+class AccountFundConfig(models.Model):
+    """交易账户资金配置（单账户单行）：账户总资金是 Plan 占用资金的上限。"""
+    account_id = models.CharField(max_length=64, blank=True, verbose_name='交易账户ID', unique=True)
+    total_capital = models.DecimalField(max_digits=18, decimal_places=2, verbose_name='账户总资金')
+
+    class Meta:
+        verbose_name = '账户资金配置'
+        verbose_name_plural = '账户资金配置'
+
+    def __str__(self):
+        return f'{self.account_id or "default"} total={self.total_capital}'
+
+    @property
+    def allocated_capital(self):
+        """该账户下所有 Plan 占用资金之和。"""
+        from django.db.models import Sum
+        total = Plan.objects.filter(account_id=self.account_id).aggregate(
+            total=Sum('allocated_capital'),
+        )['total']
+        return total or 0
+
+    @property
+    def available_capital(self):
+        """空闲资金 = 总资金 - 已占用。"""
+        return self.total_capital - self.allocated_capital
+
+
 class FundAllocation(models.Model):
     """分级资金申请：Plan 占用账户资金，Suite 向 Plan 申请，Case 向 Suite 申请。
 

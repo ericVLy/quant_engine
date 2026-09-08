@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from .models import Edge, Suite
 from .serializers import EdgeSerializer, SuiteSerializer
 from .services import SuiteError, publish_suite, update_topology
+from apps.execution.state_machine import start_suite, interrupt_suite, StateMachineError
 
 
 class SuiteViewSet(viewsets.ModelViewSet):
@@ -63,5 +64,21 @@ class SuiteViewSet(viewsets.ModelViewSet):
         try:
             publish_suite(suite)
         except SuiteError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(suite).data)
+
+    @action(detail=True, methods=['post'])
+    def start(self, request, pk=None):
+        try:
+            suite = start_suite(self.get_object())
+        except StateMachineError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(suite).data)
+
+    @action(detail=True, methods=['post'])
+    def stop(self, request, pk=None):
+        try:
+            suite = interrupt_suite(self.get_object(), reason='manual')
+        except StateMachineError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(suite).data)
