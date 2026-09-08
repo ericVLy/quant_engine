@@ -12,7 +12,7 @@ def validate_event_condition_obj(value):
     if not isinstance(value, dict):
         raise SuiteError('event_condition 必须是 JSON 对象')
 
-    allowed_keys = {'event_type', 'case_id', 'next_event'}
+    allowed_keys = {'event_type', 'case_id', 'next_event', 'op', 'field', 'threshold'}
     unknown = set(value.keys()) - allowed_keys
     if unknown:
         raise SuiteError(f'event_condition 不允许的字段: {", ".join(sorted(unknown))}')
@@ -26,14 +26,89 @@ def validate_event_condition_obj(value):
     if 'next_event' in value and (not isinstance(value['next_event'], str) or not value['next_event']):
         raise SuiteError('event_condition.next_event 必须是非空字符串')
 
+    _validate_operator_obj(value)
+    return value
+
+
+def _validate_operator_obj(value):
+    allowed_ops = {'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between'}
+    present = {k for k in ('op', 'field', 'threshold') if k in value}
+    if not present:
+        if 'field' in value or 'threshold' in value:
+            raise SuiteError('提供 field/threshold 时必须同时提供 op')
+        return value
+    if present != {'op', 'field', 'threshold'}:
+        raise SuiteError('op / field / threshold 必须同时提供')
+    op = value['op']
+    if op not in allowed_ops:
+        raise SuiteError(f'不允许的操作符: {op}（允许 {sorted(allowed_ops)}）')
+    if not value['field'] or not isinstance(value['field'], str):
+        raise SuiteError('event_condition.field 必须是非空字符串')
+    threshold = value['threshold']
+    if op == 'between':
+        if not (isinstance(threshold, (list, tuple)) and len(threshold) == 2):
+            raise SuiteError('between 操作符的 threshold 必须是双元素数组 [低, 高]')
+        lo, hi = threshold
+        if not isinstance(lo, (int, float)) or isinstance(lo, bool) or \
+           not isinstance(hi, (int, float)) or isinstance(hi, bool):
+            raise SuiteError('between 的边界必须是数值')
+        if lo > hi:
+            raise SuiteError('between 的低边界不能大于高边界')
+    elif not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+        raise SuiteError('threshold 必须是数值')
     return value
 
 
 def event_condition_matches(condition, payload):
-    """Return whether every configured condition equals the event payload."""
+    """Return whether every configured condition equals/routes the event payload.
+
+    支持两种匹配模式：
+    1. 简单键值相等：键直接与 payload 比对；
+    2. 操作符契约：{field, op, threshold} 对 payload[field] 做数值比较。
+    """
     if not condition:
         return True
+
+    op = condition.get('op')
+    if op:
+        return _apply_operator(condition, payload)
+
+    # 兼容旧契约：键值相等
     return all(payload.get(key) == value for key, value in condition.items())
+
+
+def _apply_operator(condition, payload):
+    """按 op 对 payload[field] 与 threshold 做比较。"""
+    op = condition.get('op')
+    field = condition.get('field')
+    threshold = condition.get('threshold')
+    actual = payload.get(field)
+
+    # 数值比较需可转 float
+    try:
+        lhs = float(actual)
+    except (TypeError, ValueError):
+        lhs = actual  # 非数值字段按原样比较（仅 eq/neq 有意义）
+
+    if op == 'eq':
+        return lhs == threshold or actual == threshold
+    if op == 'neq':
+        return not (lhs == threshold or actual == threshold)
+    if op in ('gt', 'gte', 'lt', 'lte'):
+        if not isinstance(lhs, (int, float)) or isinstance(lhs, bool):
+            return False
+        if op == 'gt':
+            return lhs > threshold
+        if op == 'gte':
+            return lhs >= threshold
+        if op == 'lt':
+            return lhs < threshold
+        return lhs <= threshold
+    if op == 'between':
+        if not isinstance(lhs, (int, float)) or isinstance(lhs, bool):
+            return False
+        return threshold[0] <= lhs <= threshold[1]
+    return False
 
 
 def aggregate_directions(suite, results):
@@ -76,9 +151,95 @@ def validate_dag(suite):
     return True
 
 
+def validate_topology(suite):
+    """Suite 拓扑完整性校验（发布前调用）。
+
+    覆盖：跨树入边、重复边、非法权重、不可达节点、孤立节点。
+    """
+    root_id = suite.pk
+    from_suites = set(Edge.objects.filter(from_suite_id=root_id).values_list('from_suite_id', flat=True))
+
+    # 1. 所有出边必须属于本树（from_suite 只能在本树内）
+    all_edges = Edge.objects.filter(
+        from_suite_id__in=_collect_suite_ids(suite),
+    ).select_related('from_suite', 'to_suite')
+    tree_ids = _collect_suite_ids(suite)
+
+    for edge in all_edges:
+        if edge.to_suite_id not in tree_ids:
+            raise SuiteError(
+                f'跨树入边：Edge {edge.from_suite.name} → {edge.to_suite.name} '
+                f'指向本 Suite 树之外的 Suite'
+            )
+        if not (0 < edge.weight <= 1000):
+            raise SuiteError(
+                f'非法权重 {edge.weight}（Edge {edge.from_suite_id} → {edge.to_suite_id}），必须 > 0'
+            )
+
+    # 2. 重复出边（同 from → to 出现多次）
+    seen = set()
+    for edge in all_edges:
+        key = (edge.from_suite_id, edge.to_suite_id)
+        if key in seen:
+            raise SuiteError(f'重复边：{edge.from_suite_id} → {edge.to_suite_id}')
+        seen.add(key)
+
+    # 3. 不可达节点（树内除根以外的节点无法从根到达）
+    _validate_reachable(suite)
+
+    detect_isolated_nodes(suite)
+    return True
+
+
+def _collect_suite_ids(suite):
+    """收集根 Suite 及其所有后代（子 Suite）的 id。"""
+    ids = {suite.pk}
+    pending = list(suite.children.all())
+    seen = {suite.pk}
+    while pending:
+        child = pending.pop()
+        if child.pk in seen:
+            continue
+        seen.add(child.pk)
+        ids.add(child.pk)
+        pending.extend(child.children.all())
+    return ids
+
+
+def _validate_reachable(suite):
+    """校验树内每个节点都能从根通过有向边到达（根自身除外）。"""
+    reachable = {suite.pk}
+    frontier = [suite.pk]
+    while frontier:
+        cur = frontier.pop()
+        for edge in Edge.objects.filter(from_suite_id=cur):
+            if edge.to_suite_id not in reachable:
+                reachable.add(edge.to_suite_id)
+                frontier.append(edge.to_suite_id)
+    tree_ids = _collect_suite_ids(suite)
+    unreachable = tree_ids - reachable - {suite.pk}
+    if unreachable:
+        raise SuiteError(f'存在不可达节点：{sorted(unreachable)}')
+
+
+def detect_isolated_nodes(suite):
+    """检测孤立节点：树内存在子 Suite，但没有任何一条边指向它（是其父结构要求入边的除外）。"""
+    tree_ids = _collect_suite_ids(suite)
+    if len(tree_ids) <= 1:
+        return  # 只有根节点，无孤立
+    incoming_targets = set(Edge.objects.filter(from_suite_id__in=tree_ids).values_list('to_suite_id', flat=True))
+    # 根节点无需入边；其余子 Suite 若无入边则视为孤立
+    isolated = tree_ids - incoming_targets - {suite.pk}
+    from apps.suites.models import Suite as _Suite
+    if isolated:
+        names = list(_Suite.objects.filter(pk__in=isolated).values_list('name', flat=True))
+        raise SuiteError(f'检测到孤立节点（无入边）: {names}')
+
+
 def validate_publishable(suite):
-    """Validate DAG and all Cases/Suite descendants before publishing."""
+    """Validate DAG, topology completeness and all Cases/Suite descendants before publishing."""
     validate_dag(suite)
+    validate_topology(suite)
     unpublished_cases = suite.cases.exclude(status='published')
     if unpublished_cases.exists():
         raise SuiteError('Suite 包含未发布的 Case')
