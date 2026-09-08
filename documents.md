@@ -1,7 +1,7 @@
-# 量化交易系统 · 全模块需求文档
+﻿# 量化交易系统 · 全模块需求文档
 
-> 版本：v2.3  
-> 日期：2026-09-06  
+> 版本：v2.4  
+> 日期：2026-09-07  
 > 状态：实现基线已稳定 · 以代码为准，文档已同步校正
 
 
@@ -498,7 +498,7 @@ class EventTypeRegistry(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| C-01 | Case 模型（名称、节点类型、参数 JSON、版本、状态） | ✅ 完成 |
+| C-01 | Case 模型（名称、节点类型、参数 JSON、版本、状态、**运行状态 run_status**） | ✅ 完成 |
 | C-02 | Case CRUD API（列表、详情、创建、更新、删除） | ✅ 完成 |
 | C-03 | Case 发布（版本号 +1，状态改为 published） | ✅ 完成 |
 | C-04 | `params` 中的 `trigger` 配置校验（调用 `EventRegistry.validate`） | ✅ 完成 |
@@ -563,7 +563,7 @@ class Case(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| S-01 | Suite 模型（名称、聚合方式、父 Suite、状态、版本） | ✅ 完成 |
+| S-01 | Suite 模型（名称、聚合方式、父 Suite、状态、版本、**占用资金 allocated_capital**、**运行状态 run_status**） | ✅ 完成 |
 | S-02 | Edge 模型（源 Suite → 目标 Suite、条件、事件条件、权重） | ✅ 完成 |
 | S-03 | Suite CRUD API | ✅ 完成 |
 | S-04 | DAG 无环校验（发布前检查） | ✅ 完成 |
@@ -630,7 +630,7 @@ class Edge(models.Model):
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| P-01 | Plan 模型（名称、根 Suite、触发方式、Cron 表达式、标的范围、执行模式、重试策略、状态、版本） | ✅ 完成 |
+| P-01 | Plan 模型（名称、根 Suite、触发方式、Cron 表达式、标的范围、执行模式、重试策略、状态、版本、**运行状态 run_status**、**Suite 启动模式 suite_start_mode**） | ✅ 完成 |
 | P-02 | Plan CRUD API | ✅ 完成 |
 | P-03 | Plan 发布（校验根 Suite 已发布 + 创建版本快照 + 通知异步引擎热加载） | ✅ 完成 |
 | P-04 | 标的范围解析（all / 分组 / 指定列表 → 调用 `watchlists.services.resolve_symbol_scope`） | ✅ 完成 |
@@ -789,9 +789,9 @@ class Plan(models.Model):
 | `watchlists` | ✅ 已完成 | 15 通过 | 100% |
 | `datasources` | ✅ 已完成 | 18 通过 | 100% |
 | `execution` | 🟢 执行闭环完成 | 14 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
-| `cases` | ✅ P0 能力完成 | 21 通过 | 100%（后续仅保留扩展指标目录的兼容性维护） |
-| `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（画布前端对接、边条件操作符扩展待完善） |
-| `plans` | ✅ P0 能力完成 | 13 通过 | 100%（后续仅保留多实例调度治理） |
+| `cases` | ✅ P0 能力完成 | 21 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
+| `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（含 run_status 状态机：new→running→done/interrupt；画布前端对接、边条件操作符扩展待完善） |
+| `plans` | ✅ P0 能力完成 | 13 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；多实例调度治理待完善） |
 | `runner` | ✅ P0 能力完成 | 58 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 
 
@@ -818,6 +818,7 @@ class Plan(models.Model):
 | Suite 发布拓扑快照（SuiteVersion，不可变、递归子树） | `suites` | ✅ 已完成 | S-09 |
 | 节点级运行实例（NodeRun，父子层级 + 轨迹回放） | `execution` | ✅ 已完成 | EX-15 |
 | 跨 Suite 递归编排（子 Suite 执行、树形聚合、parallel 分支 join、fail_stop） | `runner`, `suites`, `execution` | ✅ 已完成 | S-09、S-10、S-11、EX-15 |
+| 运行状态机（Case/Suite/Plan 三级 run_status：new→running→done/interrupt/failed；Case 依托 Suite 运行；Suite 全部 case done 自动 done，case failed 自动 interrupt；Plan 全部 suite done 自动 done；手动 stop 强制停止子级；Plan 支持 auto/manual suite_start_mode；Plan 创建校验账户空闲资金，Suite 加入校验 Plan 空闲资金） | `cases`, `suites`, `plans`, `execution` | ✅ 已完成（state_machine 服务 + 25 个专项测试；`/api/plans/{id}/start|stop/`、`/api/suites/{id}/start|stop/`） | C-08、S-01、P-01、P-07 |
 
 #### 5.1.2 待开发任务
 
@@ -825,7 +826,6 @@ class Plan(models.Model):
 |--------|----------|----------|--------------|
 | P1 | 扩展基本面数据能力（财务报表、缓存、历史时点和有效期校验） | `runner`, `datasources` | R-07 |
 | P1 | 使用沙盒完善真实交易环境回报字段和订单生命周期联调 | `runner`, `execution` | EX-18 |
-| P1 | 补充账户总仓位/总资金上限风控 | `runner`, `execution` | R-08 |
 | P1 | 边条件操作符扩展（op: eq/gt/lt/between 等，前后端契约同步） | `suites`, 前端 | S-09 |
 | P1 | 拓扑校验增强（孤立节点、跨树入边校验） | `suites` | S-09 |
 | P2 | 画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图） | `quant-frontend` | S-09、EX-15 |
@@ -849,6 +849,7 @@ class Plan(models.Model):
 | 1 | P1 | gm 模拟账户订单生命周期联调 | `runner`, `execution` | 订单提交、受理、部分成交、完全成交、拒单、撤单和重复回报适配 | ✅ 真实模拟账户链路已跑通（2026-09-07，账户 efd94fdb-…：提交→受理→完全成交 100 股回报归一化写库）；适配器含部分成交累加、重复回报指纹幂等、`request_cancel`（`order_cancel(wait_cancel_orders)` 真实契约）、状态码映射（1/2/3/5/6/8/10） |
 | 2 | P1 | 账户总资金与总仓位风控 | `runner`, `execution` | 账户资产查询、持仓汇总、单 Plan/全账户限额、下单前原子校验 | ✅ 账户/持仓 Provider、资金和总仓位拦截已完成；分级资金占用链（Plan 占用 → Suite 申请 → Case 申请，行级锁原子扣减）已完成（FundAllocation） |
 | 3 | P1 | 交易失败补偿与任务可观测性 | `runner`, `execution`, `plans` | 订单提交失败分类、重试上限、失败原因、任务关联 ID、告警日志 | ✅ 失败订单回写、错误码、任务 ID、重试传播已完成；告警通道待接入 |
+| 4 | P1 | 运行状态机（Case/Suite/Plan 三级 run_status） | `cases`, `suites`, `plans`, `execution` | Case/Suite/Plan 三级 run_status（new→running→done/interrupt/failed）；Case 依托 Suite 运行；Suite 全部 case done 自动 done，case failed 自动 interrupt；Plan 全部 suite done 自动 done；手动 stop 强制停止子级；Plan 支持 auto/manual suite_start_mode；Plan 创建校验账户空闲资金，Suite 加入校验 Plan 空闲资金 | ✅ 已完成（state_machine 服务 + 25 个专项测试；`/api/plans/{id}/start|stop/`、`/api/suites/{id}/start|stop/`） |
 
 ##### 第二阶段：数据与策略能力增强
 
@@ -875,6 +876,8 @@ class Plan(models.Model):
 订单生命周期联调
     ↓
 账户级风控 → 交易失败补偿与可观测性
+    ↓
+运行状态机（Case/Suite/Plan 三级 run_status）
     ↓
 基本面财务数据 → 基本面缓存与历史时点
     ↓
@@ -905,7 +908,8 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P0 阶段4 | `plans` CRUD、发布、标的解析、调度与版本管理测试 | ✅ 13 个通过 | 多实例调度治理测试 |
 | P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 71 个通过（含编排、Cron 边界、WorkerPool 重试失败传播、数据上下文、订单生命周期用例） | 生产行情、风控边界、真实交易环境测试 |
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减、告警通道待补 |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ 174 个测试全部通过（同一命令口径） | 以同一次完整回归命令的实际输出为准 |
+| P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ 214 个测试全部通过（同一命令口径） | 以同一次完整回归命令的实际输出为准 |
 
 #### 测试验收标准
 
@@ -962,3 +966,5 @@ Suite 边条件操作符 → 拓扑完整性校验
 ---
 
 **文档状态**：✅ 需求基线已锁定，可作为后续开发参考依据。
+
+

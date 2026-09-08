@@ -14,11 +14,24 @@ class Suite(models.Model):
         ('published', '已发布'),
         ('archived', '已归档'),
     ]
+    RUN_STATUS_CHOICES = [
+        ('new', '未运行'),
+        ('running', '运行中'),
+        ('done', '已完成'),
+        ('interrupt', '已中断'),
+    ]
     name = models.CharField(max_length=100)
     aggregate_method = models.CharField(max_length=20, choices=AGGREGATE_CHOICES, default='weighted_sum')
     parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='children')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     version = models.PositiveIntegerField(default=1)
+    # Suite 占用资金：加入 Plan（作为根 Suite 或其子树成员）时受 Plan 空闲资金约束
+    allocated_capital = models.DecimalField(
+        max_digits=16, decimal_places=2, null=True, blank=True,
+        verbose_name='占用资金',
+    )
+    # 运行状态：cases 全部完成 → done；case 失败/手动停止 → interrupt
+    run_status = models.CharField(max_length=10, choices=RUN_STATUS_CHOICES, default='new')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)

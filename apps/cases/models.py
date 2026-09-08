@@ -13,11 +13,19 @@ class Case(models.Model):
         ('published', '已发布'),
         ('archived', '已归档'),
     ]
+    RUN_STATUS_CHOICES = [
+        ('new', '未运行'),
+        ('running', '运行中'),
+        ('done', '已完成'),
+        ('failed', '失败'),
+    ]
     name = models.CharField(max_length=100)
     node_type = models.CharField(max_length=20, choices=NODE_TYPE_CHOICES)
     params = models.JSONField(default=dict)
     version = models.PositiveIntegerField(default=1)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    # 运行状态：依托 Suite 运行；由引擎在执行时流转，非 running 的 Suite 中不可运行
+    run_status = models.CharField(max_length=10, choices=RUN_STATUS_CHOICES, default='new')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
