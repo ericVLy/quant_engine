@@ -193,6 +193,8 @@ class CapitalValidationTest(TestCase):
     def test_suite_joining_plan_within_available(self):
         plan = Plan.objects.create(name='P1', account_id='ACC001', allocated_capital=Decimal('50000'),
                                     root_suite=Suite.objects.create(name='tmp'))
+        from apps.execution.models import FundAllocation
+        FundAllocation.objects.create(plan=plan, level='plan', amount=Decimal('50000'), status='active')
         suite = Suite(name='S1', allocated_capital=Decimal('20000'))
         validate_suite_joining_plan(suite, plan)
 
