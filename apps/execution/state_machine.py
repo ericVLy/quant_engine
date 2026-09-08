@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+from django.db import transaction
+
 from apps.cases.models import Case
 from apps.suites.models import Suite
 from apps.plans.models import Plan
@@ -174,13 +176,18 @@ def complete_plan(plan):
     return plan
 
 
+@transaction.atomic
 def validate_plan_capital(plan):
-    """Plan 创建/更新时校验：allocated_capital 必须 ≤ 账户空闲资金。"""
+    """Plan 创建/更新时校验：allocated_capital 必须 ≤ 账户空闲资金。
+
+    使用 select_for_update 对 AccountFundConfig 行加锁，
+    保证校验 + 占用在同一事务内原子完成，消除并发 race condition。
+    """
     if not plan.account_id or not plan.allocated_capital:
         return
     from .models import AccountFundConfig
     try:
-        cfg = AccountFundConfig.objects.get(account_id=plan.account_id)
+        cfg = AccountFundConfig.objects.select_for_update().get(account_id=plan.account_id)
     except AccountFundConfig.DoesNotExist:
         raise StateMachineError(f'账户 {plan.account_id} 未配置资金，无法创建 Plan')
     used = Plan.objects.filter(account_id=plan.account_id).exclude(
@@ -194,12 +201,25 @@ def validate_plan_capital(plan):
         )
 
 
+@transaction.atomic
 def validate_suite_joining_plan(suite, plan):
-    """Suite 加入 Plan 时校验：Plan 必须有足够的空闲资金。"""
+    """Suite 加入 Plan 时校验：Plan 必须有足够的空闲资金。
+
+    使用 select_for_update 对 Plan 级 FundAllocation 行加锁，
+    保证校验 + 分配在同一事务内原子完成，消除并发 race condition。
+    """
     if not suite.allocated_capital:
         return
     if not plan.allocated_capital:
         raise StateMachineError(f'Plan {plan.pk} 未设置占用资金，无法加入 Suite')
+    from .models import FundAllocation
+    plan_alloc = FundAllocation.objects.filter(
+        plan=plan, level='plan', status='active',
+    ).first()
+    if plan_alloc is None:
+        raise StateMachineError(f'Plan {plan.pk} 未配置 plan 级资金额度')
+    # 对 Plan 级额度行加锁，防止并发加入时超分配
+    FundAllocation.objects.select_for_update().get(pk=plan_alloc.pk)
     all_suites = _collect_plan_suites(plan)
     used = sum(
         Decimal(str(s.allocated_capital)) for s in all_suites
