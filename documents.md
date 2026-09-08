@@ -819,16 +819,21 @@ class Plan(models.Model):
 | 节点级运行实例（NodeRun，父子层级 + 轨迹回放） | `execution` | ✅ 已完成 | EX-15 |
 | 跨 Suite 递归编排（子 Suite 执行、树形聚合、parallel 分支 join、fail_stop） | `runner`, `suites`, `execution` | ✅ 已完成 | S-09、S-10、S-11、EX-15 |
 | 运行状态机（Case/Suite/Plan 三级 run_status：new→running→done/interrupt/failed；Case 依托 Suite 运行；Suite 全部 case done 自动 done，case failed 自动 interrupt；Plan 全部 suite done 自动 done；手动 stop 强制停止子级；Plan 支持 auto/manual suite_start_mode；Plan 创建校验账户空闲资金，Suite 加入校验 Plan 空闲资金） | `cases`, `suites`, `plans`, `execution` | ✅ 已完成（state_machine 服务 + 25 个专项测试；`/api/plans/{id}/start|stop/`、`/api/suites/{id}/start|stop/`） | C-08、S-01、P-01、P-07 |
+| 并发资金原子扣减（Plan 创建对 AccountFundConfig 行加 `select_for_update`，校验 + 占用原子完成；Suite 加入对 Plan 级 FundAllocation 行加 `select_for_update`，校验 + 分配原子完成；下单扣减已有行级锁） | `plans`, `suites`, `execution` | ✅ 已完成（三层均使用行级锁 + 事务，消除 check-then-act race condition） | R-08 |
 
 #### 5.1.2 待开发任务
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
 | P1 | 扩展基本面数据能力（财务报表、缓存、历史时点和有效期校验） | `runner`, `datasources` | R-07 |
-| P1 | 使用沙盒完善真实交易环境回报字段和订单生命周期联调 | `runner`, `execution` | EX-18 |
 | P1 | 边条件操作符扩展（op: eq/gt/lt/between 等，前后端契约同步） | `suites`, 前端 | S-09 |
 | P1 | 拓扑校验增强（孤立节点、跨树入边校验） | `suites` | S-09 |
+| P1 | 交易失败告警通道接入 | `runner`, `execution`, `plans` | 任务3（失败补偿） |
+| P1 | API 分页与敏感配置保护（列表统一分页、`auth_info` 加密/脱敏、权限检查） | 全部 API, `datasources` | N-01, N-05 |
+| P1 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键） | `plans`, `runner` | N-03 增强 |
 | P2 | 画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图） | `quant-frontend` | S-09、EX-15 |
+| P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
+| P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
 
 #### 5.1.3 开发顺序
 
@@ -847,7 +852,7 @@ class Plan(models.Model):
 | 顺序 | 优先级 | 开发任务 | 影响模块 | 主要交付物 | 验收标准 |
 |------|--------|----------|----------|------------|----------|
 | 1 | P1 | gm 模拟账户订单生命周期联调 | `runner`, `execution` | 订单提交、受理、部分成交、完全成交、拒单、撤单和重复回报适配 | ✅ 真实模拟账户链路已跑通（2026-09-07，账户 efd94fdb-…：提交→受理→完全成交 100 股回报归一化写库）；适配器含部分成交累加、重复回报指纹幂等、`request_cancel`（`order_cancel(wait_cancel_orders)` 真实契约）、状态码映射（1/2/3/5/6/8/10） |
-| 2 | P1 | 账户总资金与总仓位风控 | `runner`, `execution` | 账户资产查询、持仓汇总、单 Plan/全账户限额、下单前原子校验 | ✅ 账户/持仓 Provider、资金和总仓位拦截已完成；分级资金占用链（Plan 占用 → Suite 申请 → Case 申请，行级锁原子扣减）已完成（FundAllocation） |
+| 2 | P1 | 账户总资金与总仓位风控 | `runner`, `execution` | 账户资产查询、持仓汇总、单 Plan/全账户限额、下单前原子校验 | ✅ 账户/持仓 Provider、资金和总仓位拦截已完成；分级资金占用链（Plan 占用 → Suite 申请 → Case 申请，行级锁原子扣减）已完成（FundAllocation）；并发原子扣减已完成（Plan 创建对 AccountFundConfig 行加 `select_for_update`，Suite 加入对 Plan 级 FundAllocation 行加 `select_for_update`，消除 check-then-act race condition） |
 | 3 | P1 | 交易失败补偿与任务可观测性 | `runner`, `execution`, `plans` | 订单提交失败分类、重试上限、失败原因、任务关联 ID、告警日志 | ✅ 失败订单回写、错误码、任务 ID、重试传播已完成；告警通道待接入 |
 | 4 | P1 | 运行状态机（Case/Suite/Plan 三级 run_status） | `cases`, `suites`, `plans`, `execution` | Case/Suite/Plan 三级 run_status（new→running→done/interrupt/failed）；Case 依托 Suite 运行；Suite 全部 case done 自动 done，case failed 自动 interrupt；Plan 全部 suite done 自动 done；手动 stop 强制停止子级；Plan 支持 auto/manual suite_start_mode；Plan 创建校验账户空闲资金，Suite 加入校验 Plan 空闲资金 | ✅ 已完成（state_machine 服务 + 25 个专项测试；`/api/plans/{id}/start|stop/`、`/api/suites/{id}/start|stop/`） |
 
