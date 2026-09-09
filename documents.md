@@ -880,12 +880,12 @@ class Plan(models.Model):
 | 基本面缓存与历史时点（`FundamentalSnapshot`/`FundamentalCacheMeta` 持久化快照 + `CachedFundamentalsProvider` 装饰器；asof 历史点读、TTL 有效期、回源回填、回源失败降级旧缓存） | `runner`, `datasources` | ✅ 已完成（历史时点不读取未来数据；命中即有效不判 TTL；7 个专项测试） | R-07 |
 | Suite 边条件操作符（event_condition 扩展 `op: eq/neq/gt/gte/lt/lte/between` + `field/threshold`，后端校验 + 运行时匹配同一契约，兼容旧键值相等契约） | `suites`, 前端 | ✅ 已完成（`event_condition_matches` + 双重校验；13 个专项测试） | S-09 |
 | Suite 拓扑完整性校验（跨树入边、重复边、非法权重、孤立节点、不可达节点；发布前串联 validate_dag + validate_topology） | `suites` | ✅ 已完成（5 个专项测试） | S-09 |
+| 告警管理（Alert 模型 + AlertChannel 渠道配置 + `alert_service` 通知服务；应用内 / 邮件多渠道，按最低级别与类型白名单分发；`/api/execution/alerts/`、`/api/execution/alert-channels/` 及操作/统计/重发接口；前端告警管理页 + 告警渠道配置页） | `execution`, `runner`, `plans`, `quant-frontend` | ✅ 已完成（21 个专项测试；EX-20 ~ EX-26） | EX-20、EX-21、EX-22、EX-23、EX-24、EX-25、EX-26 |
 
 #### 5.1.2 待开发任务
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P1 | 交易失败告警通道接入 | `runner`, `execution`, `plans` | 任务3（失败补偿） |
 | P1 | API 分页与敏感配置保护（列表统一分页、`auth_info` 加密/脱敏、权限检查） | 全部 API, `datasources` | N-01, N-05 |
 | P1 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键） | `plans`, `runner` | N-03 增强 |
 | P2 | 画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图） | `quant-frontend` | S-09、EX-15 |
@@ -897,7 +897,7 @@ class Plan(models.Model):
 | 顺序 | 开发阶段 | 主要交付物 | 关联需求 | 状态 |
 |------|----------|------------|----------|------|
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
-| 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验已完成；剩余交易失败告警通道、真实交易环境验证） |
+| 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验、交易失败告警通道已完成；剩余真实交易环境验证） |
 | 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、多实例治理 | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强已完成；分页、日志清理、多实例治理待做） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
@@ -910,7 +910,7 @@ class Plan(models.Model):
 |------|--------|----------|----------|------------|----------|
 | 1 | P1 | gm 模拟账户订单生命周期联调 | `runner`, `execution` | 订单提交、受理、部分成交、完全成交、拒单、撤单和重复回报适配 | ✅ 真实模拟账户链路已跑通（2026-09-07，账户 efd94fdb-…：提交→受理→完全成交 100 股回报归一化写库）；适配器含部分成交累加、重复回报指纹幂等、`request_cancel`（`order_cancel(wait_cancel_orders)` 真实契约）、状态码映射（1/2/3/5/6/8/10） |
 | 2 | P1 | 账户总资金与总仓位风控 | `runner`, `execution` | 账户资产查询、持仓汇总、单 Plan/全账户限额、下单前原子校验 | ✅ 账户/持仓 Provider、资金和总仓位拦截已完成；分级资金占用链（Plan 占用 → Suite 申请 → Case 申请，行级锁原子扣减）已完成（FundAllocation）；并发原子扣减已完成（Plan 创建对 AccountFundConfig 行加 `select_for_update`，Suite 加入对 Plan 级 FundAllocation 行加 `select_for_update`，消除 check-then-act race condition） |
-| 3 | P1 | 交易失败补偿与任务可观测性 | `runner`, `execution`, `plans` | 订单提交失败分类、重试上限、失败原因、任务关联 ID、告警日志 | ✅ 失败订单回写、错误码、任务 ID、重试传播已完成；告警通道待接入 |
+| 3 | P1 | 交易失败补偿与任务可观测性 | `runner`, `execution`, `plans` | 订单提交失败分类、重试上限、失败原因、任务关联 ID、告警日志 | ✅ 失败订单回写、错误码、任务 ID、重试传播已完成；告警通道已接入（`Alert` / `AlertChannel` / `alert_service` + 21 个专项测试） |
 | 4 | P1 | 运行状态机（Case/Suite/Plan 三级 run_status） | `cases`, `suites`, `plans`, `execution` | Case/Suite/Plan 三级 run_status（new→running→done/interrupt/failed）；Case 依托 Suite 运行；Suite 全部 case done 自动 done，case failed 自动 interrupt；Plan 全部 suite done 自动 done；手动 stop 强制停止子级；Plan 支持 auto/manual suite_start_mode；Plan 创建校验账户空闲资金，Suite 加入校验 Plan 空闲资金 | ✅ 已完成（state_machine 服务 + 25 个专项测试；`/api/plans/{id}/start|stop/`、`/api/suites/{id}/start|stop/`） |
 
 ##### 第二阶段：数据与策略能力增强
