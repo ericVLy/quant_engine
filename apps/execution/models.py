@@ -233,3 +233,120 @@ class Order(models.Model):
 
     def __str__(self):
         return f"{self.symbol} {self.direction} {self.volume}@{self.price}"
+
+
+class Alert(models.Model):
+    """告警模型：记录系统中的告警信息"""
+    ALERT_TYPE_CHOICES = [
+        ('order_failed', '订单失败'),
+        ('suite_failed', '策略执行失败'),
+        ('plan_failed', '计划执行失败'),
+        ('risk_violation', '风控违规'),
+        ('system_error', '系统错误'),
+    ]
+    SEVERITY_CHOICES = [
+        ('low', '低'),
+        ('medium', '中'),
+        ('high', '高'),
+        ('critical', '紧急'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', '待处理'),
+        ('acknowledged', '已确认'),
+        ('resolved', '已解决'),
+    ]
+    
+    alert_type = models.CharField(max_length=50, choices=ALERT_TYPE_CHOICES, verbose_name="告警类型")
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='medium', verbose_name="严重程度")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name="状态")
+    
+    # 关联的实体信息
+    plan = models.ForeignKey(Plan, on_delete=models.SET_NULL, null=True, blank=True, related_name='alerts')
+    suite_run = models.ForeignKey(SuiteRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='alerts')
+    # 注意：这里使用字符串引用，避免循环导入
+    order = models.ForeignKey('Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='alerts')
+    
+    # 告警详情
+    title = models.CharField(max_length=200, verbose_name="标题")
+    message = models.TextField(verbose_name="详细消息")
+    error_code = models.CharField(max_length=50, blank=True, null=True, verbose_name="错误代码")
+    
+    # 通知状态
+    in_app_notified = models.BooleanField(default=False, verbose_name="应用内已通知")
+    email_notified = models.BooleanField(default=False, verbose_name="邮件已通知")
+    notification_error = models.TextField(blank=True, verbose_name="通知错误信息")
+    
+    # 处理信息
+    acknowledged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='acknowledged_alerts'
+    )
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='resolved_alerts'
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '告警'
+        verbose_name_plural = '告警'
+        indexes = [
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['status', 'severity']),
+            models.Index(fields=['alert_type', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"[{self.severity.upper()}] {self.title}"
+
+
+class AlertChannel(models.Model):
+    """告警渠道配置：支持应用内通知和邮件通知"""
+    CHANNEL_TYPE_CHOICES = [
+        ('in_app', '应用内通知'),
+        ('email', '邮件通知'),
+    ]
+    
+    channel_type = models.CharField(max_length=20, choices=CHANNEL_TYPE_CHOICES, unique=True, verbose_name="渠道类型")
+    is_enabled = models.BooleanField(default=True, verbose_name="是否启用")
+    
+    # 邮件相关配置（仅当 channel_type='email' 时使用）
+    email_recipients = models.JSONField(default=list, blank=True, verbose_name="邮件收件人列表")
+    email_subject_prefix = models.CharField(max_length=50, default="[量化交易系统]", verbose_name="邮件主题前缀")
+    
+    # 过滤配置
+    min_severity = models.CharField(
+        max_length=20, choices=Alert.SEVERITY_CHOICES, default='low',
+        verbose_name="最低告警级别"
+    )
+    alert_types = models.JSONField(default=list, blank=True, verbose_name="告警类型白名单（空表示全部）")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '告警渠道配置'
+        verbose_name_plural = '告警渠道配置'
+
+    def __str__(self):
+        return f"{self.get_channel_type_display()} ({'启用' if self.is_enabled else '禁用'})"
+    
+    def should_send_alert(self, alert):
+        """判断是否应该发送该告警"""
+        if not self.is_enabled:
+            return False
+        
+        # 检查严重程度
+        severity_order = {'low': 0, 'medium': 1, 'high': 2, 'critical': 3}
+        if severity_order.get(alert.severity, 0) < severity_order.get(self.min_severity, 0):
+            return False
+        
+        # 检查告警类型白名单
+        if self.alert_types and alert.alert_type not in self.alert_types:
+            return False
+        
+        return True
