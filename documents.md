@@ -1,7 +1,7 @@
 ﻿# 量化交易系统 · 全模块需求文档
 
-> 版本：v2.4  
-> 日期：2026-09-07  
+> 版本：v2.5  
+> 日期：2026-09-09  
 > 状态：实现基线已稳定 · 以代码为准，文档已同步校正
 
 
@@ -81,7 +81,7 @@ users（用户权限）
    │                    │
    │                    └── plans（调度管理）
    │                           │
-   │                           └── execution（执行日志/委托单/事件）
+   │                           └── execution（执行日志/委托单/事件/告警）
    │                                  │
    │                                  └── runner（独立异步引擎）
    │
@@ -379,13 +379,13 @@ cd c:\Users\linye\Documents\quant_engine
 - 该兼容层已改为“保留接口名称、切换数据实现”，后续其他模块可继续按已有 `Symbol + start/end` 的协议调用，不需要大面积改动上层代码
 
 
-### 模块4：`execution`（事件与执行基础设施）🟢 执行闭环已完成
+### 模块4：`execution`（事件与执行基础设施）🟢 执行闭环与告警已完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | 🟢 同步执行闭环与事件路由已完成，真实交易回报验证待完善 |
+| **状态** | 🟢 同步执行闭环、事件路由与告警管理（Alert / AlertChannel / 通知服务）已完成，真实交易回报验证待完善 |
 | **优先级** | P0 |
-| **依赖** | `plans.Plan`, `suites.Suite`（外键允许空） |
+| **依赖** | `plans.Plan`, `suites.Suite`（外键允许空）, `users.User`（告警处理人） |
 
 #### 事件设计：类和对象模式
 
@@ -431,6 +431,13 @@ cd c:\Users\linye\Documents\quant_engine
 | EX-17 | **Plan 触发接口（创建 SuiteRun）** | ✅ 完成 | `views.py`, `services.py` |
 | EX-18 | **SuiteRun 状态流转逻辑** | ✅ 完成 | `services.py` |
 | EX-19 | **委托单状态回写（对接交易接口）** | ✅ 已接入 gm 适配器；受理→部分成交→完全成交、拒单、撤单与重复回报幂等去重已完成；真实生产交易回报仍需沙盒/实盘联调 | `runner/gm_adapter.py`；关联开发任务：5.1.2-4、5.1.4-任务1 |
+| EX-20 | **告警模型（Alert）** | ✅ 完成 | `models.py` |
+| EX-21 | **告警渠道配置模型（AlertChannel）** | ✅ 完成 | `models.py` |
+| EX-22 | **告警服务（创建/通知/渠道加载）** | ✅ 完成 | `alerts.py`；提供 `alert_service` 全局单例 |
+| EX-23 | **告警查询 API（只读 + 操作动作）** | ✅ 完成 | `views.py`, `serializers.py`, `urls.py` |
+| EX-24 | **告警渠道配置 API（CRUD + 重载）** | ✅ 完成 | `views.py`, `serializers.py`, `urls.py` |
+| EX-25 | **告警 API 认证与授权** | ✅ 完成（DRF `IsAuthenticated`；未认证返回 403） | `views.py` |
+| EX-26 | **告警统计与通知重发接口** | ✅ 完成 | `views.py` |
 
 #### API 端点
 
@@ -442,6 +449,13 @@ cd c:\Users\linye\Documents\quant_engine
 | GET | `/api/execution/events/` | Event 列表 |
 | GET | `/api/execution/logs/` | ExecutionLog 列表 |
 | GET/POST/PUT/DELETE | `/api/execution/orders/` | Order CRUD |
+| GET | `/api/execution/alerts/` | 告警列表（只读）；支持 `alert_type`/`severity`/`status`/`plan` 过滤与 `search` 搜索 |
+| GET | `/api/execution/alerts/{id}/` | 告警详情（只读） |
+| POST | `/api/execution/alerts/{id}/actions/` | 告警操作（`acknowledge` / `resolve`，可附 `note`） |
+| POST | `/api/execution/alerts/{id}/resend-notifications/` | 重新发送告警通知 |
+| GET | `/api/execution/alerts/statistics/` | 告警统计（`overview` + `by_type`） |
+| GET/POST/PATCH/DELETE | `/api/execution/alert-channels/` | 告警渠道配置 CRUD |
+| POST | `/api/execution/alert-channels/reload/` | 重新加载告警渠道配置（供 `alert_service` 生效） |
 | POST | `/api/execution/trigger/` | 按 `plan_id` 和 `symbol/symbols` 创建 SuiteRun |
 | GET | `/api/execution/run/{run_id}/` | SuiteRun 状态查询 |
 | POST | `/api/execution/run/{run_id}/start/` | 启动 SuiteRun |
@@ -471,6 +485,36 @@ class EventTypeRegistry(models.Model):
     description = models.CharField(max_length=200, blank=True)
     payload_schema = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
+
+class Alert(models.Model):
+    ALERT_TYPE_CHOICES = [('order_failed','订单失败'),('suite_failed','策略执行失败'),('plan_failed','计划执行失败'),('risk_violation','风控违规'),('system_error','系统错误')]
+    SEVERITY_CHOICES = [('low','低'),('medium','中'),('high','高'),('critical','紧急')]
+    STATUS_CHOICES = [('pending','待处理'),('acknowledged','已确认'),('resolved','已解决')]
+    alert_type = models.CharField(max_length=50, choices=ALERT_TYPE_CHOICES)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='medium')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    plan = models.ForeignKey(Plan, null=True, blank=True)            # 关联计划
+    suite_run = models.ForeignKey(SuiteRun, null=True, blank=True)   # 关联运行实例
+    order = models.ForeignKey('Order', null=True, blank=True)        # 关联委托单
+    title = models.CharField(max_length=200)
+    message = models.TextField()
+    error_code = models.CharField(max_length=50, blank=True, null=True)
+    in_app_notified = models.BooleanField(default=False)
+    email_notified = models.BooleanField(default=False)
+    notification_error = models.TextField(blank=True)
+    acknowledged_by / resolved_by = models.ForeignKey(User, null=True, blank=True)
+    acknowledged_at / resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at / updated_at = models.DateTimeField(auto_now_add=True / auto_now=True)
+
+class AlertChannel(models.Model):
+    CHANNEL_TYPE_CHOICES = [('in_app','应用内通知'),('email','邮件通知')]
+    channel_type = models.CharField(max_length=20, choices=CHANNEL_TYPE_CHOICES, unique=True)
+    is_enabled = models.BooleanField(default=True)
+    email_recipients = models.JSONField(default=list, blank=True)       # 邮件收件人列表
+    email_subject_prefix = models.CharField(max_length=50, default='[量化交易系统]')
+    min_severity = models.CharField(max_length=20, default='low')        # 最低告警级别
+    alert_types = models.JSONField(default=list, blank=True)            # 类型白名单（空=全部）
+    # should_send_alert(alert): 按 is_enabled + min_severity + alert_types 判定是否投递
 ```
 
 #### 当前执行服务
@@ -484,6 +528,18 @@ class EventTypeRegistry(models.Model):
 - 事件处理异常时，将 Event 和 SuiteRun 标记为失败。
 
 该实现是执行层的同步事件消费服务；独立 runner 负责真实 `CaseExecutor`、生产数据上下文和异步编排。订单回报适配已支持外部 ID、状态字符串/枚举、成交价和撤单状态归一化，但生产交易环境的完整回报字段仍需使用沙盒或实盘联调验证。
+
+#### 告警服务
+
+`apps/execution/alerts.py` 提供 `alert_service` 全局单例，负责告警创建与多渠道通知：
+
+- 类型常量：`AlertType`（订单失败 / 策略失败 / 计划失败 / 风控违规 / 系统错误）、`AlertSeverity`（低 / 中 / 高 / 紧急）。
+- `create_alert(...)`：统一创建 `Alert` 记录并可选地立即发送通知。
+- 快捷工厂方法：`create_order_failed_alert`、`create_suite_failed_alert`、`create_risk_violation_alert`、`create_system_error_alert`，各自生成含业务上下文的标题与多行消息。
+- `send_alert_notifications(alert)`：遍历启用的 `AlertChannel`，按 `should_send_alert()`（启用状态 + 最低级别 + 类型白名单）过滤后分发到应用内通知（落库 `in_app_notified`）与邮件通知（`django.core.mail` 模板渲染）。
+- `reload_channels()`：渠道配置变更或调用 `POST /alert-channels/reload/` 后重新加载渠道缓存。
+
+邮件通知基于 Django `EMAIL_*` 设置（开发默认 `console.EmailBackend`），邮件主题由渠道的 `email_subject_prefix` + 告警标题拼接，正文包含告警类型、级别、标题、时间、错误代码与详情，并附带后台处理链接。
 
 
 ### 模块5：`cases`（原子策略节点）✅ P0 能力已完成
@@ -913,7 +969,8 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | 画布前端拓扑测试（边条件操作符测试已并入 P1 阶段2 完成） |
 | P0 阶段4 | `plans` CRUD、发布、标的解析、调度与版本管理测试 | ✅ 13 个通过 | 多实例调度治理测试 |
 | P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 71 个通过（含编排、Cron 边界、WorkerPool 重试失败传播、数据上下文、订单生命周期用例） | 生产行情、风控边界、真实交易环境测试 |
-| P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减、告警通道待补 |
+| P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
+| P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
 | 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ 260 个测试全部通过（同一命令口径） | 以同一次完整回归命令的实际输出为准 |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |

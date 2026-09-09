@@ -9,6 +9,8 @@ router.register(r'events', views.EventViewSet, basename='events')
 router.register(r'logs', views.ExecutionLogViewSet, basename='logs')
 router.register(r'orders', views.OrderViewSet, basename='orders')
 router.register(r'fund-allocations', views.FundAllocationViewSet, basename='fund-allocations')
+router.register(r'alert-channels', views.AlertChannelViewSet, basename='alert-channels')
+router.register(r'alerts', views.AlertViewSet, basename='alerts')
 
 urlpatterns = [
     path('', include(router.urls)),

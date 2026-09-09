@@ -5,11 +5,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 
-from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation
+from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel
 from .serializers import (
     EventTypeRegistrySerializer, EventSerializer,
     SuiteRunSerializer, ExecutionLogSerializer, OrderSerializer,
-    FundAllocationSerializer,
+    FundAllocationSerializer, AlertSerializer, AlertChannelSerializer, AlertActionSerializer,
 )
 from .registry import EventRegistry
 from .events import EventType
@@ -146,3 +146,120 @@ class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.select_related('log').all().order_by('-created_at')
     serializer_class = OrderSerializer
     filterset_fields = ['symbol', 'status']
+
+
+class AlertChannelViewSet(viewsets.ModelViewSet):
+    """告警渠道配置管理"""
+    queryset = AlertChannel.objects.all()
+    serializer_class = AlertChannelSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filterset_fields = ['channel_type', 'is_enabled', 'min_severity']
+    
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        # 重新加载告警渠道配置
+        from .alerts import alert_service
+        alert_service.reload_channels()
+    
+    @action(detail=False, methods=['post'], url_path='reload')
+    def reload(self, request):
+        """重新加载告警渠道配置"""
+        from .alerts import alert_service
+        alert_service.reload_channels()
+        return Response({'status': 'ok', 'message': '告警渠道配置已重新加载'})
+
+
+class AlertViewSet(viewsets.ReadOnlyModelViewSet):
+    """告警查询视图（只读）"""
+    queryset = Alert.objects.select_related('plan', 'suite_run', 'acknowledged_by', 'resolved_by').all().order_by('-created_at')
+    serializer_class = AlertSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filterset_fields = ['alert_type', 'severity', 'status', 'in_app_notified', 'email_notified', 'plan']
+    search_fields = ['title', 'message', 'error_code']
+    
+    @action(detail=True, methods=['post'], url_path='actions')
+    def perform_action(self, request, pk=None):
+        """执行告警操作（确认/解决）"""
+        alert = self.get_object()
+        serializer = AlertActionSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        action = serializer.validated_data['action']
+        note = serializer.validated_data.get('note', '')
+        
+        from django.utils import timezone
+        
+        if action == 'acknowledge':
+            if alert.status != 'pending':
+                return Response(
+                    {'detail': '只能确认待处理的告警'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            alert.status = 'acknowledged'
+            alert.acknowledged_by = request.user
+            alert.acknowledged_at = timezone.now()
+            alert.save()
+            return Response({'status': 'ok', 'message': '告警已确认'})
+        
+        elif action == 'resolve':
+            if alert.status not in ['pending', 'acknowledged']:
+                return Response(
+                    {'detail': '只能确认待处理或已确认的告警'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            alert.status = 'resolved'
+            alert.resolved_by = request.user
+            alert.resolved_at = timezone.now()
+            alert.message += f'\n\n解决备注: {note}' if note else alert.message
+            alert.save()
+            return Response({'status': 'ok', 'message': '告警已解决'})
+        
+        return Response({'detail': '无效的操作'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'], url_path='statistics')
+    def statistics(self, request):
+        """获取告警统计信息"""
+        from django.db.models import Count, Q
+        
+        stats = Alert.objects.aggregate(
+            total=Count('id'),
+            pending=Count('id', filter=Q(status='pending')),
+            acknowledged=Count('id', filter=Q(status='acknowledged')),
+            resolved=Count('id', filter=Q(status='resolved')),
+            high_severity=Count('id', filter=Q(severity='high')),
+            critical_severity=Count('id', filter=Q(severity='critical')),
+        )
+        
+        # 按类型统计
+        by_type = Alert.objects.values('alert_type').annotate(
+            count=Count('id')
+        ).order_by('-count')
+        
+        return Response({
+            'overview': stats,
+            'by_type': list(by_type),
+        })
+    
+    @action(detail=True, methods=['post'], url_path='resend-notifications')
+    def resend_notifications(self, request, pk=None):
+        """重新发送告警通知"""
+        alert = self.get_object()
+        
+        # 重置通知状态
+        alert.in_app_notified = False
+        alert.email_notified = False
+        alert.notification_error = ''
+        alert.save()
+        
+        # 重新发送通知
+        from .alerts import alert_service
+        try:
+            alert_service.send_alert_notifications(alert)
+            return Response({'status': 'ok', 'message': '告警通知已重新发送'})
+        except Exception as e:
+            return Response(
+                {'detail': f'发送通知失败: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
