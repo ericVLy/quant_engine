@@ -21,8 +21,8 @@ class SuiteAPITest(APITestCase):
 		Suite.objects.create(name='过滤策略', aggregate_method='vote')
 		response = self.client.get(self.url, {'search': '主', 'status': 'draft'})
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(len(response.data), 1)
-		self.assertEqual(response.data[0]['name'], '主策略')
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(response.data['results'][0]['name'], '主策略')
 
 		response = self.client.patch(
 			f'{self.url}{self.suite.id}/', {'name': '更新策略'}, format='json'
@@ -30,6 +30,23 @@ class SuiteAPITest(APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.suite.refresh_from_db()
 		self.assertEqual(self.suite.name, '更新策略')
+
+	def test_suite_list_paginated(self):
+		for index in range(25):
+			Suite.objects.create(name=f'策略 {index}', aggregate_method='vote')
+		response = self.client.get(self.url, {'page_size': 10})
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 26)  # 25 + setUp 创建的 '主策略'
+		self.assertEqual(response.data['total_pages'], 3)
+		self.assertEqual(len(response.data['results']), 10)
+
+		page2 = self.client.get(self.url, {'page': 2, 'page_size': 10})
+		self.assertEqual(page2.data['page'], 2)
+		self.assertEqual(len(page2.data['results']), 10)
+
+		# 旧客户端兼容：limit 作为 page_size 别名
+		limit_response = self.client.get(self.url, {'limit': 100})
+		self.assertEqual(len(limit_response.data['results']), 26)
 
 	def test_topology_update_and_read(self):
 		target = Suite.objects.create(name='下游策略')

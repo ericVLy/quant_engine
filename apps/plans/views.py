@@ -41,19 +41,31 @@ class PlanViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def symbols(self, request, pk=None):
         plan = self.get_object()
-        return Response([
+        data = [
             {'id': symbol.id, 'code': symbol.code, 'name': symbol.name,
              'market': symbol.market, 'exchange': symbol.exchange}
             for symbol in resolve_plan_symbols(plan)
-        ])
+        ]
+        page = self.paginate_queryset(data)
+        if page is not None:
+            return self.get_paginated_response(page)
+        return Response(data)
 
     @action(detail=True, methods=['get'])
     def versions(self, request, pk=None):
         plan = self.get_object()
+        versions = PlanVersion.objects.filter(plan=plan).order_by('-id')
+        page = self.paginate_queryset(versions)
+        if page is not None:
+            return self.get_paginated_response([
+                {'id': version.id, 'version': version.version,
+                 'snapshot': version.snapshot, 'created_at': version.created_at}
+                for version in page
+            ])
         return Response([
             {'id': version.id, 'version': version.version,
              'snapshot': version.snapshot, 'created_at': version.created_at}
-            for version in PlanVersion.objects.filter(plan=plan)
+            for version in versions
         ])
 
     @action(detail=True, methods=['post'])

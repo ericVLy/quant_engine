@@ -110,6 +110,9 @@ class EventTypeRegistryViewSet(viewsets.ModelViewSet):
         """列出所有事件类型（含系统内置 + 自定义）"""
         include_system = request.query_params.get('include_system', 'true') == 'true'
         data = EventRegistry.list_all(include_system=include_system)
+        page = self.paginate_queryset(data)
+        if page is not None:
+            return self.get_paginated_response(page)
         return Response(data)
 
 

@@ -53,6 +53,10 @@ class CaseViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def versions(self, request, pk=None):
         case = self.get_object()
-        return Response(CaseVersionSerializer(
-            CaseVersion.objects.filter(case=case), many=True
-        ).data)
+        versions = CaseVersion.objects.filter(case=case).order_by('-version')
+        page = self.paginate_queryset(versions)
+        if page is not None:
+            return self.get_paginated_response(
+                CaseVersionSerializer(page, many=True).data
+            )
+        return Response(CaseVersionSerializer(versions, many=True).data)

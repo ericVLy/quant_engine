@@ -1,8 +1,8 @@
 ﻿# 量化交易系统 · 全模块需求文档
 
-> 版本：v2.5  
+> 版本：v2.6  
 > 日期：2026-09-09  
-> 状态：实现基线已稳定 · 以代码为准，文档已同步校正
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正
 
 
 ## 一、项目概述
@@ -158,6 +158,30 @@ users（用户权限）
 - `next_event` 若提供，必须为非空字符串
 
 > 这些规则已写入后端序列化器，并同步纳入前端表单校验逻辑，避免“字段随意扩展”造成运行时错误。
+
+
+### 3.4 API 统一分页契约（N-01）
+
+从 v2.6 起，所有列表接口统一返回分页结构（DRF `PageNumberPagination` 扩展，实现位于 `quant_engine/pagination.py`，通过 `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` 全局生效）：
+
+```json
+{
+    "count": 123,
+    "next": "http://host/api/cases/?page=2&page_size=20",
+    "previous": null,
+    "page": 1,
+    "total_pages": 7,
+    "results": [ ... ]
+}
+```
+
+- 分页参数：`page`（页码，从 1 开始，默认 1）、`page_size`（每页条数，默认 20，最大 500）。
+- 兼容旧客户端：`limit` 作为 `page_size` 的别名（此前前端固定使用 `{ limit: 6 | 500 }` 拉取下拉/面板数据）。
+- 覆盖范围：
+  - 所有 ModelViewSet / ReadOnlyModelViewSet 列表接口：`cases`、`suites`、`plans`、`execution/*`（event-types/runs/events/logs/orders/fund-allocations/alerts/alert-channels）、`watchlists/*`（symbols/groups）、`datasources/*`（sources/snapshots/sync-logs）；
+  - 自定义列表动作：`cases/{id}/versions/`、`plans/{id}/symbols/`、`plans/{id}/versions/`、`execution/event-types/list-all/`、`datasources/kline/query/`。
+- 旧客户端字段兼容：前端 `quant-frontend/src/api/index.ts` 的 axios 响应拦截器将分页结构解包为 `results` 数组，既有页面直接 `response.data` 作为数组使用的代码无需改动；列表调用默认携带 `page_size: 500` 以保持“一次加载全量”的原有体验。
+- 单对象 / 详情接口（如 `watchlist`、`topology`、`alerts/statistics`、各类 POST 动作）不属于列表接口，保持原返回结构不变。
 
 
 ## 三、模块详细需求
@@ -842,13 +866,15 @@ class Plan(models.Model):
 | 模块 | 状态 | 测试用例数 | 完成度 |
 |------|------|------------|--------|
 | `users` | ✅ 已完成 | 5 通过 | 100% |
-| `watchlists` | ✅ 已完成 | 15 通过 | 100% |
-| `datasources` | ✅ 已完成 | 18 通过 | 100% |
-| `execution` | 🟢 执行闭环完成 | 14 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
-| `cases` | ✅ P0 能力完成 | 21 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
-| `suites` | 🟢 编排核心能力完成 | 10 通过 | 95%（含 run_status 状态机：new→running→done/interrupt；画布前端对接、边条件操作符扩展待完善） |
-| `plans` | ✅ P0 能力完成 | 13 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；多实例调度治理待完善） |
-| `runner` | ✅ P0 能力完成 | 58 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
+| `watchlists` | ✅ 已完成 | 18 通过 | 100% |
+| `datasources` | ✅ 已完成 | 30 通过 | 100% |
+| `execution` | 🟢 执行闭环完成 | 77 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
+| `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
+| `suites` | 🟢 编排核心能力完成 | 30 通过 | 95%（含 run_status 状态机：new→running→done/interrupt；画布前端对接、边条件操作符扩展待完善） |
+| `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；多实例调度治理待完善） |
+| `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
+
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准（v2.6：**290 个测试全部通过**）。
 
 
 ## 五、待办事项汇总
@@ -881,12 +907,13 @@ class Plan(models.Model):
 | Suite 边条件操作符（event_condition 扩展 `op: eq/neq/gt/gte/lt/lte/between` + `field/threshold`，后端校验 + 运行时匹配同一契约，兼容旧键值相等契约） | `suites`, 前端 | ✅ 已完成（`event_condition_matches` + 双重校验；13 个专项测试） | S-09 |
 | Suite 拓扑完整性校验（跨树入边、重复边、非法权重、孤立节点、不可达节点；发布前串联 validate_dag + validate_topology） | `suites` | ✅ 已完成（5 个专项测试） | S-09 |
 | 告警管理（Alert 模型 + AlertChannel 渠道配置 + `alert_service` 通知服务；应用内 / 邮件多渠道，按最低级别与类型白名单分发；`/api/execution/alerts/`、`/api/execution/alert-channels/` 及操作/统计/重发接口；前端告警管理页 + 告警渠道配置页） | `execution`, `runner`, `plans`, `quant-frontend` | ✅ 已完成（21 个专项测试；EX-20 ~ EX-26） | EX-20、EX-21、EX-22、EX-23、EX-24、EX-25、EX-26 |
+| API 统一分页（列表接口统一 `{count, next, previous, page, total_pages, results}` 分页结构；`page` / `page_size` / `limit` 兼容别名；全局 `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` + 自定义列表动作分页；前端 axios 拦截器解包 `results` 保持旧字段兼容，列表调用默认 `page_size: 500`） | 全部 API, `quant-frontend` | ✅ 已完成（`quant_engine/pagination.py`，N-01；9 个专项测试：cases+1、suites+1、plans+1、watchlists+2、datasources+1、execution+3，另含既有用例的页内/limit 兼容断言） | N-01 |
 
 #### 5.1.2 待开发任务
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P1 | API 分页与敏感配置保护（列表统一分页、`auth_info` 加密/脱敏、权限检查） | 全部 API, `datasources` | N-01, N-05 |
+| P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
 | P1 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键） | `plans`, `runner` | N-03 增强 |
 | P2 | 画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图） | `quant-frontend` | S-09、EX-15 |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
@@ -898,7 +925,7 @@ class Plan(models.Model):
 |------|----------|------------|----------|------|
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
 | 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验、交易失败告警通道已完成；剩余真实交易环境验证） |
-| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、多实例治理 | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强已完成；分页、日志清理、多实例治理待做） |
+| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、多实例治理 | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**；`auth_info` 加密、日志清理、多实例治理待做） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
 
@@ -926,7 +953,7 @@ class Plan(models.Model):
 
 | 顺序 | 优先级 | 开发任务 | 影响模块 | 主要交付物 | 验收标准 |
 |------|--------|----------|----------|------------|----------|
-| 8 | P1 | API 分页与敏感配置保护 | 全部 API、`datasources` | 统一分页响应、`auth_info` 加密/脱敏、权限检查 | 列表接口统一分页；API 和日志不泄露密钥；旧客户端字段兼容 |
+| 8 | P1 | API 分页与敏感配置保护（已拆分为两个子任务） | 全部 API、`datasources` | 统一分页响应、`auth_info` 加密/脱敏、权限检查 | ✅ **API 统一分页已完成**（列表接口统一 `{count, next, previous, page, total_pages, results}`；`page/page_size/limit` 兼容别名；前端拦截器解包 `results`，接口测试通过）；⏳ **敏感配置保护待做**（`auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥；旧客户端字段兼容） |
 | 9 | P1 | 多实例 Scheduler 治理 | `plans`, `runner` | 分布式任务去重、租约/领导者选举、任务幂等键 | 多个 Scheduler 实例只产生一个 `(Plan, Symbol, minute)` 任务；实例故障可恢复 |
 | 10 | P2 | 执行日志生命周期管理 | `execution`, `runner` | 30 天自动清理、归档策略、清理命令和监控 | 清理不影响未完成运行和订单；清理任务可重复执行且幂等 |
 | 11 | P2 | 画布编排与执行轨迹回放 | `quant-frontend`, `execution` | 拖拽节点、连线配置、NodeRun 轨迹和失败节点定位 | 前端拓扑与后端快照双向一致；可按 SuiteRun 回放节点状态和事件顺序 |
@@ -945,7 +972,7 @@ class Plan(models.Model):
     ↓
 Suite 边条件操作符 → 拓扑完整性校验
     ↓
-分页/配置保护 → 多实例 Scheduler → 日志清理与性能基线
+分页 ✅（已完成）→ 配置保护 → 多实例 Scheduler → 日志清理与性能基线
     ↓
 画布编排与执行轨迹回放
 ```
@@ -972,11 +999,12 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
 | P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ 260 个测试全部通过（同一命令口径） | 以同一次完整回归命令的实际输出为准 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ **290 个测试全部通过**（同一命令口径：`manage.py test` 无标签，含 runner） | 以同一次完整回归命令的实际输出为准 |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
 | P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
+| P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；datasources `test_list_datasources_paginated`；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
 
 #### 测试验收标准
 
@@ -991,7 +1019,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
-| N-01 | 所有 API 支持分页 | P1 |
+| N-01 | 所有 API 支持分页 | ✅ 已实现；P1；关联开发任务：API 统一分页（见 5.1.1）；关联测试任务：P1 阶段3 |
 | N-02 | API 响应时间 < 500ms（不含外部数据源调用） | P2 |
 | N-03 | 策略配置变更支持热加载（无需重启服务） | ✅ 已实现；P0；关联开发任务：PlanRegistry/调度配置刷新；关联测试任务：5.2-4 |
 | N-04 | 执行日志保留 30 天（自动清理） | P2 |
