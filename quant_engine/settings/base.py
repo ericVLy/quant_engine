@@ -95,6 +95,13 @@ WSGI_APPLICATION = 'quant_engine.wsgi.application'
 KLINE_DB_ALIAS = 'kline'
 FUNDAMENTALS_ENABLED = False
 
+# DRF 全局配置
+REST_FRAMEWORK = {
+    # N-01：所有列表接口统一分页
+    'DEFAULT_PAGINATION_CLASS': 'quant_engine.pagination.StandardResultsPagination',
+    'PAGE_SIZE': 20,
+}
+
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
 

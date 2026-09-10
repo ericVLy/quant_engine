@@ -59,7 +59,7 @@ class EventTypeRegistryTest(TestLoggingMixin, APITestCase):
     def test_list_event_types(self):
         response = self.client.get(self.list_url + 'list-all/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        data = response.data
+        data = response.data['results']
         event_names = [item['name'] for item in data]
         self.assertIn(EventType.SUITE_INIT, event_names)
         self.assertIn(EventType.CASE_COMPLETED, event_names)
@@ -288,3 +288,89 @@ class ExecutionLogAPITest(TestLoggingMixin, APITestCase):
         self.assertEqual(log.final_direction, 1)
         self.assertEqual(log.status, 'success')
         log.delete()
+
+
+class PaginationContractTest(TestLoggingMixin, APITestCase):
+    """N-01：execution 模块列表接口统一分页契约测试。
+
+    验证所有列表接口返回 `{count, next, previous, page, total_pages, results}`
+    结构，且 `results` 为列表数据（旧客户端可继续通过字段兼容读取）。
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='pager', password='pager-pass-123',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=self.user)
+        self.suite = Suite.objects.create(name='分页 Suite')
+        self.plan = Plan.objects.create(
+            name='分页 Plan', root_suite=self.suite, status='published',
+            symbol_scope={'type': 'symbols'},
+        )
+
+    def test_execution_list_endpoints_are_paginated(self):
+        from .models import Event, ExecutionLog, Order
+
+        run = SuiteRun.objects.create(
+            plan=self.plan, suite=self.suite, symbol='000001', status='running',
+            event_queue=[],
+        )
+        Event.objects.create(run=run, event_type=EventType.SUITE_INIT)
+        log = ExecutionLog.objects.create(
+            plan=self.plan, symbol='000001', final_direction=1, status='success',
+        )
+        Order.objects.create(
+            log=log, symbol='000001', direction='buy', price=10.5, volume=100,
+            status='pending',
+        )
+        from .models import AlertChannel
+        AlertChannel.objects.create(channel_type='in_app', is_enabled=True)
+
+        endpoints = [
+            '/api/execution/runs/',
+            '/api/execution/events/',
+            '/api/execution/logs/',
+            '/api/execution/orders/',
+            '/api/execution/alert-channels/',
+        ]
+        for url in endpoints:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(set(response.data.keys()),
+                                 {'count', 'next', 'previous', 'page', 'total_pages', 'results'})
+                self.assertEqual(response.data['count'], 1)
+                self.assertIsInstance(response.data['results'], list)
+
+    def test_event_types_list_all_paginated(self):
+        EventRegistry.register('PAGING_EVENT', scope='user')
+        EventRegistry.clear_cache()
+        EventRegistry._get_cache()
+        try:
+            response = self.client.get('/api/execution/event-types/list-all/')
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(set(response.data.keys()),
+                             {'count', 'next', 'previous', 'page', 'total_pages', 'results'})
+            names = [item['name'] for item in response.data['results']]
+            self.assertIn(EventType.SUITE_INIT, names)
+            self.assertIn('PAGING_EVENT', names)
+        finally:
+            EventTypeRegistry.objects.filter(name='PAGING_EVENT').delete()
+            EventRegistry.clear_cache()
+
+    def test_runs_page_size_and_limit_alias(self):
+        for status_ in ('pending', 'running'):
+            for idx in range(12):
+                SuiteRun.objects.create(
+                    plan=self.plan, suite=self.suite, symbol=f'000{idx:03d}',
+                    status=status_, event_queue=[],
+                )
+        response = self.client.get('/api/execution/runs/', {'page_size': 8})
+        self.assertEqual(response.data['count'], 24)
+        self.assertEqual(response.data['total_pages'], 3)
+        self.assertEqual(len(response.data['results']), 8)
+        # 旧客户端兼容：limit 可作为 page_size 别名
+        limit_response = self.client.get('/api/execution/runs/', {'limit': 100})
+        self.assertEqual(len(limit_response.data['results']), 24)

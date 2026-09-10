@@ -55,8 +55,21 @@ class DataSourceAPITest(APITestCase):
         logger.info(f"已创建两个数据源: {ds1.name}, {ds2.name}")
         response = self.client.get(self.list_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
-        logger.info("列表返回记录数: %d", len(response.data))
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual(len(response.data['results']), 2)
+        logger.info("列表返回记录数: %d", response.data['count'])
+
+    def test_list_datasources_paginated(self):
+        logger.info("测试数据源列表分页")
+        for index in range(15):
+            DataSource.objects.create(name=f'源{index}', source_type='akshare')
+        response = self.client.get(self.list_url, {'page_size': 10})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 15)
+        self.assertEqual(response.data['total_pages'], 2)
+        self.assertEqual(len(response.data['results']), 10)
+        page2 = self.client.get(self.list_url, {'page': 2, 'page_size': 10})
+        self.assertEqual(len(page2.data['results']), 5)
 
     def test_retrieve_datasource(self):
         logger.info("测试获取单个数据源")
@@ -117,8 +130,8 @@ class RealtimeSnapshotAPITest(APITestCase):
         logger.info("测试列出所有快照")
         response = self.client.get(self.list_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['symbol']['code'], '000001')
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['symbol']['code'], '000001')
         logger.info("快照列表返回记录数: 1")
 
     def test_retrieve_snapshot_by_symbol_id(self):
@@ -157,7 +170,8 @@ class KLineSyncLogAPITest(APITestCase):
         logger.info("测试列出所有同步日志")
         response = self.client.get(self.list_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(len(response.data['results']), 1)
         logger.info("日志列表返回记录数: 1")
 
     def test_retrieve_log(self):
@@ -255,13 +269,13 @@ class KLineAPITest(APITransactionTestCase):
             'end': '2024-01-15'
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 5)
-        first = response.data[0]
+        self.assertEqual(response.data['count'], 5)
+        first = response.data['results'][0]
         self.assertIn('symbol', first)
         self.assertIn('date', first)
         self.assertIn('extra', first)
         self.assertEqual(str(first['extra']['adj_factor']), '1.000000')
-        logger.info(f"查询成功，返回 {len(response.data)} 条记录")
+        logger.info(f"查询成功，返回 {response.data['count']} 条记录")
 
     def test_query_kline_missing_params(self):
         logger.info("测试缺少日期参数")

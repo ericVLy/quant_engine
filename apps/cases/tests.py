@@ -155,8 +155,30 @@ class CaseAPITest(APITestCase):
         response = self.client.get(self.url, {'node_type': 'signal', 'search': 'RSI'})
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['name'], 'RSI 信号')
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['name'], 'RSI 信号')
+
+    def test_list_cases_paginated(self):
+        for index in range(25):
+            Case.objects.create(name=f'信号 {index}', node_type='signal')
+
+        response = self.client.get(self.url, {'page_size': 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 25)
+        self.assertEqual(response.data['total_pages'], 3)
+        self.assertEqual(response.data['page'], 1)
+        self.assertEqual(len(response.data['results']), 10)
+
+        page2 = self.client.get(self.url, {'page': 2, 'page_size': 10})
+        self.assertEqual(page2.data['page'], 2)
+        self.assertEqual(len(page2.data['results']), 10)
+        self.assertIsNotNone(page2.data['previous'])
+        self.assertIsNotNone(page2.data['next'])
+
+        # 旧客户端兼容：limit 可作为 page_size 的别名
+        limit_response = self.client.get(self.url, {'limit': 30})
+        self.assertEqual(len(limit_response.data['results']), 25)
 
     def test_publish_case_increments_version(self):
         case = Case.objects.create(name='待发布', node_type='executor')
@@ -179,7 +201,8 @@ class CaseAPITest(APITestCase):
         response = self.client.get(f'{self.url}{case.id}/versions/')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0]['params']['direction'], 1)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['params']['direction'], 1)
 
     def test_delete_referenced_case_returns_conflict(self):
         case = Case.objects.create(name='已引用', node_type='signal')

@@ -45,7 +45,16 @@ class PlanAPITest(APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		response = self.client.get(self.url, {'trigger_type': 'manual', 'search': '更新'})
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(len(response.data), 1)
+		self.assertEqual(response.data['count'], 1)
+
+	def test_plan_list_paginated(self):
+		for index in range(25):
+			self.create_plan(name=f'批量计划 {index}')
+		response = self.client.get(self.url, {'page_size': 10})
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 25)
+		self.assertEqual(response.data['total_pages'], 3)
+		self.assertEqual(len(response.data['results']), 10)
 
 	def test_validate_time_trigger_cron(self):
 		response = self.client.post(
@@ -115,7 +124,8 @@ class PlanAPITest(APITestCase):
 		plan = self.create_plan()
 		response = self.client.get(f'{self.url}{plan.id}/symbols/')
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(response.data[0]['id'], symbol.id)
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(response.data['results'][0]['id'], symbol.id)
 
 	def test_resolve_group_symbols_endpoint(self):
 		symbol = Symbol.objects.create(code='000002', name='万科A', market='A')
@@ -126,7 +136,8 @@ class PlanAPITest(APITestCase):
 		)
 		response = self.client.get(f'{self.url}{plan.id}/symbols/')
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(response.data[0]['code'], '000002')
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(response.data['results'][0]['code'], '000002')
 
 	def test_delete_plan_with_run_returns_conflict(self):
 		plan = self.create_plan()

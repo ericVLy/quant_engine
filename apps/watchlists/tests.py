@@ -35,15 +35,40 @@ class SymbolAPITest(APITestCase):
         logger.info("测试列出所有标的")
         response = self.client.get(self.list_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
-        logger.info(f"返回 {len(response.data)} 条记录")
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual(len(response.data['results']), 2)
+        logger.info(f"返回 {response.data['count']} 条记录")
 
     def test_search_symbol(self):
         logger.info("测试搜索标的（按名称）")
         response = self.client.get(self.list_url, {'search': '平安'})
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['code'], '000001')
-        logger.info(f"搜索到标的: {response.data[0]['code']}")
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['code'], '000001')
+        logger.info(f"搜索到标的: {response.data['results'][0]['code']}")
+
+    def test_list_symbols_paginated(self):
+        logger.info("测试标的列表分页（page / page_size / limit 兼容）")
+        for index in range(25):
+            Symbol.objects.create(
+                code=f'600{index:03d}', name=f'股票 {index}', market='A', exchange='SSE'
+            )
+        response = self.client.get(self.list_url, {'page_size': 10})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 27)  # 25 + setUp 创建的 2 个
+        self.assertEqual(response.data['total_pages'], 3)
+        self.assertEqual(response.data['page'], 1)
+        self.assertIn('next', response.data)
+        self.assertIsNone(response.data['previous'])
+        self.assertEqual(len(response.data['results']), 10)
+
+        page2 = self.client.get(self.list_url, {'page': 2, 'page_size': 10})
+        self.assertEqual(page2.data['page'], 2)
+        self.assertEqual(len(page2.data['results']), 10)
+
+        # 旧客户端兼容：limit 作为 page_size 的别名
+        limit_response = self.client.get(self.list_url, {'limit': 500})
+        self.assertEqual(len(limit_response.data['results']), 27)
+        logger.info("分页测试通过")
 
     def test_create_symbol(self):
         logger.info("测试创建新标的")
@@ -100,9 +125,23 @@ class GroupAPITest(APITestCase):
         logger.info("测试列出所有分组")
         response = self.client.get(self.list_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['symbols'][0]['code'], '000001')
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['symbols'][0]['code'], '000001')
         logger.info("分组列表返回记录数: 1")
+
+    def test_list_groups_paginated(self):
+        logger.info("测试分组列表分页（page_size / limit 兼容）")
+        for index in range(15):
+            Group.objects.create(name=f'分组 {index}')
+        response = self.client.get(self.list_url, {'page_size': 10})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 16)  # 15 + setUp 创建的分组
+        self.assertEqual(response.data['total_pages'], 2)
+        self.assertEqual(len(response.data['results']), 10)
+        page2 = self.client.get(self.list_url, {'page': 2, 'page_size': 10})
+        self.assertEqual(len(page2.data['results']), 6)
+        limit_response = self.client.get(self.list_url, {'limit': 100})
+        self.assertEqual(len(limit_response.data['results']), 16)
 
     def test_add_symbols_to_group(self):
         logger.info("测试向分组添加标的")
