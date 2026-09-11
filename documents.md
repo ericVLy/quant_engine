@@ -2,7 +2,7 @@
 
 > 版本：v2.7  
 > 日期：2026-09-10  
-> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块设计定稿（多市场时区感知 · 临时数据 · 见模块9）
 
 
 ## 一、项目概述
@@ -74,6 +74,7 @@ users（用户权限）
    ├── watchlists（标的/分组/自选池）
    │      │
    │      ├── datasources（K线存储/数据源配置）
+   │      │        └── monitoring（分时监控，临时数据 · 多市场时区）
    │      │
    │      └── cases（原子策略节点）
    │             │
@@ -861,6 +862,123 @@ class Plan(models.Model):
    → 10. 若为 Executor 节点 → 风控校验 → 生成 Order
 ```
 
+### 模块9：`monitoring`（分时监控）🟡 设计定稿 · 待实施
+
+| 属性 | 说明 |
+|------|------|
+| **状态** | 🟡 设计定稿（2026-09-10），后端/前端实施待做 |
+| **优先级** | P1 |
+| **依赖** | `watchlists.Symbol`, `datasources`（ashare 快照数据源） |
+
+#### 设计约束
+
+- **分时数据为临时数据**：生命周期「开盘记录 → 收盘清空」，收盘后清空全表，不做长期持久化（持久化意义小，表膨胀无收益）。
+- **多市场时区感知**：A 股（Asia/Shanghai）、港股（Asia/Hong_Kong）、美股（America/New_York，含夏令时）时区与交易时段不同，采样、清理、前端渲染均需按各市场本地时间判断。
+- **存储于主库**：`IntradayPoint` 为 Django ORM 常规表（主库 `default`），每日收盘清空后表归零，数据量可控（自选池/Plan 标的范围，百级标的 × 240 分钟 = 万级行）。
+
+#### 市场时区与交易时段
+
+```python
+# apps/monitoring/market_calendar.py
+MARKET_TIMEZONES = {
+    'A':  'Asia/Shanghai',
+    'HK': 'Asia/Hong_Kong',
+    'US': 'America/New_York',   # zoneinfo 自动支持 EDT/EST 夏令时切换
+}
+TRADING_SESSIONS = {
+    'A':  [('09:30', '11:30'), ('13:00', '15:00')],
+    'HK': [('09:30', '12:00'), ('13:00', '16:00')],
+    'US': [('09:30', '16:00')],   # 连续时段
+}
+```
+
+- `in_trading_session(market, now_local)` 判断当前市场本地时间是否在交易时段内。
+- 采样任务按 `market` 分组标的，只对处于交易时段的市场执行采样。
+
+#### 数据模型
+
+```python
+class IntradayPoint(models.Model):
+    """分时监控点（临时数据：当日有效，收盘后由 clear_intraday 清空）。"""
+    symbol    = models.ForeignKey(Symbol, on_delete=models.CASCADE, related_name='intraday_points')
+    ts        = models.DateTimeField(db_index=True)   # UTC 存储（USE_TZ=True）
+    price     = models.DecimalField(max_digits=12, decimal_places=4, verbose_name='现价')
+    change    = models.DecimalField(max_digits=8,  decimal_places=4, verbose_name='涨跌幅%')
+    volume    = models.BigIntegerField(verbose_name='累计成交量')
+    amount    = models.DecimalField(max_digits=20, decimal_places=2, verbose_name='累计成交额')
+    avg_price = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True, verbose_name='均价')
+    high      = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    low       = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    open_price = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    pre_close = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['symbol', '-ts'])]
+        constraints = [
+            models.UniqueConstraint(fields=('symbol', 'ts'), name='uniq_intraday_symbol_ts'),
+        ]
+```
+
+- `(symbol, ts)` 唯一约束保证同一分钟重复采样被拒绝或 `update_or_create` 覆盖。
+- `ts` 统一存 UTC；查询/展示层按市场时区转换（API 返回 `local_time` 字段，前端免二次转换）。
+
+#### 采样任务
+
+```bash
+manage.py sample_intraday [--markets=A,HK,US] [--symbols=000001,600519,...]
+```
+
+- 按 `market` 分组标的，仅对交易时段内的市场执行。
+- 数据源：ashare 快照接口（`stock_zh_a_spot_em` 等），复用 `datasources.ashare` 层。
+- 采样间隔由外部调度器（cron / Scheduler）控制，推荐每分钟一次。
+- 非交易时段自动跳过（`in_trading_session()` 返回 False）。
+
+#### 清理任务
+
+```bash
+manage.py clear_intraday [--before=YYYY-MM-DD]
+```
+
+- 删除 `ts < --before`（默认当日 00:00 UTC）的全部记录。
+- Scheduler 在 UTC 23:00 自动触发（美股收盘后、A 股开盘前，全市场当日数据同时过期）。
+- 也可次日开盘前手动兜底。
+
+#### API 端点
+
+| 方法 | 端点 | 功能 |
+|------|------|------|
+| GET | `/api/monitoring/intraday/?symbol=000001` | 当日分时序列（时间升序） |
+| GET | `/api/monitoring/intraday/realtime/?symbol=000001` | 最新一条 + RealtimeSnapshot 合并 |
+
+响应结构（分时序列，注意 `market`/`timezone`/`session_status` 为前端渲染依据）：
+
+```json
+{
+  "symbol": "000001",
+  "market": "A",
+  "timezone": "Asia/Shanghai",
+  "session_status": "trading",
+  "pre_close": "10.20",
+  "points": [
+    {"ts": "2026-09-10T01:31:00Z", "local_time": "09:31", "price": "10.50",
+     "change": "2.94", "avg_price": "10.48", "volume": 1200, "amount": "12600.00"},
+    ...
+  ]
+}
+```
+
+- `session_status`：`trading` / `lunch_break` / `closed` / `pre_market`，前端据此控制轮询暂停/恢复与「已收盘」提示。
+- 数据量：单标的单日 ~240 个点，一次返回无分页压力（不走分页）。
+
+#### 前端页面
+
+- 路由 `/monitoring`，导航菜单「分时监控」。
+- ECharts 分时图：现价折线（蓝）+ 均价黄线 + 底部量能柱 + 涨跌幅着色。
+- X 轴按市场本地时间渲染（`local_time` 字段）。
+- 盘中 15~30s 定时轮询增量追加（非全量重绘）。
+- 非交易时段显示「已收盘」提示并暂停轮询。
+- 标的切换 tab 或下拉（自选池 / Plan 标的范围）。
+
 
 ## 四、模块完成进度总览
 
@@ -874,6 +992,7 @@ class Plan(models.Model):
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
 | `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
+| `monitoring` | 🟡 设计定稿 · 待实施 | 0（未实施） | 0%（设计见模块9；后端模型/命令/API + 前端分时监控页待做） |
 
 > 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准（v2.6：**290 个测试全部通过**）。
 
@@ -918,6 +1037,7 @@ class Plan(models.Model):
 | P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
 | P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
 | P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
+| P1 | ~~分时监控模块~~ → 🟡 **设计定稿（2026-09-10，见模块9），实施待做**：多市场（A/HK/US）时区感知的分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` 表 + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` + 前端 ECharts 分时监控页 | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
 
@@ -927,7 +1047,7 @@ class Plan(models.Model):
 |------|----------|------------|----------|------|
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
 | 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验、交易失败告警通道已完成；剩余真实交易环境验证） |
-| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理 | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**；`auth_info` 加密、日志清理待做；多实例治理已随单机部署目标降为 P4，见 5.1.2） |
+| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、**分时监控** | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**；`auth_info` 加密、日志清理待做；多实例治理已随单机部署目标降为 P4，见 5.1.2；分时监控设计定稿待实施，见模块9） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
 
@@ -1008,6 +1128,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
 | P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
 | P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；datasources `test_list_datasources_paginated`；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
+| P1 阶段4 | 分时监控专项测试（待实施时补） | ⏳ 设计定稿，未实施（见模块9） | 覆盖：`IntradayPoint` 模型/唯一约束、`in_trading_session` 多市场时段/夏令时、`sample_intraday` 采样、`clear_intraday` 清空幂等、`/api/monitoring/intraday/` 响应契约 |
 
 #### 测试验收标准
 
