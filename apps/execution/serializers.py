@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel
+from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel, NodeRun
 from .funds import FundError, allocate_funds
 from .registry import EventRegistry
 
@@ -38,6 +38,25 @@ class SuiteRunSerializer(serializers.ModelSerializer):
         model = SuiteRun
         fields = '__all__'
         read_only_fields = ('created_at',)
+
+
+class NodeRunSerializer(serializers.ModelSerializer):
+    """节点级运行实例序列化器（执行轨迹回放数据源）。"""
+    node_type_display = serializers.CharField(source='get_node_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    suite_name = serializers.CharField(source='suite.name', read_only=True, allow_null=True, default=None)
+    case_name = serializers.CharField(source='case.name', read_only=True, allow_null=True, default=None)
+    symbol = serializers.CharField(source='run.symbol', read_only=True)
+
+    class Meta:
+        model = NodeRun
+        fields = (
+            'id', 'run', 'parent', 'node_type', 'node_type_display',
+            'suite', 'suite_name', 'case', 'case_name', 'symbol',
+            'status', 'status_display', 'direction', 'result',
+            'started_at', 'ended_at',
+        )
+        read_only_fields = fields
 
 
 class ExecutionLogSerializer(serializers.ModelSerializer):

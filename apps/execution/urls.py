@@ -5,6 +5,7 @@ from . import views
 router = DefaultRouter()
 router.register(r'event-types', views.EventTypeRegistryViewSet, basename='event-types')
 router.register(r'runs', views.SuiteRunViewSet, basename='runs')
+router.register(r'node-runs', views.NodeRunViewSet, basename='node-runs')
 router.register(r'events', views.EventViewSet, basename='events')
 router.register(r'logs', views.ExecutionLogViewSet, basename='logs')
 router.register(r'orders', views.OrderViewSet, basename='orders')

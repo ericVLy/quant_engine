@@ -1,15 +1,17 @@
 ﻿from django.http import JsonResponse
 import json
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 
-from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel
+from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel, NodeRun
 from .serializers import (
     EventTypeRegistrySerializer, EventSerializer,
     SuiteRunSerializer, ExecutionLogSerializer, OrderSerializer,
     FundAllocationSerializer, AlertSerializer, AlertChannelSerializer, AlertActionSerializer,
+    NodeRunSerializer,
 )
 from .registry import EventRegistry
 from .events import EventType
@@ -115,13 +117,33 @@ class SuiteRunViewSet(viewsets.ReadOnlyModelViewSet):
     """SuiteRun 只读视图"""
     queryset = SuiteRun.objects.select_related('plan', 'suite').all().order_by('-created_at')
     serializer_class = SuiteRunSerializer
-    filterset_fields = ['status', 'symbol', 'plan']
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'symbol', 'plan', 'suite']
+
+    @action(detail=True, methods=['get'], url_path='node-runs')
+    def node_runs(self, request, pk=None):
+        """返回某次运行的节点执行轨迹（按执行顺序，供前端回放）。"""
+        node_runs = (
+            NodeRun.objects.filter(run_id=pk)
+            .select_related('suite', 'case', 'parent')
+            .order_by('id')
+        )
+        return Response(NodeRunSerializer(node_runs, many=True).data)
+
+
+class NodeRunViewSet(viewsets.ReadOnlyModelViewSet):
+    """NodeRun 只读视图（编排树节点运行实例 / 轨迹回放）"""
+    queryset = NodeRun.objects.select_related('run', 'suite', 'case', 'parent').all().order_by('started_at', 'id')
+    serializer_class = NodeRunSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['run', 'node_type', 'status', 'suite', 'case']
 
 
 class EventViewSet(viewsets.ReadOnlyModelViewSet):
     """Event 只读视图"""
     queryset = Event.objects.select_related('run').all().order_by('-created_at')
     serializer_class = EventSerializer
+    filter_backends = [DjangoFilterBackend]
     filterset_fields = ['run', 'status', 'event_type']
 
 
