@@ -63,6 +63,10 @@ class KLineViewSet(viewsets.GenericViewSet):
             raise serializers.ValidationError({"detail": "日期格式应为 YYYY-MM-DD"})
 
         results = query_kline_table(symbol, start, end)
+        page = self.paginate_queryset(results)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
         serializer = self.get_serializer(results, many=True)
         return Response(serializer.data)
 

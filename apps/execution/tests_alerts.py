@@ -465,7 +465,8 @@ class AlertAPITests(APITestCase):
         self.client.force_authenticate(user=self.user)
         response = self.client.get('/api/execution/alerts/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual(len(response.data['results']), 2)
     
     def test_alert_statistics(self):
         """测试告警统计"""
