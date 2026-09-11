@@ -635,7 +635,7 @@ class Case(models.Model):
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | 🟢 已完成 CRUD、拓扑读写、DAG 校验、发布校验、发布拓扑快照（SuiteVersion）、子 Suite 递归执行、树形运行时聚合、并行分支 join；画布前端对接与边条件操作符扩展待完善 |
+| **状态** | 🟢 已完成 CRUD、拓扑读写、DAG 校验、发布校验、发布拓扑快照（SuiteVersion）、子 Suite 递归执行、树形运行时聚合、并行分支 join；画布前端对接（策略设计器 `/designer`）已完成 |
 | **优先级** | P0 |
 | **依赖** | `cases.Case` |
 
@@ -871,7 +871,7 @@ class Plan(models.Model):
 | `datasources` | ✅ 已完成 | 30 通过 | 100% |
 | `execution` | 🟢 执行闭环完成 | 77 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
-| `suites` | 🟢 编排核心能力完成 | 30 通过 | 95%（含 run_status 状态机：new→running→done/interrupt；画布前端对接、边条件操作符扩展待完善） |
+| `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
 | `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 
@@ -909,6 +909,7 @@ class Plan(models.Model):
 | Suite 拓扑完整性校验（跨树入边、重复边、非法权重、孤立节点、不可达节点；发布前串联 validate_dag + validate_topology） | `suites` | ✅ 已完成（5 个专项测试） | S-09 |
 | 告警管理（Alert 模型 + AlertChannel 渠道配置 + `alert_service` 通知服务；应用内 / 邮件多渠道，按最低级别与类型白名单分发；`/api/execution/alerts/`、`/api/execution/alert-channels/` 及操作/统计/重发接口；前端告警管理页 + 告警渠道配置页） | `execution`, `runner`, `plans`, `quant-frontend` | ✅ 已完成（21 个专项测试；EX-20 ~ EX-26） | EX-20、EX-21、EX-22、EX-23、EX-24、EX-25、EX-26 |
 | API 统一分页（列表接口统一 `{count, next, previous, page, total_pages, results}` 分页结构；`page` / `page_size` / `limit` 兼容别名；全局 `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` + 自定义列表动作分页；前端 axios 拦截器解包 `results` 保持旧字段兼容，列表调用默认 `page_size: 500`） | 全部 API, `quant-frontend` | ✅ 已完成（`quant_engine/pagination.py`，N-01；9 个专项测试：cases+1、suites+1、plans+1、watchlists+2、datasources+1、execution+3，另含既有用例的页内/limit 兼容断言） | N-01 |
+| 画布可视化编排前端对接（策略设计器 `/designer`：@vue-flow/core 拖拽节点/连线编排 Case 与子 Suite；编排边条件对话框，`event_condition` 白名单 + 操作符 `eq/neq/gt/gte/lt/lte/between`；拓扑读写与发布；执行轨迹回放：按 SuiteRun 步进/自动播放回放 NodeRun 节点状态与事件顺序；侧边导航新增菜单） | `quant-frontend`, `execution` | ✅ 已完成（2026-09-10；`src/views/Designer.vue` + 路由 `/designer`；后端新增 `GET /api/execution/run/{run_id}/node-runs/`；`vue-tsc` 0 错误、`vite build` 通过） | S-09、EX-15、5.1.4 任务 11 |
 
 #### 5.1.2 待开发任务
 
@@ -916,7 +917,7 @@ class Plan(models.Model):
 |--------|----------|----------|--------------|
 | P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
 | P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
-| P2 | 画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图） | `quant-frontend` | S-09、EX-15 |
+| P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
 
@@ -957,7 +958,7 @@ class Plan(models.Model):
 | 8 | P1 | API 分页与敏感配置保护（已拆分为两个子任务） | 全部 API、`datasources` | 统一分页响应、`auth_info` 加密/脱敏、权限检查 | ✅ **API 统一分页已完成**（列表接口统一 `{count, next, previous, page, total_pages, results}`；`page/page_size/limit` 兼容别名；前端拦截器解包 `results`，接口测试通过）；⏳ **敏感配置保护待做**（`auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥；旧客户端字段兼容） |
 | 9 | P4 | 多实例 Scheduler 治理（原 P1，**单机部署目标下降级**） | `plans`, `runner` | 分布式任务去重、租约/领导者选举、任务幂等键 | ~~多个 Scheduler 实例只产生一个 `(Plan, Symbol, minute)` 任务；实例故障可恢复~~ → 降级为 **P4 储备**：单机单实例下进程内去重已满足；未来多机部署时再恢复本验收标准 |
 | 10 | P2 | 执行日志生命周期管理 | `execution`, `runner` | 30 天自动清理、归档策略、清理命令和监控 | 清理不影响未完成运行和订单；清理任务可重复执行且幂等 |
-| 11 | P2 | 画布编排与执行轨迹回放 | `quant-frontend`, `execution` | 拖拽节点、连线配置、NodeRun 轨迹和失败节点定位 | 前端拓扑与后端快照双向一致；可按 SuiteRun 回放节点状态和事件顺序 |
+| 11 | P2 | ~~画布编排与执行轨迹回放~~ → ✅ **已完成（2026-09-10，见 5.1.1）** | `quant-frontend`, `execution` | 拖拽节点、连线配置、NodeRun 轨迹和失败节点定位 | ✅ 前端拓扑与后端快照双向一致（`/designer` 拓扑读写/发布走 `GET|POST /api/suites/{id}/topology/`）；可按 SuiteRun 回放节点状态和事件顺序（`GET /api/execution/run/{run_id}/node-runs/` + Designer 页步进/自动播放回放，失败节点标红定位） |
 | 12 | P2 | 性能与容量基线 | 全部 runner/API | API、队列、数据查询和并发执行基准 | 建立基准数据；非外部调用 API 达到 500ms 目标；记录并发容量和瓶颈 |
 
 ##### 本轮依赖关系
@@ -976,7 +977,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 分页 ✅（已完成）→ 配置保护 → 日志清理与性能基线
 （多实例 Scheduler 治理已降级 P4：单机部署下非必要，见 5.1.2）
     ↓
-画布编排与执行轨迹回放
+画布编排与执行轨迹回放 ✅（已完成 2026-09-10，见 5.1.1 / 5.1.4 任务 11）
 ```
 
 ##### 本轮统一验收要求
@@ -995,7 +996,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 |------|----------|----------|----------|
 | P0 阶段1 | `execution` 基础功能与 API 测试 | ✅ 18 个通过 | 真实交易回报生产链路联调（模拟回报适配已完成） |
 | P0 阶段2 | `cases` CRUD、发布和深层参数校验测试 | ✅ 21 个通过 | 持续维护新增指标的目录兼容性 |
-| P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | 画布前端拓扑测试（边条件操作符测试已并入 P1 阶段2 完成） |
+| P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | ✅ 画布前端拓扑测试已落地（Designer 页对接 topology 读写/发布接口并经 `vue-tsc` + `vite build` 验证；边条件操作符测试已并入 P1 阶段2 完成） |
 | P0 阶段4 | `plans` CRUD、发布、标的解析、调度与版本管理测试 | ✅ 13 个通过 | ~~多实例调度治理测试~~（已随任务降级 P4：单机部署单实例无需验证，见 5.1.2） |
 | P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 71 个通过（含编排、Cron 边界、WorkerPool 重试失败传播、数据上下文、订单生命周期用例） | 生产行情、风控边界、真实交易环境测试 |
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
