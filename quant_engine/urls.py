@@ -40,6 +40,7 @@ urlpatterns = [
     path('api/suites/', include('apps.suites.urls')),
     path('api/plans/', include('apps.plans.urls')),
     path('api/users/', include('apps.users.urls')),
+    path('api/monitoring/', include('apps.monitoring.urls')),
     re_path(r'^(?!api/|admin/|assets/).*$', serve_frontend_index),
 ]
 

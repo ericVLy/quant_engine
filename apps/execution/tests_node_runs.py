@@ -42,16 +42,16 @@ class NodeRunAPITest(APITestCase):
     def test_node_run_list_filter_by_run(self):
         response = self.client.get('/api/execution/node-runs/', {'run': self.run.id})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ids = [item['id'] for item in response.data]
+        ids = [item['id'] for item in response.data['results']]
         self.assertEqual(sorted(ids), sorted([self.root_node.id, self.case_node.id, self.failed_node.id, self.child_node.id]))
         self.assertNotIn(self.detached_node.id, ids)
 
     def test_node_run_list_filter_by_status_and_node_type(self):
         response = self.client.get('/api/execution/node-runs/', {'run': self.run.id, 'status': 'failed'})
-        self.assertEqual([item['id'] for item in response.data], [self.failed_node.id])
+        self.assertEqual([item['id'] for item in response.data['results']], [self.failed_node.id])
 
         response = self.client.get('/api/execution/node-runs/', {'run': self.run.id, 'node_type': 'suite'})
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data['results']), 2)
 
     def test_node_run_display_fields(self):
         response = self.client.get(f'/api/execution/node-runs/{self.case_node.id}/')
@@ -72,7 +72,7 @@ class NodeRunAPITest(APITestCase):
 
     def test_suite_run_filter_by_suite(self):
         response = self.client.get('/api/execution/runs/', {'suite': self.suite.id})
-        self.assertEqual([item['id'] for item in response.data], [self.run.id])
+        self.assertEqual([item['id'] for item in response.data['results']], [self.run.id])
 
     def test_nested_action_missing_run_returns_empty(self):
         response = self.client.get(f'/api/execution/runs/{self.other_run.id}/node-runs/')

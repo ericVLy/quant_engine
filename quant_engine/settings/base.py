@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'apps.watchlists',
     'apps.datasources',
     'apps.users',
+    'apps.monitoring',
 
     'django_filters',
 ]
