@@ -41,8 +41,8 @@
 
 ## 常用命令
 
-- 运行测试：`.\venv\Scripts\python.exe .\manage.py test`
-- 全项目回归：`.\venv\Scripts\python.exe .\manage.py test`（无标签，含 runner）
-- 分时采样（外部 cron 每分钟调用）：`.\venv\Scripts\python.exe .\manage.py sample_intraday`
-- 收盘清理（建议 UTC 23:00）：`.\venv\Scripts\python.exe .\manage.py clear_intraday`
-- Plan Cron 调度器：`.\venv\Scripts\python.exe .\manage.py run_scheduler --interval 60`
+- 运行测试：`python manage.py test`
+- 全项目回归：`python manage.py test`（无标签，含 runner）
+- 分时采样（外部 cron 每分钟调用）：`python manage.py sample_intraday`
+- 收盘清理（建议 UTC 23:00）：`python manage.py clear_intraday`
+- Plan Cron 调度器：`python manage.py run_scheduler --interval 60`
