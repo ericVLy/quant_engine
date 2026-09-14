@@ -15,6 +15,7 @@
 - pre_market  交易日内开盘前
 - closed      收盘后 / 周末 / 开盘前非交易日
 """
+from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 MARKET_TIMEZONES = {
@@ -86,3 +87,29 @@ def session_status(market, now_local):
 def in_trading_session(market, now_local):
     """``now_local`` 处于交易时段内返回 True（午休 / 开盘前 / 收盘 / 周末均 False）。"""
     return session_status(market, now_local) == 'trading'
+
+
+def trading_minutes_local(market, now_local):
+    """返回 ``now_local``（market 本地、naive）当日已开启的交易分钟（naive 本地分钟，升序）。
+
+    - 周末返回空；开盘前返回空；
+    - 每个交易时段取 ``[开盘, min(收盘, now_local)]`` 的分钟（含当前已开启的那一分钟）；
+    - 午休间隙不输出，保证分时数据只在交易时段有值。
+    """
+    market = str(market).upper()
+    now_local = now_local.replace(second=0, microsecond=0)
+    if now_local.weekday() >= 5:
+        return []
+    now_minute = now_local.hour * 60 + now_local.minute
+    first_open = _to_minutes(TRADING_SESSIONS[market][0][0])
+    if now_minute < first_open:
+        return []
+    base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    for start, end in _sessions(market):
+        if start >= now_minute:
+            continue
+        upto = min(end, now_minute + 1)
+        for minute in range(start, upto):
+            out.append(base + timedelta(minutes=minute))
+    return out

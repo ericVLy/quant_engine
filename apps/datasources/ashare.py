@@ -2,15 +2,29 @@
 import json,requests,datetime;      import pandas as pd  #
 
 def _normalize_ashare_code(code):
-    """统一 A 股代码格式，确保腾讯/Sina 接口接受带交易所前缀的代码。"""
+    """统一 A 股代码格式，确保腾讯/Sina 接口接受带交易所前缀的代码。
+
+    **指数与个股区分**（见 ``apps/watchlists.services`` 的统一规则）：
+    - 399xxx 等指数专属段 → 深市指数（``sz399001``）；
+    - 000xxx 二义段：调用方传入显式 ``sh``/``sh000300`` 前缀时保留沪市指数语义；
+      裸 6 位数字保守按深市个股处理（与 ``gm_symbol_for`` 的缺省一致）；
+    - 880/930/931/932/980 指数段 → 沪市指数（``sh930xxx``）。
+    """
     code = str(code or '').strip()
     if not code:
         return code
+    explicit_market = ''
+    upper = code.upper()
+    if upper.startswith(('SH', 'SZ')):
+        explicit_market = upper[:2].lower()
+        code = code[2:]
     code = code.replace('.XSHG', '').replace('.XSHE', '').replace('.SH', '').replace('.SZ', '')
-    if code.startswith(('600', '601', '603', '605', '688', '689')):
+    if code.isdigit() and len(code) < 6:
+        code = code.zfill(6)
+    if code.startswith(('600', '601', '603', '605', '688', '689', '880', '930', '931', '932', '980')):
         return f'sh{code}'
-    if code.startswith(('000', '001', '002', '003', '004', '300', '301')):
-        return f'sz{code}'
+    if code.startswith(('000', '001', '002', '003', '004', '300', '301', '399')):
+        return f'{explicit_market or "sz"}{code}'
     if code.startswith('bj'):
         return code
     return code

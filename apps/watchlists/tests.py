@@ -272,3 +272,50 @@ class ServicesTest(TestCase):
         self.assertEqual(Symbol.objects.filter(market='A').count(), 2)
 
         logger.info("新增/更新测试通过")
+
+class AShareCodeClassifyTest(TestCase):
+    """A 股标的代码字符串处理：指数与个股判别 + 交易所解析。"""
+
+    def test_is_a_share_index(self):
+        from .services import is_a_share_index
+        # 指数专属段：纯前缀判定
+        self.assertTrue(is_a_share_index('399001'))
+        self.assertTrue(is_a_share_index('880001'))
+        self.assertTrue(is_a_share_index('930955'))
+        self.assertTrue(is_a_share_index('899050'))
+        # 000xxx 二义段：仅显式沪市 exchange 才是指数
+        self.assertTrue(is_a_share_index('000001', 'SSE'))
+        self.assertTrue(is_a_share_index('sh000300', ''))
+        self.assertFalse(is_a_share_index('000001'))          # 平安银行（缺省个股）
+        self.assertFalse(is_a_share_index('000001', 'SZSE'))
+        # 个股与异构代码
+        self.assertFalse(is_a_share_index('600000'))
+        self.assertFalse(is_a_share_index('AAPL'))
+
+    def test_resolve_a_share_exchange(self):
+        from .services import resolve_a_share_exchange
+        self.assertEqual(resolve_a_share_exchange('600000'), 'SSE')
+        self.assertEqual(resolve_a_share_exchange('000426'), 'SZSE')
+        self.assertEqual(resolve_a_share_exchange('399001'), 'SZSE')
+        self.assertEqual(resolve_a_share_exchange('930955'), 'SSE')
+        self.assertEqual(resolve_a_share_exchange('880001'), 'SSE')
+        self.assertEqual(resolve_a_share_exchange('899050'), 'BSE')
+        self.assertEqual(resolve_a_share_exchange('833533'), 'BSE')
+        # 显式 exchange 优先（000xxx 沪指数场景）
+        self.assertEqual(resolve_a_share_exchange('000001', 'SSE'), 'SSE')
+        self.assertEqual(resolve_a_share_exchange('000001', 'SZ'), 'SZSE')
+
+    def test_raw_prefixed_ambiguous_code_resolves_by_prefix(self):
+        # sh000001（上证指数）：sh 前缀即显式沪市标记，不得剥成 000001 后误判深市个股
+        from .services import resolve_a_share_exchange, is_a_share_index
+        self.assertEqual(resolve_a_share_exchange('sh000001'), 'SSE')
+        self.assertEqual(resolve_a_share_exchange('sz399001'), 'SZSE')
+        self.assertEqual(resolve_a_share_exchange('bj899050'), 'BSE')
+        self.assertTrue(is_a_share_index('sh000001'))
+    def test_normalize_a_share_code(self):
+        from .services import normalize_a_share_code
+        self.assertEqual(normalize_a_share_code('sh000300'), '000300')
+        self.assertEqual(normalize_a_share_code('600000.XSHG'), '600000')
+        self.assertEqual(normalize_a_share_code(' 000001 '), '000001')
+        self.assertEqual(normalize_a_share_code('426'), '000426')
+        self.assertEqual(normalize_a_share_code('AAPL'), 'AAPL')

@@ -33,16 +33,16 @@
 - Alert / AlertChannel: 告警与通知渠道
 - AccountFundConfig / FundAllocation: 账户资金配置与分级资金占用
 
-### monitoring（模块9 · 后端已完成，前端分时监控页待做）
+### monitoring（模块9 · 后端与前端均已落地）
 
 - IntradayPoint: 分时监控点（盘中临时数据，(symbol, ts) 分钟级唯一）
-- 管理命令：`sample_intraday`（采样）· `clear_intraday`（收盘清空，幂等）
-- API：`GET /api/monitoring/intraday/` · `GET /api/monitoring/intraday/realtime/`
+- 内部更新器：`updater.py` 随 Django 服务启动（启动回填 → 周期采样 → UTC 23:00 清理）；**无单独更新命令**
+- API：`GET /api/monitoring/intraday/` · `GET /api/monitoring/intraday/realtime/` · `GET /api/monitoring/intraday/stream/`（SSE 推送）
 
 ## 常用命令
 
 - 运行测试：`python manage.py test`
 - 全项目回归：`python manage.py test`（无标签，含 runner）
-- 分时采样（外部 cron 每分钟调用）：`python manage.py sample_intraday`
-- 收盘清理（建议 UTC 23:00）：`python manage.py clear_intraday`
+- 分时采样：随 Django 服务进程内自动执行（`MONITORING_UPDATER_ENABLED`，无单独命令）
+- 收盘清理兜底（一般无需手动）：`python manage.py clear_intraday`
 - Plan Cron 调度器：`python manage.py run_scheduler --interval 60`
