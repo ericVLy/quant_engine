@@ -2,7 +2,7 @@
 
 > 版本：v2.9  
 > 日期：2026-09-12  
-> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 26 个专项测试 + 前端 ECharts 分时监控页）
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 48 个专项测试 + 前端 ECharts 分时监控页 · 已以 gm SDK 替换分时数据源 · 启动完整性回填）
 
 
 ## 一、项目概述
@@ -866,7 +866,7 @@ class Plan(models.Model):
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ✅ 全部完成（2026-09-12：后端 26 个专项测试通过；前端 ECharts 分时监控页 `/monitoring` 已落地，`vue-tsc` + `vite build` 通过） |
+| **状态** | ✅ 全部完成（2026-09-12：后端 26 个专项测试通过；前端 ECharts 分时监控页 `/monitoring` 已落地，`vue-tsc` + `vite build` 通过；2026-09-14 分时数据源由 akshare 替换为 **gm SDK** 并新增启动完整性回填，测试增至 48 个） |
 | **优先级** | P1 |
 | **依赖** | `watchlists.Symbol`, `datasources`（快照数据源） |
 
@@ -922,16 +922,15 @@ class IntradayPoint(models.Model):
 - `(symbol, ts)` 唯一约束保证同一分钟重复采样被拒绝或 `update_or_create` 覆盖。
 - `ts` 统一存 UTC；查询/展示层按市场时区转换（API 返回 `local_time` 字段，前端免二次转换）。
 
-#### 采样任务
+#### 数据源更新（内部更新器）
 
-```bash
-manage.py sample_intraday [--markets=A,HK,US] [--symbols=000001,600519,...]
-```
+分时数据源更新由 **Django 服务进程内更新器** 自主管理（`apps/monitoring/updater.py`，随 `MonitoringConfig.ready()` 启动），**禁止单独的更新命令**（原 `manage.py sample_intraday` 已移除）：
 
-- 按 `market` 分组标的，仅对交易时段内的市场执行。
-- 数据源：ashare 快照接口（`stock_zh_a_spot_em` 等），复用 `datasources.ashare` 层。
-- 采样间隔由外部调度器（cron / Scheduler）控制，推荐每分钟一次。
-- 非交易时段自动跳过（`in_trading_session()` 返回 False）。
+- 启动时执行开盘到当前的完整性回填（`backfill_intraday`）；**不完整时每轮重试直到完整**（覆盖启动瞬时故障，如 gm 终端连接未就绪），完整后跳过不再全表比对；
+- 每 `MONITORING_UPDATER_INTERVAL` 秒（默认 60，环境变量可覆盖）执行一轮采样；
+- UTC 23:00 自动触发当日 `clear_intraday`（每自然日最多一次，幂等）；
+- `MONITORING_UPDATER_ENABLED=0` 可整体关闭；test/migrate/shell 等管理命令进程不启动；
+- `manage.py clear_intraday` 保留为清理兜底（清理非更新，不写入数据）。
 
 #### 清理任务
 
@@ -949,6 +948,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 |------|------|------|
 | GET | `/api/monitoring/intraday/?symbol=000001` | 当日分时序列（时间升序） |
 | GET | `/api/monitoring/intraday/realtime/?symbol=000001` | 最新一条 + RealtimeSnapshot 合并 |
+| GET | `/api/monitoring/intraday/stream/?symbol=000001` | **SSE 持久化推送**（`snapshot` → 周期 `tick` → `session_status` 变化时 `session`；`interval` 5~60s 缺省 15） |
 
 响应结构（分时序列，注意 `market`/`timezone`/`session_status` 为前端渲染依据）：
 
@@ -975,25 +975,30 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - 路由 `/monitoring`，导航菜单「分时监控」。
 - ECharts 分时图：现价折线（蓝）+ 均价黄线 + 底部量能柱 + 涨跌幅着色。
 - X 轴按市场本地时间渲染（`local_time` 字段）。
-- 盘中 15~30s 定时轮询增量追加（非全量重绘）。
-- 非交易时段显示「已收盘」提示并暂停轮询。
+- **SSE 持久化连接**（EventSource 订阅 `/api/monitoring/intraday/stream/`）替代 15s 轮询：`snapshot` 全量 → `tick` 按 ts 增量合并（非全量重绘）→ `session` 状态变化即时更新；连接连续失败且未收到消息时自动降级回 HTTP 轮询。
+- 非交易时段显示「已收盘」提示。
 - 标的切换 tab 或下拉（自选池 / Plan 标的范围）。
 
 ##### 后端实施记录（2026-09-12）
 
 | 交付物 | 说明 |
 |--------|------|
-| `apps/monitoring` 新 Django 应用 | `models.py`（IntradayPoint）、`market_calendar.py`、`snapshot_provider.py`、`services.py`、`serializers.py`、`views.py`、`urls.py`、`admin.py`、`tests.py`（26 个专项测试） |
+| `apps/monitoring` 新 Django 应用 | `models.py`（IntradayPoint）、`market_calendar.py`、`snapshot_provider.py`、`services.py`、`updater.py`、`serializers.py`、`views.py`、`urls.py`、`admin.py`、`tests.py`（54 个专项测试） |
 | `IntradayPoint` | 主库 `default` 常规表；(symbol, ts) 唯一约束 + (symbol, -ts) 索引；ts 存 UTC；`sample_intraday` 按分钟对齐 `ts` 并用 `update_or_create` 覆盖（同分钟幂等） |
 | `market_calendar.py` | `MARKET_TIMEZONES` / `TRADING_SESSIONS` / `session_status()` / `in_trading_session()`；美股经 zoneinfo 自动处理 EDT/EST |
-| `snapshot_provider.py` | `MarketSnapshotProvider` 抽象 + `AkshareSpotProvider`（A `stock_zh_a_spot_em` / HK `stock_hk_spot_em` / US `stock_us_spot_em`），按市场全量拉到规范化 dict；与 `runner/fundamentals.py` 相同的依赖注入模式，测试 mock 不依赖网络 |
-| 管理命令 | `manage.py sample_intraday`（默认单轮，`--markets`/`--symbols` 可选，`--interval` 常驻模式）· `manage.py clear_intraday`（默认当日 00:00 UTC，幂等） |
-| API | `GET /api/monitoring/intraday/?symbol=`（当日序列，时间升序）· `GET /api/monitoring/intraday/realtime/?symbol=`（最新一条 + RealtimeSnapshot 合并）；**不走分页**；响应含 `market` / `timezone` / `session_status` / `pre_close` / `points[]`（`ts` 为 UTC ISO-8601，`local_time` 为市场本地 HH:MM） |
+| `snapshot_provider.py` | `MarketSnapshotProvider` 抽象 + `AkshareSpotProvider`（A `stock_zh_a_spot_em` / HK `stock_hk_spot_em` / US `stock_us_spot_em`）+ `GmSnapshotProvider`（gm SDK tick，A 股 SHSE/SZSE）+ `CompositeSnapshotProvider`（gm 主源 + akshare 回退）；与 `runner/fundamentals.py` 相同的依赖注入模式，测试 mock 不依赖网络 |
+| 管理命令 | ~~`manage.py sample_intraday`~~ **已移除（2026-09-14）**：分时数据更新由 Django 服务进程内更新器 `updater.py` 自主管理（启动回填 + 周期采样 + UTC 23:00 清理），禁止单独更新命令；`manage.py clear_intraday` 保留为清理兜底 |
+| API | `GET /api/monitoring/intraday/?symbol=`（当日序列，时间升序）· `GET /api/monitoring/intraday/realtime/?symbol=`（最新一条 + RealtimeSnapshot 合并）· `GET /api/monitoring/intraday/stream/?symbol=`（SSE 持久化推送）；**不走分页**；响应含 `market` / `timezone` / `session_status` / `pre_close` / `points[]`（`ts` 为 UTC ISO-8601，`local_time` 为市场本地 HH:MM） |
+| 内部更新器 + SSE（2026-09-14） | `updater.py`：`IntradayUpdater` 守护线程随 `MonitoringConfig.ready()` 启动（启动回填 → 每 60s 采样 → UTC 23:00 清理；`MONITORING_UPDATER_ENABLED`/`_INTERVAL` 配置；test/migrate/shell 进程不启动，runserver 仅 RUN_MAIN 子进程启动）；`views.stream`：`StreamingHttpResponse` SSE（`snapshot`→`tick`→`session`，interval 5~60s 缺省 15）；`sample_intraday` 管理命令已删除 |
 
 设计落地说明：
 
 - 实时快照数据源：设计中的「ashare 快照接口（`stock_zh_a_spot_em` 等）」在 `apps/datasources/ashare.py` 中不存在（该文件仅含 K 线接口）；`stock_zh_a_spot_em` 实为 **akshare** 接口，故实现为 `AkshareSpotProvider` 直接从 akshare 三市场 spot 接口拉取，未改动 `datasources.ashare` 层。
+- 分时数据源改用 **gm SDK（掘金量化）**（2026-09-14）：新增 `GmSnapshotProvider`，用 gm `history(frequency='tick')` 取交易日内聚合快照（`price`/`open`/`high`/`low`/`cum_volume`/`cum_amount`），与 `IntradayPoint` 的「现价/开盘价/日内高低/累计成交量/累计成交额」契约一一对应；`pre_close` 由前一日 1d bar 的 `close` 推导，`change=(price-pre_close)/pre_close*100`。gm 仅覆盖国内市场（`SHSE.`/`SZSE.` 前缀，按 `Symbol.exchange` 或代码前缀映射），港股/美股不在覆盖范围，故 `CompositeSnapshotProvider`（gm 主源 + akshare 回退）在 A 股优先用 gm、HK/US 或 gm 失败时回退 akshare，保持多市场能力与韧性。`services.sample_intraday` 把该市场标列表传入 `fetch_market(market, symbols)`（gm 按标的拉取，非全市场批量）。
+- 启动完整性回填（2026-09-14）：内部更新器启动时（进入采样循环前）调用 `services.backfill_intraday`，检查交易日内从开盘到当前是否有缺失分钟，不完整则先回填。`market_calendar.trading_minutes_local` 枚举当日已开启的交易分钟（剔除午休/周末/开盘前）；缺失分钟经 provider 可选接口 `fetch_intraday_history(market, symbol, start, end)` 拉逐分钟 bar（`GmSnapshotProvider` 用 `history(frequency='60s')` 实现，`AkshareSpotProvider`/HK/US 不支持返回空→静默跳过），按快照语义（累计成交量/成交额、日内最高/最低、开盘价、change）仅补写缺失点、不覆盖已有点。
+- `GmSnapshotProvider._pre_close`（2026-09-14 修正）：昨收不再按 `history_n(1d)[-2]` 位置猜——盘前/刚开盘当日 bar 未生成时会把前天收盘误当昨收；改为取**日期严格早于今日（市场本地）**的最近一根日 bar（`count=5` + `eob/bob/date` 日期解析），无日期可解析时才保守取最后一根。
 - `session_status` 判定规则（简化，不含节假日历）：周末一律 `closed`；开盘前 `pre_market`；时段内 `trading`；双时段市场两时段之间 `lunch_break`；其余 `closed`。
+- **标的代码字符串处理 · 指数/个股区分（2026-09-14）**：统一规则收敛于 `apps/watchlists/services.py`——`normalize_a_share_code`（剥前后缀、补零到 6 位）、`is_a_share_index`、`resolve_a_share_exchange`。指数专属段（399/880/930/931/932/980/899）纯前缀判定；**000xxx 二义段**（000001 既是平安银行也是上证指数）必须以 `exchange` 显式标注或 `sh` 前缀判为沪指数，缺省保守按深市个股。**原始代码带 `sh/sz/bj` 前缀（如库中 `code='sh000001'`）视为显式市场标记**：交易所解析在剥前缀**之前**依据原始代码判定（`resolve_a_share_exchange`），`gm_symbol_for` 传原始代码——已实测 `sh000001` → `SHSE.000001`（上证指数）而非深市个股。接入点：`monitoring.gm_symbol_for`（SHSE/SZSE/BJSE 前缀，含北交所）、`datasources.ashare._normalize_ashare_code`（sh/sz 前缀保留指数语义）、`watchlists.sync_market_data` 交易所解析、`monitoring.AkshareSpotProvider`（A 市场请求含指数时按需合并 `stock_zh_index_spot_sina` 指数行情，全个股请求不触发指数接口；`_normalize_returned_code` 兼容 sina `sh000300` 前缀）。专项测试：watchlists 3 个 + datasources 4 个 + monitoring 4 个（含 `test_gm_symbol_for_distinguishes_index_and_stock`、指数回退合并/跳过/二义缺省）。
 - 数值渲染：价格/涨跌幅以 Decimal 4 位小数字符串输出（与本项目其他模块 DecimalField 序列化一致）；单位随上游数据源原样存储，不做换算。
 - 采样标的缺省范围：已发布 Plan 的 `symbol_scope` 并集；无已发布 Plan 时回退全部标的（保证独立可用）。
 - 采样触发：默认由外部 cron / Windows 计划任务每分钟调用 `sample_intraday`（单机部署）；`clear_intraday` 建议挂在 UTC 23:00。
@@ -1006,6 +1011,9 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `quant-frontend/src/api/monitoring.ts` | 类型 + `monitoringApi.intraday()` / `realtime()`；axios 拦截器只解包 `results`/`count` 分页结构，本模块响应保持原样 |
 | 路由与导航 | `/monitoring` 路由 + 侧边菜单「分时监控」 |
 | 交互 | 标的切换下拉（自选池 → 回退全量标的）；盘中 15s 轮询**增量追加**（按 `ts` 合并后 `setOption` 增量更新，非全量重绘）；`session_status` 非 `trading` 时暂停轮询并显示「已收盘 / 午休 / 开盘前」提示 |
+| X 轴固定刻度（2026-09-14） | X 轴按市场固定为全交易分钟（与后端 `market_calendar` 时段一致：A=240 / HK=330 / US=390），不随已有数据伸缩；序列数据按 `local_time` 对齐固定刻度、缺失为 null；刻度只标注每 30 分钟与收盘点 |
+| Y 轴最小振幅（2026-09-14） | 价格轴以昨收为中心：`±max(实际波动, 最小振幅%)×1.05`；默认 2%，图表右上 `el-input-number`（0.1~20，步进 0.1）可改，保存在 `localStorage`（`monitoring.yMinSpanPct`），刷新后保留 |
+| SSE 持久化连接（2026-09-14） | `api/monitoring.ts` 新增 `subscribeIntradayStream()`（EventSource 订阅 `/api/monitoring/intraday/stream/`，处理 `snapshot`/`tick`/`session` 事件）；`Monitoring.vue` 用 SSE 替代 15s 轮询（`tick` 按 ts 增量合并），连续 3 次错误且未收到消息自动降级回 HTTP 轮询，状态标签显示「实时推送 (SSE) / 轮询中（降级）/ 推送已暂停」 |
 | 验证 | `vue-tsc -b` 0 错误 + `vite build` 通过（Monitoring 产物分块已生成） |
 
 
@@ -1021,7 +1029,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
 | `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
-| `monitoring` | ✅ 已完成 | 26 通过 | 100%（后端模型/命令/API + 前端 ECharts 分时监控页均已落地，见模块9） |
+| `monitoring` | ✅ 已完成 | 54 通过 | 100%（后端模型/内部更新器/SSE 推送/API + 启动完整性回填 + 前端 ECharts 分时监控页均已落地，见模块9） |
 
 > 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准（v2.6：**290 个测试全部通过**）。
 
@@ -1066,7 +1074,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
 | P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
 | P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
-| P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地 | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
+| P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地；2026-09-14 分时数据源替换为 **gm SDK**（A 股主源 + akshare 回退 HK/US） | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
 
@@ -1151,13 +1159,13 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
 | P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最新一次完整回归：✔ **323 个测试全部通过**（2026-09-12，含 monitoring 26 个；同一命令口径：`manage.py test` 无标签，含 runner） | 以同一次完整回归命令的实际输出为准 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败 |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
 | P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
 | P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；datasources `test_list_datasources_paginated`；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
-| P1 阶段4 | 分时监控专项测试 | ✅ 26 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、spot 规范化与缺失字段降级、`sample_intraday` 采样/同分钟覆盖/异常隔离、`clear_intraday` 清空幂等、API 契约与 realtime 合并）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | 真实外部数据源联调（A/HK/US spot 实际列名按 akshare 版本核对） |
+| P1 阶段4 | 分时监控专项测试 | ✅ 54 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
 
 #### 测试验收标准
 

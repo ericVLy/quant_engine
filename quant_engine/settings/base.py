@@ -96,6 +96,12 @@ WSGI_APPLICATION = 'quant_engine.wsgi.application'
 KLINE_DB_ALIAS = 'kline'
 FUNDAMENTALS_ENABLED = False
 
+# 分时监控内部更新器（随 Django 服务启动；禁止单独的更新命令）
+import os  # noqa: E402  # pylint: disable=wrong-import-position
+
+MONITORING_UPDATER_ENABLED = os.getenv('MONITORING_UPDATER_ENABLED', '1').lower() in {'1', 'true', 'yes'}
+MONITORING_UPDATER_INTERVAL = int(os.getenv('MONITORING_UPDATER_INTERVAL', '60'))
+
 # DRF 全局配置
 REST_FRAMEWORK = {
     # N-01：所有列表接口统一分页

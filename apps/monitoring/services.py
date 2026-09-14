@@ -1,18 +1,29 @@
 """分时监控采样与清理服务（模块9）。"""
 import logging
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 
 from apps.watchlists.models import Symbol
 
-from .market_calendar import in_trading_session, to_market_local
+from .market_calendar import (
+    in_trading_session, market_timezone, to_market_local, trading_minutes_local,
+)
 from .models import IntradayPoint
-from .snapshot_provider import AkshareSpotProvider
 
 logger = logging.getLogger(__name__)
 
 MARKETS = ('A', 'HK', 'US')
+
+
+def _default_snapshot_provider():
+    """默认分时数据源：gm SDK 为主源（A 股），akshare 回退（HK/US 及失败时）。"""
+    from .snapshot_provider import (
+        AkshareSpotProvider, CompositeSnapshotProvider, GmSnapshotProvider,
+    )
+    return CompositeSnapshotProvider([GmSnapshotProvider(), AkshareSpotProvider()])
 
 
 def resolve_sample_symbols(markets=None, symbols=None):
@@ -87,7 +98,7 @@ def sample_intraday(provider=None, markets=None, symbols=None, now=None):
     - 同一 ``(symbol, ts)`` 使用 ``update_or_create`` 覆盖（分钟级幂等）；
     - provider 失败只记录该市场错误，不中断其他市场。
     """
-    provider = provider or AkshareSpotProvider()
+    provider = provider or _default_snapshot_provider()
     now = now if now is not None else timezone.now()
     ts = now.replace(second=0, microsecond=0)
 
@@ -103,7 +114,7 @@ def sample_intraday(provider=None, markets=None, symbols=None, now=None):
             info['skipped'] += len(symbol_list)
             continue
         try:
-            quotes = provider.fetch_market(market)
+            quotes = provider.fetch_market(market, symbol_list)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning('[%s] 快照拉取失败: %s', market, exc)
             info['failed'].append(str(exc))
@@ -143,3 +154,125 @@ def clear_intraday(before=None, now=None):
         before = now.replace(hour=0, minute=0, second=0, microsecond=0)
     deleted, _ = IntradayPoint.objects.filter(ts__lt=before).delete()
     return deleted
+def _to_utc_minutes(minutes_local, market):
+    """把 market 本地 naive 分钟列表转成 aware UTC 分钟列表。"""
+    tz = market_timezone(market)
+    return [
+        m.replace(tzinfo=tz).astimezone(ZoneInfo('UTC')).replace(second=0, microsecond=0)
+        for m in minutes_local
+    ]
+
+
+def _missing_minutes(symbol, target_utc):
+    """目标分钟中缺失（IntradayPoint 尚不存在）的部分，按升序返回。"""
+    if not target_utc:
+        return []
+    existing = set(
+        IntradayPoint.objects
+        .filter(symbol=symbol, ts__range=(target_utc[0], target_utc[-1]))
+        .values_list('ts', flat=True),
+    )
+    existing = {t.replace(second=0, microsecond=0) for t in existing}
+    return [m for m in target_utc if m not in existing]
+
+
+def _accumulate_bar(state, bar):
+    """把逐分钟 bar 累积到当日快照状态（open/high/low/volume/amount）。"""
+    if state['open'] is None and bar.get('open') is not None:
+        state['open'] = bar['open']
+    high, low = bar.get('high'), bar.get('low')
+    if high is not None and (state['high'] is None or high > state['high']):
+        state['high'] = high
+    if low is not None and (state['low'] is None or low < state['low']):
+        state['low'] = low
+    if bar.get('volume') is not None:
+        state['volume'] += Decimal(str(bar['volume']))
+    if bar.get('amount') is not None:
+        state['amount'] += Decimal(str(bar['amount']))
+    return state
+
+
+def _backfill_symbol(symbol, missing_set, bars):
+    """用逐分钟 bar 回填缺失分钟（累计成交量/成交额、日内高低、开盘价、change）。"""
+    pre_close = next((b.get('pre_close') for b in bars if b.get('pre_close') is not None), None)
+    state = {'open': None, 'high': None, 'low': None, 'volume': Decimal('0'), 'amount': Decimal('0')}
+    filled = 0
+    for bar in sorted(bars, key=lambda b: b['ts'] if b.get('ts') is not None else datetime.min):
+        _accumulate_bar(state, bar)
+        ts = bar.get('ts')
+        if ts is None or ts not in missing_set:
+            continue
+        price = bar.get('close')
+        change = None
+        if price is not None and pre_close:
+            change = round((price - pre_close) / pre_close * 100.0, 4)
+        IntradayPoint.objects.update_or_create(
+            symbol=symbol,
+            ts=ts,
+            defaults={
+                'price': _to_decimal(price),
+                'change': _to_decimal(change, Decimal('0')),
+                'volume': int(state['volume']),
+                'amount': _to_decimal(state['amount']),
+                'avg_price': None,
+                'high': _to_decimal(state['high']),
+                'low': _to_decimal(state['low']),
+                'open_price': _to_decimal(state['open']),
+                'pre_close': _to_decimal(pre_close),
+            },
+        )
+        filled += 1
+    return filled
+
+
+def _fetch_history(provider, market, symbol, start, end):
+    """向 provider 拉取逐分钟历史；不支持/失败时返回 []（回填静默跳过）。"""
+    try:
+        return provider.fetch_intraday_history(market, symbol, start, end) or []
+    except NotImplementedError:
+        return []
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning('[%s/%s] 回填历史拉取失败: %s', market, symbol.code, exc)
+        return []
+
+
+def backfill_intraday(provider=None, markets=None, symbols=None, now=None):
+    """启动时完整性回填：检查并从开盘到 now 补全缺失的交易分钟点。
+
+    - 按 ``market`` 分组，周末 / 开盘前跳过；
+    - 目标 = 当日已开启的交易分钟（``trading_minutes_local``），已有点不覆盖；
+    - 缺失分钟向 provider 取逐分钟历史（``fetch_intraday_history``），按快照语义写入
+      （累计成交量/成交额、日内最高/最低、开盘价、change）；
+    - provider 不支持历史（如 akshare HK/US）时静默跳过，不影响其他标的。
+    """
+    provider = provider or _default_snapshot_provider()
+    now = now if now is not None else timezone.now()
+
+    by_market = {}
+    for symbol in resolve_sample_symbols(markets=markets, symbols=symbols):
+        by_market.setdefault(symbol.market, []).append(symbol)
+
+    summary = {}
+    for market, symbol_list in by_market.items():
+        info = {'checked': 0, 'complete': 0, 'backfilled': 0, 'missing_remaining': []}
+        summary[market] = info
+        now_local = to_market_local(now, market)
+        target = _to_utc_minutes(trading_minutes_local(market, now_local), market)
+        if not target:
+            continue
+        if in_trading_session(market, now_local) and len(target) > 1:
+            # 盘中：当前分钟 bar 尚未生成，不计入完整性目标（下一轮自然补上）
+            target = target[:-1]
+        for symbol in symbol_list:
+            info['checked'] += 1
+            missing = _missing_minutes(symbol, target)
+            if not missing:
+                info['complete'] += 1
+                continue
+            # gm history 按 bar 结束时间（eob）过滤 end_time，因此 end 需多加一分钟
+            bars = _fetch_history(provider, market, symbol, target[0], target[-1] + timedelta(minutes=1))
+            bar_ts = {b.get('ts') for b in bars if b.get('ts') is not None}
+            missing_set = {m for m in missing if m in bar_ts}
+            info['backfilled'] += _backfill_symbol(symbol, missing_set, bars)
+            info['missing_remaining'].extend(m for m in missing if m not in bar_ts)
+    return summary

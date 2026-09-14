@@ -509,3 +509,34 @@ class ServicesTest(TransactionTestCase):
         self.assertIsNone(res['error'])
         self.assertTrue(KLineSyncLog.objects.filter(symbol=self.symbol_a).exists())
         logger.info(f"同步所有完成，标的 {res['symbol']} 新增 {res['added']} 条")
+
+class AshareCodeNormalizeTest(TestCase):
+    """A 股代码归一化：指数与个股区分（见 watchlists.services 统一规则）。"""
+
+    def test_index_only_prefixes(self):
+        from apps.datasources.ashare import _normalize_ashare_code
+        # 深市指数专属段
+        self.assertEqual(_normalize_ashare_code('399001'), 'sz399001')
+        self.assertEqual(_normalize_ashare_code('399006'), 'sz399006')
+        # 中证/申万指数段 → 沪市
+        self.assertEqual(_normalize_ashare_code('930955'), 'sh930955')
+        self.assertEqual(_normalize_ashare_code('880001'), 'sh880001')
+
+    def test_explicit_prefix_preserves_index_semantics(self):
+        from apps.datasources.ashare import _normalize_ashare_code
+        # 显式 sh 前缀保留沪市指数语义（sh000300 沪深300）
+        self.assertEqual(_normalize_ashare_code('sh000300'), 'sh000300')
+        self.assertEqual(_normalize_ashare_code('SH000905'), 'sh000905')
+        # 显式 sz 前缀保留深市个股语义
+        self.assertEqual(_normalize_ashare_code('sz000001'), 'sz000001')
+
+    def test_stock_codes_unchanged(self):
+        from apps.datasources.ashare import _normalize_ashare_code
+        self.assertEqual(_normalize_ashare_code('600000'), 'sh600000')
+        self.assertEqual(_normalize_ashare_code('000426'), 'sz000426')
+        self.assertEqual(_normalize_ashare_code('300750'), 'sz300750')
+        self.assertEqual(_normalize_ashare_code('688981'), 'sh688981')
+
+    def test_short_code_zero_pad(self):
+        from apps.datasources.ashare import _normalize_ashare_code
+        self.assertEqual(_normalize_ashare_code('426'), 'sz000426')

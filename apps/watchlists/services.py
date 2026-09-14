@@ -16,6 +16,96 @@ def infer_market_from_code(code):
     return 'US' if code_str.isdigit() else 'A'
 
 
+# ---------------------------------------------------------------------------
+# A 股指数 / 个股判别（标的代码字符串处理的统一规则）
+#
+# 注意 000xxx 段天然二义：000001 既是深市个股「平安银行」也是沪市指数「上证指数」。
+# 仅凭 6 位数字前缀无法区分，必须以 exchange 显式标注（SSE=沪指数）为准；
+# 无 exchange 时按深市个股处理（保守默认，与历史数据一致）。
+# ---------------------------------------------------------------------------
+
+# 与个股代码不重叠的指数段：可纯前缀判定
+# - 399xxx：深市指数（399001 深证成指 / 399006 创业板指等）
+# - 880xxx：申万指数；930xxx/931xxx/932xxx/980xxx：中证系列指数；899xxx：北证指数
+A_SHARE_INDEX_ONLY_PREFIXES = ('399', '880', '930', '931', '932', '980', '899')
+# 沪市交易所别名（exchange 字段各种历史写法）
+SSE_EXCHANGES = ('SSE', 'SHSE', 'SH', 'XSHG', 'XSHE_SH')
+SZSE_EXCHANGES = ('SZSE', 'SZ', 'XSHE')
+
+
+def normalize_a_share_code(code):
+    """剥离交易所前/后缀与空白，返回 6 位数字代码；无法归一化返回原串。"""
+    value = str(code or '').strip().upper()
+    for prefix in ('SH', 'SZ', 'BJ'):
+        if value.startswith(prefix) and value[2:].isdigit():
+            value = value[2:]
+            break
+    for suffix in ('.XSHG', '.XSHE', '.SH', '.SZ', '.BJ'):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)]
+            break
+    return value.zfill(6) if value.isdigit() else value
+
+
+def is_a_share_index(code, exchange=''):
+    """判断 6 位 A 股代码是否为指数（区别于个股）。
+
+    - 指数专属段（399/880/930/931/932/980/899 开头）直接判为指数；
+    - 000xxx 二义段：代码带显式沪市标记（``sh`` 前缀 / ``.SH`` 后缀）或
+      ``exchange`` 为沪市（SSE/SHSE/SH）时判为指数；无标记或深市判为个股；
+    - 非 6 位数字（美股/港股代码）恒为 False。
+    """
+    raw = str(code or '').strip().upper()
+    normalized = normalize_a_share_code(raw)
+    if not normalized.isdigit() or len(normalized) != 6:
+        return False
+    explicit_sse = (
+        raw.startswith(('SH', 'XSHG')) or raw.endswith(('.SH', '.XSHG'))
+        or str(exchange or '').strip().upper() in ('SSE', 'SHSE', 'SH', 'XSHG')
+    )
+    if normalized.startswith(A_SHARE_INDEX_ONLY_PREFIXES):
+        return True
+    if normalized.startswith('000'):
+        return explicit_sse
+    return False
+
+
+def resolve_a_share_exchange(code, exchange=''):
+    """解析 6 位 A 股代码的交易所（SSE/SZSE/BSE），指数与个股同规则。
+
+    - ``exchange`` 显式给出且可识别时直接归一化采用（最高优先级）；
+    - 沪市：6 开头个股，以及指数（000xxx 沪指数 / 880 / 930 / 931 / 932 / 980）；
+    - 深市：0 / 2 / 3 开头个股与 399xxx 指数；
+    - 北交所：4 / 8 开头（899xxx 北证指数除外，归沪证指规则见上，实际北证指
+      数经 gm 用 BSE 前缀，此处统一返回 BSE）。
+    """
+    explicit = str(exchange or '').strip().upper()
+    if explicit in ('SSE', 'SHSE', 'SH', 'XSHG'):
+        return 'SSE'
+    if explicit in ('SZSE', 'SZ', 'XSHE'):
+        return 'SZSE'
+    if explicit in ('BSE', 'BJ'):
+        return 'BSE'
+    raw = str(code or '').strip().upper()
+    # 原始代码带交易所前缀（如 sh000001 上证指数）时，前缀即显式市场标记，
+    # 优先于后续按 6 位数字段的推断——否则 sh000001 会被剥成 000001 而误判为深市个股
+    if len(raw) >= 8 and raw[:2] in ('SH', 'SZ', 'BJ') and raw[2:].isdigit():
+        return {'SH': 'SSE', 'SZ': 'SZSE', 'BJ': 'BSE'}[raw[:2]]
+    normalized = normalize_a_share_code(code)
+    if not normalized.isdigit() or len(normalized) != 6:
+        return ''
+    if normalized.startswith('6') or normalized.startswith('880'):
+        return 'SSE'
+    if normalized.startswith(('4', '8')) and not normalized.startswith('880'):
+        return 'BSE'
+    if normalized.startswith('930') or normalized.startswith('931') \
+            or normalized.startswith('932') or normalized.startswith('980'):
+        return 'SSE'
+    if normalized.startswith('899'):
+        return 'BSE'
+    return 'SZSE'
+
+
 def resolve_symbol_name(code, market=None):
     """通过代码和市场类型解析对应名称，失败时返回安全回退值。"""
     code_str = str(code or '').strip()
@@ -128,18 +218,12 @@ def sync_market_data():
         code = row['code']
         name = row['name']
 
-        # 去除可能的市场后缀
-        code = code.replace('.SH', '').replace('.SZ', '').replace('.BJ', '')
+        # 去除可能的市场后缀，并归一化为 6 位数字
+        from .services import normalize_a_share_code, resolve_a_share_exchange
+        code = normalize_a_share_code(code)
 
-        # 根据代码前缀判断交易所
-        if code.startswith('6'):
-            exchange = 'SSE'
-        elif code.startswith(('0', '3')):
-            exchange = 'SZSE'
-        elif code.startswith('8'):
-            exchange = 'BSE'
-        else:
-            exchange = 'SSE'
+        # 交易所解析：exchange 字段优先；否则按代码段推断（指数与个股同规则）
+        exchange = resolve_a_share_exchange(code, str(row.get('exchange') or '')) or 'SSE'
 
         market = 'A'
 
