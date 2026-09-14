@@ -1008,7 +1008,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 交付物 | 说明 |
 |--------|------|
 | `quant-frontend/src/views/Monitoring.vue` | ECharts 分时图：现价折线（蓝）+ 均价虚线（黄）+ 底部量能柱（按涨跌红绿着色）+ dataZoom 缩放；X 轴按市场本地时间（`local_time`）渲染；tooltip 展示现价/均价/涨跌幅/成交量/成交额 |
-| `quant-frontend/src/api/monitoring.ts` | 类型 + `monitoringApi.intraday()` / `realtime()`；axios 拦截器只解包 `results`/`count` 分页结构，本模块响应保持原样 |
+| `quant-frontend/src/views/Monitoring.vue` | 分时技术指标子图（2026-09-14）：主图下方追加 **MACD(12,26,9)**（DIF/DEA 线 + 红绿柱）、**KDJ(9,3,3)**（K/D/J 三线）、**RSI(14)**（30/70 参考线，Y 轴固定 0-100）三个子图，ECharts 多 grid 布局 + axisPointer 跨图联动 + dataZoom 全图联动；图例区 checkbox 开关（默认 MACD 开、KDJ/RSI 关），开关状态保存在 `localStorage('monitoring.indicators')`；图表容器高度随启用指标数自适应（380 + 150×N px）；指标在**前端逐分钟序列实时计算**（EMA/Wilder 平滑，缺数据分钟为 null 断线），随 SSE tick 增量更新自动重算 |
 | 路由与导航 | `/monitoring` 路由 + 侧边菜单「分时监控」 |
 | 交互 | 标的切换下拉（自选池 → 回退全量标的）；盘中 15s 轮询**增量追加**（按 `ts` 合并后 `setOption` 增量更新，非全量重绘）；`session_status` 非 `trading` 时暂停轮询并显示「已收盘 / 午休 / 开盘前」提示 |
 | X 轴固定刻度（2026-09-14） | X 轴按市场固定为全交易分钟（与后端 `market_calendar` 时段一致：A=240 / HK=330 / US=390），不随已有数据伸缩；序列数据按 `local_time` 对齐固定刻度、缺失为 null；刻度只标注每 30 分钟与收盘点 |
