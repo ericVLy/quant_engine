@@ -23,7 +23,7 @@ try:
     from .local import *
 except ImportError:
     import secrets
-    gm_token = os.getenv('GM_TOKEN', '')
+    GM_TOKEN = os.getenv('GM_TOKEN', '')
 
     SECRET_KEY = secrets.token_urlsafe(32)
 
