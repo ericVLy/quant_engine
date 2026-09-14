@@ -2,7 +2,7 @@
 
 > 版本：v2.10  
 > 日期：2026-09-14  
-> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）设计定稿（前端编排既有 API · 后端零新增接口）
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口）
 
 
 ## 一、项目概述
@@ -1017,11 +1017,11 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 验证 | `vue-tsc -b` 0 错误 + `vite build` 通过（Monitoring 产物分块已生成） |
 
 
-### 模块10：`quick-strategy`（策略快速创建向导）🟡 设计定稿 · 待实施
+### 模块10：`quick-strategy`（策略快速创建向导）✅ 全部完成
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | 🟡 设计定稿（2026-09-14），前端实施待做 |
+| **状态** | ✅ 全部完成（2026-09-14：前端实施完成——`QuickStrategy.vue` 3 步向导 + `quickStrategy.ts` 模板/校验/一键链路/失败清理，`vue-tsc` + `vite build` 通过；后端零改动） |
 | **优先级** | P1 |
 | **依赖** | `cases` / `suites` / `plans` 既有 API（前端编排）；**后端零新增接口** |
 
@@ -1094,6 +1094,24 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - 测试：前端契约用例（params 生成器等值断言 ≤8 个）并入 P1 阶段5；后端不改动（既有 345 口径回归不受影响）。
 
 
+##### 前端实施记录（2026-09-14）
+
+| 交付物 | 说明 |
+|--------|------|
+| `quant-frontend/src/utils/quickStrategy.ts` | 模板与蓝图构建：`INDICATOR_CATALOG` 前端目录（与后端因子目录一致）+ 指标专属字段（MACD fast/slow/signal、RSI/KDJ 阈值区间、BOLL/volatility threshold）+ `buildSignalParams` / `buildFilterParams` / `buildExecutorParams`；三模板蓝图 `buildBlueprint`（`signal_only` 1 Case、`signal_executor` 2~3 Case、`dual_direction` root+双子 Suite，子边 `op=eq field=direction threshold=±1` 分流）；`cronForSchedule`（UI 星期语义 0=周一 → 后端 5 字段 cron）；轻量校验 `validateQuickForm`（params 白名单键、指标目录、RSI/KDJ 阈值区间与超卖<超买、order 结构、trigger 事件类型经 `event-types/list-all/` 缓存校验）；一键链路 `quickCreateStrategy`（建 Case → 建 Suite(+拓扑边) → 发布 Case → 发布 Suite（子先根后）→ 建 Plan → 发布 Plan → （manual+auto）可选启动，启动失败仅提示不回滚；任一步失败抛 `QuickCreateError` 含已创建资源清单）；失败清理 `cleanupCreated`（Plan → Suites → Cases 依赖逆序删除） |
+| `quant-frontend/src/views/QuickStrategy.vue` | 3 步向导（el-steps）：① 模板选择 + 信号参数表单（指标下拉 + period + 指标专属字段按模板联动显隐）② 运行配置（标的范围 groups/symbols/all + 触发方式 manual/time/event + cron 选择器（每日/每周）+ exec_mode + retry + suite_start_mode + 可选资金）③ 只读预览（Case params 摘要 / Suite 树 / Plan 配置）+ 一键创建（进度步骤展示 + 失败展示已创建资源清单与「重试 / 保留草稿」）|
+| `quant-frontend/src/api/strategy.ts` | 新增 `createCase` / `publishCase` / `createSuite` / `updateTopology` / `publishSuite` / `createPlan` / `publishPlan` / `startPlan` 及删除方法、资金占用 API 封装 |
+| 路由与导航 | `/quick-strategy` 路由 + 侧边菜单「快速创建」（MagicStick 图标） |
+| `quant-frontend/src/views/Home.vue` | 首页改造：入口卡片（快速创建 / 策略设计器 / 分时监控 / 执行监控）+ 关键路径步骤条，替换原计数器占位页 |
+| 验证 | `vue-tsc -b` 0 错误 + `vite build` 通过（`QuickStrategy` 分块 27.6 kB JS + 2.4 kB CSS）；后端零改动（既有 345 口径回归不受影响） |
+
+设计落地说明：
+
+- 一键链路实际执行顺序为「建 Case → 建 Suite（含拓扑边）→ 发布 Case → 发布 Suite（子先根后）→ 建 Plan → 发布 Plan → 可选启动」——与设计稿等价：拓扑边随 Suite 创建后立即写入（`POST /api/suites/{id}/topology/`），先于所有发布动作；发布顺序满足「Suite 发布要求全部 Case 已发布」「Plan 发布要求根 Suite 已发布」两条既有校验。
+- 双向模板的买入/卖出 executor Case `result.direction` 分别为 `1` / `-1`，与 root→子边 `op=eq field=direction threshold=±1` 事件条件形成闭环；信号 Case 与执行器 Case 均挂在 root Suite 内（root 聚合）。
+- 可选启动步骤：仅当 `trigger_type=manual` 且 `suite_start_mode=auto` 时执行 `POST /api/plans/{id}/start/`（`start_plan` 前置仅要求 `run_status=new`，刚发布的 Plan 满足）；**启动失败不回滚**——已发布 Plan 是完整交付物，启动失败仅在步骤清单中提示「可稍后在 Plan 管理页手动启动」。
+- 失败清理为**可选动作**（用户选「保留草稿」则不动库）：`cleanupCreated` 按依赖逆序删除（Plan → Suites → Cases），删除失败逐项提示但不中断清理流程；删除接口沿用既有删除保护契约（被引用时 409）。
+
 ## 四、模块完成进度总览
 
 | 模块 | 状态 | 测试用例数 | 完成度 |
@@ -1107,7 +1125,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 | `monitoring` | ✅ 已完成 | 54 通过 | 100%（后端模型/内部更新器/SSE 推送/API + 启动完整性回填 + 前端 ECharts 分时监控页均已落地，见模块9） |
-| `quick-strategy` | 🟡 设计定稿 · 待实施 | —（前端） | 0%（策略快速创建向导，设计见模块10；前端实施待做，后端零改动） |
+| `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 
 > 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准（v2.6：**290 个测试全部通过**）。
 
@@ -1153,7 +1171,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
 | P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
 | P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地；2026-09-14 分时数据源替换为 **gm SDK**（A 股主源 + akshare 回退 HK/US） | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
-| P1 | ~~策略快速创建向导~~ → 🟡 **设计定稿（2026-09-14，见模块10）**：3 步向导 `/quick-strategy`，模板化生成 Case/Suite/Plan 并一键「创建→发布→（可选）启动」；**全链路由前端编排既有 API（后端零新增接口）** | `quant-frontend`（`cases`/`suites`/`plans` API 复用） | 关联新模块（见模块10 设计文档） |
+| P1 | ~~策略快速创建向导~~ → ✅ **全部完成（2026-09-14，见模块10）**：3 步向导 `/quick-strategy`，模板化生成 Case/Suite/Plan 并一键「创建→发布→（可选）启动」；**全链路由前端编排既有 API（后端零新增接口）** | `quant-frontend`（`cases`/`suites`/`plans` API 复用） | 关联新模块（见模块10 设计文档） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
 
@@ -1164,7 +1182,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
 | 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验、交易失败告警通道已完成；剩余真实交易环境验证） |
 | 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、**分时监控** | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**、**分时监控模块9 已完成**（见模块9）；`auth_info` 加密、日志清理待做；多实例治理已随单机部署目标降为 P4） |
-| 4 | P1 产品体验增强 | **策略快速创建向导（模块10）**：3 步向导一键生成「Case/Suite/Plan 并发布」 | 模块10 设计 | 🟡 设计定稿（2026-09-14），前端实施待做 |
+| 4 | P1 产品体验增强 | **策略快速创建向导（模块10）**：3 步向导一键生成「Case/Suite/Plan 并发布」 | 模块10 设计 | ✅ 已完成（2026-09-14，见模块10 前端实施记录） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
 
@@ -1246,7 +1264,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
 | P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；datasources `test_list_datasources_paginated`；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
 | P1 阶段4 | 分时监控专项测试 | ✅ 54 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
-| P1 阶段5 | 策略快速创建向导 | ⏳ 设计定稿，未实施（见模块10） | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值、三模板（signal_only / signal_executor / dual_direction）一键链路、失败「重试/保留草稿」路径；前后端契约（vue-tsc + vite build） |
+| P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
 
 #### 测试验收标准
 
