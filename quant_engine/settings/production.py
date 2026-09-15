@@ -25,34 +25,54 @@ except ImportError:
     import secrets
     GM_TOKEN = os.getenv('GM_TOKEN', '')
 
+    # 预期行为（2026-09-15 确认）：SECRET_KEY 仅覆盖登录态（Session/CSRF），
+    # 随机刷新仅导致用户重新登录；若需跨重启固定，经 local.py 或环境变量注入。
     SECRET_KEY = secrets.token_urlsafe(32)
 
-    # Database (production default: SQLite for main DB, optional MariaDB for K-line DB)
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        },
-        KLINE_DB_ALIAS: {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'kline.sqlite3',
-        },
-    }
-
-    if os.getenv('USE_KLINE_MARIADB', '0').lower() in {'1', 'true', 'yes'}:
-        DATABASES[KLINE_DB_ALIAS] = {
-            'ENGINE': 'django.db.backends.mysql',
-            'NAME': os.getenv('KLINE_DB_NAME', 'quant_kline'),
-            'USER': os.getenv('KLINE_DB_USER', 'root'),
-            'PASSWORD': os.getenv('KLINE_DB_PASSWORD', ''),
-            'HOST': os.getenv('KLINE_DB_HOST', '127.0.0.1'),
-            'PORT': os.getenv('KLINE_DB_PORT', '3306'),
-            'OPTIONS': {
-                'charset': 'utf8mb4',
-                'sql_mode': 'STRICT_TRANS_TABLES',
+    # 数据库（生产默认 MariaDB：主库与 K 线库；凭据仅经环境变量注入，不落文件。
+    # USE_SQLITE=1 时回退 SQLite，仅限本机演练/CI，不作为生产形态）
+    if os.getenv('USE_SQLITE', '0').lower() in {'1', 'true', 'yes'}:
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': BASE_DIR / 'db.sqlite3',
             },
-            'TEST': {
-                'NAME': os.getenv('KLINE_DB_TEST_NAME', 'test_quant_kline'),
+            KLINE_DB_ALIAS: {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': BASE_DIR / 'kline.sqlite3',
+            },
+        }
+    else:
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.mysql',
+                'NAME': os.getenv('DB_NAME', 'quant'),
+                'USER': os.getenv('DB_USER', 'quant'),
+                'PASSWORD': os.getenv('DB_PASSWORD', ''),
+                'HOST': os.getenv('DB_HOST', '127.0.0.1'),
+                'PORT': os.getenv('DB_PORT', '3306'),
+                'OPTIONS': {
+                    'charset': 'utf8mb4',
+                    'sql_mode': 'STRICT_TRANS_TABLES',
+                },
+                'TEST': {
+                    'NAME': os.getenv('DB_TEST_NAME', 'test_quant'),
+                },
+            },
+            KLINE_DB_ALIAS: {
+                'ENGINE': 'django.db.backends.mysql',
+                'NAME': os.getenv('KLINE_DB_NAME', 'quant_kline'),
+                'USER': os.getenv('KLINE_DB_USER', 'root'),
+                'PASSWORD': os.getenv('KLINE_DB_PASSWORD', ''),
+                'HOST': os.getenv('KLINE_DB_HOST', '127.0.0.1'),
+                'PORT': os.getenv('KLINE_DB_PORT', '3306'),
+                'OPTIONS': {
+                    'charset': 'utf8mb4',
+                    'sql_mode': 'STRICT_TRANS_TABLES',
+                },
+                'TEST': {
+                    'NAME': os.getenv('KLINE_DB_TEST_NAME', 'test_quant_kline'),
+                },
             },
         }
 

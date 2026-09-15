@@ -1241,7 +1241,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
+| P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` **分用户加密**存储 + 密钥存储设计见下方「敏感配置保护设计」；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
 | P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
 | P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
 | P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地；2026-09-14 分时数据源替换为 **gm SDK**（A 股主源 + akshare 回退 HK/US） | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
@@ -1249,6 +1249,32 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
 | P2 | MCP 服务增强（OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计日志、工具返回字段级白名单）——**边界**：当前为 SSE + 静态令牌，默认只读且 `trigger_plan_execution` 受 `MCP_ALLOW_TRIGGER=1` 保护，非回环绑定强制令牌，故不阻塞主线 | `mcp_server` | 模块11（已知边界与后续） |
+
+##### 敏感配置保护设计（2026-09-15 定稿，覆盖 N-05）
+
+**1. 敏感数据归属划分**（系统配置层 vs user 数据层，保护手段不同）：
+
+| 归属 | 数据 | 保护手段 | 现状 |
+|------|------|----------|------|
+| **系统配置层**（不进数据库、不进 git） | `SECRET_KEY`（仅覆盖登录态 Session/CSRF） | production 随机生成 = **预期行为**（刷新仅致登录过期）；需固定时经 `local.py`/环境变量注入 | ✅ 已确认 |
+| 同上 | `GM_TOKEN`（gm 交易令牌）、`MCP_AUTH_TOKEN`、数据库凭据 | **仅经环境变量注入**，生产环境不落任何文件 | ✅ production.py 已按此实现（`os.getenv`，SQLite 仅作 `USE_SQLITE=1` 回退） |
+| 同上 | 真实密钥落点 | `quant_engine/settings/local.py`（已 gitignore，未跟踪）为唯一本机密钥文件；~~`.env.example`~~ 已删除（项目无 dotenv 加载链，属无效文件） | ✅ 2026-09-15 清理 |
+| **user 数据层**（进数据库） | `DataSource.auth_info`（用户录入的第三方 token/api_key/secret） | **分用户加密**存储（见下）+ API 脱敏 + 权限分级；serializer 现为 `fields='__all__'` 明文返回，**待修** | ⏳ 本任务核心 |
+| 同上 | `AccountFundConfig.account_id`、`User.phone/company`、`AlertChannel.email_recipients`、交易明细（Order/ExecutionLog/Alert.message） | 不属密钥但属半敏感/PII：不进日志明文、通知邮件不夹带异常栈细节 | ⏳ 随本任务审计 |
+
+**2. 生产环境配置基线（2026-09-15 落地）**：`production.py` 数据库**默认 MariaDB**（主库 `DB_*` 与 K 线库 `KLINE_DB_*` 均经环境变量注入；`USE_SQLITE=1` 仅限本机演练/CI 回退）；`wsgi.py` 默认指向 `production`（原指向空的 `quant_engine.settings` 会 `ImproperlyConfigured`），生产入口为 Gunicorn：`gunicorn quant_engine.wsgi:application --workers 4 --env DJANGO_SETTINGS_MODULE=quant_engine.settings.production`。
+
+**3. user 层分用户加密设计（`DataSource.auth_info`）**：
+
+- **密钥层级（KEK/DEK 两级）**：
+  - `KEK`（主加密密钥）：系统级，**仅存环境变量 / `local.py`**（`AUTH_ENCRYPTION_KEY`，Fernet key），生产绝不落库落盘；
+  - `DEK`（用户数据密钥）：**每用户一把**，首次录入敏感字段时随机生成，以 KEK 加密后存库（`encrypted_dek`）——库中只有密文 DEK，DB 泄露无法解出任何用户密钥。
+- **新模型 `UserSecretKey`**（`users` 模块）：`user(OneToOne)` + `encrypted_dek(Text)` + `kek_version(SmallInteger)` + `created_at`。
+- **加解密实现**（`apps/datasources/crypto.py` 或 `users/crypto.py`）：`cryptography.fernet`；`auth_info` 整体序列化后以用户 DEK 加密，密文格式带 `kek_version` 前缀；写入用当前 `kek_version`，读取按密文中的版本取对应 KEK（支持轮换：换新 KEK 后旧密文仍可读，懒式重加密升级）。
+- **API 契约**：`DataSource` serializer 改为**字段白名单**（弃用 `__all__`）；`auth_info` 写入接受明文（落库即加密），**读取一律脱敏**——返回 `auth_configured: true/false` + 不含任何密钥内容的摘要（如 token 末 4 位可省略）；明文仅在服务层内部使用（数据源同步/连接时，且以当前请求用户身份解密）。删除保护/权限：非录入者与管理员不可见摘要之外的任何信息。
+- **失败语义**：KEK 缺失或 DEK 解密失败 → 同步/连接报可定位错误（`ValueError`/数据源测试失败），不阻塞其他功能；密钥丢失不可恢复（用户重新录入），符合“密钥不落库”原则的代价。
+- **日志卫生**：解密路径不打日志；`repr`/异常消息不包含明文（`__str__` 排查点写入测试）。
+- **测试（P1 阶段6 补充）**：加密往返等值、库内确为密文（明文 token 不出现在 DB 字符串中）、API 返回脱敏（明文不出现在响应）、非 owner 读取受限、KEK 版本轮换后旧密文可读、DEK 缺失时同步降级报错、日志不含明文。
 
 #### 5.1.3 开发顺序
 
