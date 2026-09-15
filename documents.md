@@ -1200,7 +1200,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 | `mcp_server` | ✅ 已完成 | 36 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun，见模块11） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15，模块11 SSE 改造后）：403 个测试，⚠️ 20 failures + 1 error，全部为预存失败**（`watchlists` 15 / `datasources` 6 / `monitoring` 1，集中在分页契约改造后的列表接口与 gm 快照用例），与模块11 `mcp_server` 无关（仅新增叶子包 + `apps/monitoring/apps.py` 跳过命令白名单 1 处）；修复预存失败应另立任务。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15，预存失败修复后）：✔ 403 个测试全部通过（OK）**。根因定位：此前的 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 
 
 ## 五、待办事项汇总
@@ -1332,7 +1332,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
 | P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，模块11 SSE 改造后）**：✔ 403 个测试，⚠️ 20 failures + 1 error，全部为上述预存失败（`watchlists` 15 / `datasources` 6 / `monitoring` 1，其中 monitoring 该项为 gm 快照用例，与本次更新器进程门禁无关）；`mcp_server` 36 个用例全部通过；MCP 改动仅新增叶子包 + `apps/monitoring/apps.py` 跳过命令白名单 1 处 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，预存失败修复后）**：✔ **403 个测试全部通过**。根因：21 个失败全部为测试环境/用例缺陷（arcis 默认限流 429、gm 昨收用例时间炸弹、Decimal 字符串断言依赖 MySQL 精度展示），非业务缺陷；已新增 `quant_engine/settings/test.py` 隔离限流并修正 3 处用例 |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |

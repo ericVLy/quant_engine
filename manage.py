@@ -6,7 +6,13 @@ import sys
 
 def main():
     """Run administrative tasks."""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'quant_engine.settings.dev')
+    # 测试进程关闭 arcis 限流（见 quant_engine/settings/test.py 注释）
+    settings_module = (
+        'quant_engine.settings.test'
+        if 'test' in sys.argv
+        else 'quant_engine.settings.dev'
+    )
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', settings_module)
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

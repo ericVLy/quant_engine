@@ -17,6 +17,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+from unittest.mock import patch
 
 from apps.datasources.models import RealtimeSnapshot
 from apps.watchlists.models import Symbol
@@ -472,9 +473,18 @@ class GmSnapshotProviderTest(TestCase):
         # change = (10.8 - 10.2) / 10.2 * 100
         self.assertAlmostEqual(item['change'], round((10.8 - 10.2) / 10.2 * 100.0, 4))
 
-    def test_pre_close_skips_today_bar(self):
-        """含今日 bar 时昨收取**日期早于今日**的最近一根，而非 bars[-2]。"""
+    @patch('django.utils.timezone.now')
+    def test_pre_close_skips_today_bar(self, mock_now):
+        """含今日 bar 时昨收取**日期早于今日**的最近一根，而非 bars[-2]。
+
+        固定“当前时间”避免用例变成时间炸弹：以 2026-09-14（周一，交易日）
+        为今日，bars 中 09-14 为今日 bar，昨收应取 09-13 的 close=10.2。
+        """
         from .snapshot_provider import GmSnapshotProvider
+
+        mock_now.return_value = datetime(
+            2026, 9, 14, 10, 0, 0, tzinfo=zoneinfo.ZoneInfo('Asia/Shanghai'),
+        )
 
         class _Broker:
             def __init__(self):

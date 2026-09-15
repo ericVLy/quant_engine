@@ -274,7 +274,9 @@ class KLineAPITest(APITransactionTestCase):
         self.assertIn('symbol', first)
         self.assertIn('date', first)
         self.assertIn('extra', first)
-        self.assertEqual(str(first['extra']['adj_factor']), '1.000000')
+        # 按 Decimal 数值断言而非字符串：SQLite 下 adj_factor 返回 '1'，
+        # MySQL DECIMAL(6,6) 才会补齐 '1.000000'。
+        self.assertEqual(Decimal(str(first['extra']['adj_factor'])), Decimal('1.0'))
         logger.info(f"查询成功，返回 {response.data['count']} 条记录")
 
     def test_query_kline_missing_params(self):
@@ -396,7 +398,9 @@ class ServicesTest(TransactionTestCase):
         rows = query_kline_table(self.symbol_a, date(2024, 1, 5), date(2024, 1, 5))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['symbol'], '000001')
-        self.assertEqual(str(rows[0]['close']), '10.6000')
+        # 按 Decimal 数值断言而非字符串：SQLite 不保留 DECIMAL 精度展示
+        # （'10.6'），MySQL DECIMAL(10,4) 才会补齐 '10.6000'。
+        self.assertEqual(Decimal(str(rows[0]['close'])), Decimal('10.6'))
         logger.info(f"动态分表查询返回 {len(rows)} 条，表名为 {table_name}")
 
     def test_runtime_table_query_uses_table_and_date_only(self):
