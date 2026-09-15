@@ -46,3 +46,35 @@
 - 分时采样：随 Django 服务进程内自动执行（`MONITORING_UPDATER_ENABLED`，无单独命令）
 - 收盘清理兜底（一般无需手动）：`python manage.py clear_intraday`
 - Plan Cron 调度器：`python manage.py run_scheduler --interval 60`
+- MCP 服务（stdio 传输，由 AI 助手客户端拉起）：`.\.venv\Scripts\python.exe -m mcp_server`
+- MCP 专项测试：`.\.venv\Scripts\python.exe .\manage.py test mcp_server`
+
+## MCP 服务（AI 助手接入 · 模块11）
+
+把既有系统以 **MCP（Model Context Protocol）** 工具形式暴露给 AI 助手 / 编码助手，用于查询标的、K 线、策略元数据、告警与分时监控。
+
+- 传输：`stdio`（`.\.venv\Scripts\python.exe -m mcp_server`）；工具清单与契约见 `documents.md` 模块11。
+- **默认只读**：14 个工具 + `quant://docs/overview` 概览资源；唯一写操作 `trigger_plan_execution` 需环境变量 `MCP_ALLOW_TRIGGER=1`，且只创建 `pending` `SuiteRun`（真正执行仍由 `runner` 负责），**MCP 不会直接下单**。
+- **不参与运行时调度**：`mcp_server` 是入站适配器叶子包，只读调用 `apps.*` 的模型与服务；写操作复用既有 `apps.execution.services`。
+- **不承担分时更新**：`mcp_server/bootstrap.py` 默认 `MONITORING_UPDATER_ENABLED=0`，避免 MCP 进程与 Django 服务进程重复采样（外部数据源请求 + 库写入）。
+
+MCP 客户端配置示例（通用 `mcpServers` 结构，路径按本机实际调整）：
+
+```json
+{
+  "mcpServers": {
+    "quant-engine": {
+      "command": "c:\\Users\\PC\\Documents\\quant_platform\\quant_engine\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "mcp_server"],
+      "cwd": "c:\\Users\\PC\\Documents\\quant_platform\\quant_engine",
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "quant_engine.settings.dev",
+        "MONITORING_UPDATER_ENABLED": "0"
+      }
+    }
+  }
+}
+```
+
+- 若确需允许 AI 触发 Plan 执行，在 `env` 中追加 `"MCP_ALLOW_TRIGGER": "1"`（仍只创建 `pending` `SuiteRun`）。
+- 验证：`.\.venv\Scripts\python.exe .\manage.py test mcp_server`（24 个用例：工具门面、错误契约、写开关、装配层）。
