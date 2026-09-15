@@ -4,19 +4,13 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from datetime import datetime, timedelta
 
-from .models import DataSource, RealtimeSnapshot, KLineSyncLog
+from .models import RealtimeSnapshot, KLineSyncLog
 from .serializers import (
-    DataSourceSerializer, RealtimeSnapshotSerializer,
+    RealtimeSnapshotSerializer,
     KLineSyncLogSerializer, KLineSerializer
 )
 from .services import sync_kline_for_symbol, sync_all_symbols
 from apps.watchlists.models import Symbol
-
-
-class DataSourceViewSet(viewsets.ModelViewSet):
-    """数据源配置 CRUD"""
-    queryset = DataSource.objects.all()
-    serializer_class = DataSourceSerializer
 
 
 class RealtimeSnapshotViewSet(viewsets.ReadOnlyModelViewSet):

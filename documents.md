@@ -181,7 +181,7 @@ users（用户权限）
 - 分页参数：`page`（页码，从 1 开始，默认 1）、`page_size`（每页条数，默认 20，最大 500）。
 - 兼容旧客户端：`limit` 作为 `page_size` 的别名（此前前端固定使用 `{ limit: 6 | 500 }` 拉取下拉/面板数据）。
 - 覆盖范围：
-  - 所有 ModelViewSet / ReadOnlyModelViewSet 列表接口：`cases`、`suites`、`plans`、`execution/*`（event-types/runs/events/logs/orders/fund-allocations/alerts/alert-channels）、`watchlists/*`（symbols/groups）、`datasources/*`（sources/snapshots/sync-logs）；
+  - 所有 ModelViewSet / ReadOnlyModelViewSet 列表接口：`cases`、`suites`、`plans`、`execution/*`（event-types/runs/events/logs/orders/fund-allocations/alerts/alert-channels）、`watchlists/*`（symbols/groups）、`datasources/*`（snapshots/sync-logs；~~sources~~ 已随 D-01 移除）；
   - 自定义列表动作：`cases/{id}/versions/`、`plans/{id}/symbols/`、`plans/{id}/versions/`、`execution/event-types/list-all/`、`datasources/kline/query/`。
 - 旧客户端字段兼容：前端 `quant-frontend/src/api/index.ts` 的 axios 响应拦截器将分页结构解包为 `results` 数组，既有页面直接 `response.data` 作为数组使用的代码无需改动；列表调用默认携带 `page_size: 500` 以保持“一次加载全量”的原有体验。
 - 单对象 / 详情接口（如 `watchlist`、`topology`、`alerts/statistics`、各类 POST 动作）不属于列表接口，保持原返回结构不变。
@@ -287,7 +287,7 @@ class Watchlist(models.Model):
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ✅ 已完成（18 个测试全部通过） |
+| **状态** | ✅ 已完成（24 个测试全部通过；~~D-01 用户自配第三方数据源~~ 已于 2026-09-15 **移除**——系统无法适配第三方源异构数据结构，K 线/快照/同步链路固定走 akshare（ashare 兼容层）+ gm SDK，不读用户配置） |
 | **优先级** | P0 |
 | **依赖** | `watchlists.Symbol` |
 
@@ -295,7 +295,7 @@ class Watchlist(models.Model):
 
 | 编号 | 需求描述 | 实现文件 |
 |------|----------|----------|
-| D-01 | 数据源配置 CRUD（AkShare/TuShare/TDX/YFinance） | `models.py`, `views.py` |
+| ~~D-01~~ | ~~数据源配置 CRUD（AkShare/TuShare/TDX/YFinance）~~ | ❌ **已移除（2026-09-15）**：用户自配第三方源不可行（系统无法适配异构数据结构）；`DataSource` 模型与 `/api/datasources/sources/` 已删除（迁移 0004），数据获取收敛为内置 ashare + gm 适配层 |
 | D-02 | 实时快照存储（仅保留最新值，`OneToOneField`） | `models.py` (RealtimeSnapshot) |
 | D-03 | K线抽象基类（定义公共字段，不建表） | `models.py` (AbstractKLine) |
 | D-04 | A股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
@@ -331,7 +331,7 @@ class Watchlist(models.Model):
 
 | 方法 | 端点 | 功能 |
 |------|------|------|
-| GET/POST | `/api/datasources/sources/` | 数据源配置 CRUD |
+| GET/POST | `/api/datasources/sources/` | ~~数据源配置 CRUD~~（**已移除**，2026-09-15） |
 | GET | `/api/datasources/snapshots/` | 实时快照列表 |
 | GET | `/api/datasources/snapshots/{symbol_id}/` | 指定标的快照 |
 | GET | `/api/datasources/sync-logs/` | 同步日志列表 |
@@ -1190,7 +1190,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 |------|------|------------|--------|
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 18 通过 | 100% |
-| `datasources` | ✅ 已完成 | 30 通过 | 100% |
+| `datasources` | ✅ 已完成 | 24 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步/基本面缓存） |
 | `execution` | 🟢 执行闭环完成 | 77 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
@@ -1200,7 +1200,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 | `mcp_server` | ✅ 已完成 | 36 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun，见模块11） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15，预存失败修复后）：✔ 403 个测试全部通过（OK）**。根因定位：此前的 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15，D-01/`DataSource` 移除后）：✔ 397 个测试全部通过（OK）**。根因定位：此前的 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 
 
 ## 五、待办事项汇总
@@ -1241,7 +1241,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
-| P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；剩余 **敏感配置保护**（数据源 `auth_info` **分用户加密**存储 + 密钥存储设计见下方「敏感配置保护设计」；API 和日志不泄露密钥）待开发 | `datasources` 为主（分页已覆盖全部 API） | N-05（分页对应 N-01 已完成） |
+| P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；**敏感配置保护范围收敛**（2026-09-15）：`DataSource.auth_info` 已随 D-01 模块移除而取消，剩余为 PII 与日志卫生（见下方「敏感配置保护设计」）待办 | `execution` / `users`（PII 与日志面） | N-05（分页对应 N-01 已完成） |
 | P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
 | P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
 | P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地；2026-09-14 分时数据源替换为 **gm SDK**（A 股主源 + akshare 回退 HK/US） | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
@@ -1259,12 +1259,12 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | **系统配置层**（不进数据库、不进 git） | `SECRET_KEY`（仅覆盖登录态 Session/CSRF） | production 随机生成 = **预期行为**（刷新仅致登录过期）；需固定时经 `local.py`/环境变量注入 | ✅ 已确认 |
 | 同上 | `GM_TOKEN`（gm 交易令牌）、`MCP_AUTH_TOKEN`、数据库凭据 | **仅经环境变量注入**，生产环境不落任何文件 | ✅ production.py 已按此实现（`os.getenv`，SQLite 仅作 `USE_SQLITE=1` 回退） |
 | 同上 | 真实密钥落点 | `quant_engine/settings/local.py`（已 gitignore，未跟踪）为唯一本机密钥文件；~~`.env.example`~~ 已删除（项目无 dotenv 加载链，属无效文件） | ✅ 2026-09-15 清理 |
-| **user 数据层**（进数据库） | `DataSource.auth_info`（用户录入的第三方 token/api_key/secret） | **分用户加密**存储（见下）+ API 脱敏 + 权限分级；serializer 现为 `fields='__all__'` 明文返回，**待修** | ⏳ 本任务核心 |
-| 同上 | `AccountFundConfig.account_id`、`User.phone/company`、`AlertChannel.email_recipients`、交易明细（Order/ExecutionLog/Alert.message） | 不属密钥但属半敏感/PII：不进日志明文、通知邮件不夹带异常栈细节 | ⏳ 随本任务审计 |
+| **user 数据层**（进数据库） | ~~`DataSource.auth_info`~~ **已随 D-01/`DataSource` 模块移除（2026-09-15）**——系统不再支持用户自配第三方数据源，用户层已无密钥录入入口，分用户加密（KEK/DEK）方案**取消实施**；若未来恢复用户凭据录入再按本节设计执行 |
+| 同上 | `AccountFundConfig.account_id`、`User.phone/company`、`AlertChannel.email_recipients`、交易明细（Order/ExecutionLog/Alert.message） | N-05 焦点收敛至此：不属密钥但属半敏感/PII——不进日志明文、通知邮件不夹带异常栈细节、API 权限分级 | ⏳ 保留待办 |
 
 **2. 生产环境配置基线（2026-09-15 落地）**：`production.py` 数据库**默认 MariaDB**（主库 `DB_*` 与 K 线库 `KLINE_DB_*` 均经环境变量注入；`USE_SQLITE=1` 仅限本机演练/CI 回退）；`wsgi.py` 默认指向 `production`（原指向空的 `quant_engine.settings` 会 `ImproperlyConfigured`），生产入口为 Gunicorn：`gunicorn quant_engine.wsgi:application --workers 4 --env DJANGO_SETTINGS_MODULE=quant_engine.settings.production`。
 
-**3. user 层分用户加密设计（`DataSource.auth_info`）**：
+**3. user 层分用户加密设计（~~`DataSource.auth_info`~~ 2026-09-15 已随 D-01 移除而**存档取消**，保留设计备未来恢复用户凭据录入时使用）：**
 
 - **密钥层级（KEK/DEK 两级）**：
   - `KEK`（主加密密钥）：系统级，**仅存环境变量 / `local.py`**（`AUTH_ENCRYPTION_KEY`，Fernet key），生产绝不落库落盘；
@@ -1311,7 +1311,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 | 顺序 | 优先级 | 开发任务 | 影响模块 | 主要交付物 | 验收标准 |
 |------|--------|----------|----------|------------|----------|
-| 8 | P1 | API 分页与敏感配置保护（已拆分为两个子任务） | 全部 API、`datasources` | 统一分页响应、`auth_info` 加密/脱敏、权限检查 | ✅ **API 统一分页已完成**（列表接口统一 `{count, next, previous, page, total_pages, results}`；`page/page_size/limit` 兼容别名；前端拦截器解包 `results`，接口测试通过）；⏳ **敏感配置保护待做**（`auth_info` 加密/脱敏存储 + 权限检查；API 和日志不泄露密钥；旧客户端字段兼容） |
+| 8 | P1 | API 分页与敏感配置保护（已拆分为两个子任务） | 全部 API、`datasources` | 统一分页响应、`auth_info` 加密/脱敏、权限检查 | ✅ **API 统一分页已完成**（列表接口统一 `{count, next, previous, page, total_pages, results}`；`page/page_size/limit` 兼容别名；前端拦截器解包 `results`，接口测试通过）；✅ **`auth_info` 加密子任务已随 D-01/`DataSource` 模块移除而取消**（2026-09-15，用户自配第三方数据源删除，`auth_info` 不复存在）；⏳ 剩余 PII 与日志卫生待办（账户 ID/联系方式/交易明细不进日志与通知明文） |
 | 9 | P4 | 多实例 Scheduler 治理（原 P1，**单机部署目标下降级**） | `plans`, `runner` | 分布式任务去重、租约/领导者选举、任务幂等键 | ~~多个 Scheduler 实例只产生一个 `(Plan, Symbol, minute)` 任务；实例故障可恢复~~ → 降级为 **P4 储备**：单机单实例下进程内去重已满足；未来多机部署时再恢复本验收标准 |
 | 10 | P2 | 执行日志生命周期管理 | `execution`, `runner` | 30 天自动清理、归档策略、清理命令和监控 | 清理不影响未完成运行和订单；清理任务可重复执行且幂等 |
 | 11 | P2 | ~~画布编排与执行轨迹回放~~ → ✅ **已完成（2026-09-10，见 5.1.1）** | `quant-frontend`, `execution` | 拖拽节点、连线配置、NodeRun 轨迹和失败节点定位 | ✅ 前端拓扑与后端快照双向一致（`/designer` 拓扑读写/发布走 `GET|POST /api/suites/{id}/topology/`）；可按 SuiteRun 回放节点状态和事件顺序（`GET /api/execution/run/{run_id}/node-runs/` + Designer 页步进/自动播放回放，失败节点标红定位） |
@@ -1363,7 +1363,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
 | P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
-| P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；datasources `test_list_datasources_paginated`；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
+| P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；~~datasources `test_list_datasources_paginated`~~ 已随 D-01 移除；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
 | P1 阶段4 | 分时监控专项测试 | ✅ 54 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
 | P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 36 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
@@ -1385,7 +1385,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | N-02 | API 响应时间 < 500ms（不含外部数据源调用） | P2 |
 | N-03 | 策略配置变更支持热加载（无需重启服务） | ✅ 已实现；P0；关联开发任务：PlanRegistry/调度配置刷新；关联测试任务：5.2-4 |
 | N-04 | 执行日志保留 30 天（自动清理） | P2 |
-| N-05 | 敏感信息加密存储（数据源 `auth_info`） | P1 |
+| N-05 | ~~敏感信息加密存储（数据源 `auth_info`）~~ → **随 D-01/`DataSource` 模块移除而取消**（2026-09-15）：用户自配第三方数据源已删除，`auth_info` 字段不复存在；剩余范围收敛为 PII 与日志卫生（账户 ID / 联系方式 / 交易明细不进日志与通知明文） | P1 |
 
 
 ## 六、附录

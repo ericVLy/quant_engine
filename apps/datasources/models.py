@@ -4,29 +4,7 @@ from django.db import models, connections, transaction
 from apps.watchlists.models import Symbol
 
 # ============================================================
-# 1. 数据源配置（第三方数据源连接信息）
-# ============================================================
-class DataSource(models.Model):
-    SOURCE_TYPE_CHOICES = [
-        ('akshare', 'AkShare'),
-        ('tushare', 'TuShare'),
-        ('tdx', 'TDX'),
-        ('yfinance', 'YFinance'),
-    ]
-    name = models.CharField(max_length=50)
-    source_type = models.CharField(max_length=20, choices=SOURCE_TYPE_CHOICES)
-    endpoint = models.URLField(blank=True, null=True)
-    auth_info = models.JSONField(default=dict, blank=True)
-    priority = models.PositiveIntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.name
-
-# ============================================================
-# 2. 实时快照缓存（仅保留最新值，用于盘中快速查询）
+# 1. 实时快照缓存（仅保留最新值，用于盘中快速查询）
 # ============================================================
 class RealtimeSnapshot(models.Model):
     symbol = models.OneToOneField(Symbol, on_delete=models.CASCADE, primary_key=True, related_name='snapshot')

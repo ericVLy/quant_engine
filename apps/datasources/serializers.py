@@ -1,13 +1,6 @@
 from rest_framework import serializers
-from .models import DataSource, RealtimeSnapshot, KLineSyncLog
+from .models import RealtimeSnapshot, KLineSyncLog
 from apps.watchlists.models import Symbol
-
-
-class DataSourceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = DataSource
-        fields = '__all__'
-        read_only_fields = ('created_at', 'updated_at')
 
 
 class SymbolField(serializers.PrimaryKeyRelatedField):

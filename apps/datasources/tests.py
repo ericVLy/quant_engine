@@ -10,7 +10,7 @@ from django.db import connections
 
 from apps.watchlists.models import Symbol
 from apps.datasources.models import (
-    DataSource, RealtimeSnapshot, KLineSyncLog,
+    RealtimeSnapshot, KLineSyncLog,
     ensure_kline_table, get_runtime_kline_model
 )
 from apps.datasources.services import (
@@ -20,87 +20,6 @@ from apps.datasources.services import (
 from apps.datasources.ashare import get_price_day_tx, get_price_sina
 
 logger = logging.getLogger(__name__)
-
-
-class DataSourceAPITest(APITestCase):
-    """测试数据源配置 CRUD 接口"""
-
-    def setUp(self):
-        logger.info("=== DataSourceAPITest 开始 ===")
-        self.client = APIClient()
-        self.list_url = '/api/datasources/sources/'
-        self.data = {
-            'name': '测试数据源',
-            'source_type': 'akshare',
-            'endpoint': 'https://example.com',
-            'auth_info': {'token': 'test'},
-            'priority': 1,
-            'is_active': True
-        }
-        logger.info("准备测试数据源配置")
-
-    def test_create_datasource(self):
-        logger.info("测试创建数据源")
-        response = self.client.post(self.list_url, self.data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(DataSource.objects.count(), 1)
-        ds = DataSource.objects.first()
-        self.assertEqual(ds.name, '测试数据源')
-        logger.info(f"数据源创建成功: {ds.name} (ID: {ds.id})")
-
-    def test_list_datasources(self):
-        logger.info("测试列出所有数据源")
-        ds1 = DataSource.objects.create(name='源1', source_type='akshare')
-        ds2 = DataSource.objects.create(name='源2', source_type='tushare')
-        logger.info(f"已创建两个数据源: {ds1.name}, {ds2.name}")
-        response = self.client.get(self.list_url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['count'], 2)
-        self.assertEqual(len(response.data['results']), 2)
-        logger.info("列表返回记录数: %d", response.data['count'])
-
-    def test_list_datasources_paginated(self):
-        logger.info("测试数据源列表分页")
-        for index in range(15):
-            DataSource.objects.create(name=f'源{index}', source_type='akshare')
-        response = self.client.get(self.list_url, {'page_size': 10})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['count'], 15)
-        self.assertEqual(response.data['total_pages'], 2)
-        self.assertEqual(len(response.data['results']), 10)
-        page2 = self.client.get(self.list_url, {'page': 2, 'page_size': 10})
-        self.assertEqual(len(page2.data['results']), 5)
-
-    def test_retrieve_datasource(self):
-        logger.info("测试获取单个数据源")
-        ds = DataSource.objects.create(name='源1', source_type='akshare')
-        logger.info(f"创建数据源 ID: {ds.id}")
-        url = f'/api/datasources/sources/{ds.id}/'
-        response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['name'], '源1')
-        logger.info("成功获取数据源详情")
-
-    def test_update_datasource(self):
-        logger.info("测试更新数据源")
-        ds = DataSource.objects.create(name='旧名', source_type='akshare')
-        logger.info(f"原数据源: {ds.name}")
-        url = f'/api/datasources/sources/{ds.id}/'
-        response = self.client.put(url, {'name': '新名', 'source_type': 'tushare'}, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ds.refresh_from_db()
-        self.assertEqual(ds.name, '新名')
-        logger.info(f"更新后名称: {ds.name}")
-
-    def test_delete_datasource(self):
-        logger.info("测试删除数据源")
-        ds = DataSource.objects.create(name='删除测试', source_type='akshare')
-        logger.info(f"待删除数据源 ID: {ds.id}")
-        url = f'/api/datasources/sources/{ds.id}/'
-        response = self.client.delete(url)
-        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(DataSource.objects.count(), 0)
-        logger.info("删除成功")
 
 
 class RealtimeSnapshotAPITest(APITestCase):
