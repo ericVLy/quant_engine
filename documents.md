@@ -1,8 +1,8 @@
 ﻿# 量化交易系统 · 全模块需求文档
 
-> 版本：v2.10  
-> 日期：2026-09-14  
-> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口）
+> 版本：v2.11  
+> 日期：2026-09-15  
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口） · MCP 服务（模块11）已落地（`mcp_server` 包：14 个工具 + 1 个概览资源 · 默认只读 · 写操作需 `MCP_ALLOW_TRIGGER=1` · 24 个专项测试通过）
 
 
 ## 一、项目概述
@@ -89,6 +89,8 @@ users（用户权限）
    └── （所有模块均依赖 users）
 ```
 
+
+依赖方向补充（模块11）：`mcp_server` 为**入站适配器叶子包**，只依赖 `apps.*` 的模型与服务，`apps.*` 不反向依赖它；与 `runner` 同处「编辑与执行分离」架构之外（`runner` 出站执行、`mcp_server` 入站查询），不影响「Django 仅作数据层」基线。
 
 ## 三、关键数据契约与 JSON 白名单
 
@@ -1112,7 +1114,69 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - 可选启动步骤：仅当 `trigger_type=manual` 且 `suite_start_mode=auto` 时执行 `POST /api/plans/{id}/start/`（`start_plan` 前置仅要求 `run_status=new`，刚发布的 Plan 满足）；**启动失败不回滚**——已发布 Plan 是完整交付物，启动失败仅在步骤清单中提示「可稍后在 Plan 管理页手动启动」。
 - 失败清理为**可选动作**（用户选「保留草稿」则不动库）：`cleanupCreated` 按依赖逆序删除（Plan → Suites → Cases），删除失败逐项提示但不中断清理流程；删除接口沿用既有删除保护契约（被引用时 409）。
 
-## 四、模块完成进度总览
+### 模块11：`mcp_server`（AI 助手接入层 · MCP 服务）✅ 已完成
+
+| 属性 | 说明 |
+|------|------|
+| **状态** | ✅ 全部完成（2026-09-15：`mcp_server` 包（stdio 传输）+ 14 个工具 + 1 个概览资源；24 个专项测试通过；`python -m mcp_server` 端到端握手已验证） |
+| **优先级** | P1 |
+| **依赖** | `watchlists` / `datasources` / `cases` / `suites` / `plans` / `execution` / `monitoring` 既有模型与服务（只读门面，**后端零新增 REST 接口**） |
+| **新增依赖** | `mcp[cli]>=2.2.0`（已登记 `requirements.txt`） |
+
+#### 定位与边界
+
+- 目标：把「AI 助手 / 编码助手」接入既有量化系统——标的、K 线、策略元数据、告警、分时监控的可查询视图，并提供**默认关闭**的受控触发入口。
+- **接入层而非执行层**：`mcp_server` 是**入站适配器**（与 `runner` 同为叶子包），依赖方向 `mcp_server → apps.*`；`apps.*` 不反向依赖 `mcp_server`，Django 仍不参与运行时调度，Suite 仍由 `runner` 执行。
+- **默认只读**：除 `trigger_plan_execution` 外全部只读；`trigger_plan_execution` 仅创建 `pending` `SuiteRun`（交由 `runner` 调度），**MCP 不直接下单**，且需环境变量 `MCP_ALLOW_TRIGGER=1` 显式开启。
+- **进程职责单一**：MCP 进程启动即默认 `MONITORING_UPDATER_ENABLED=0`（`bootstrap.setup_django()` 设置），避免每个客户端进程重复拉起分时更新器（外部数据源请求 + 库写入）。
+
+#### 工具清单（MCP-01 ~ MCP-12）
+
+| 工具 | 能力 | 复用后端 |
+|------|------|----------|
+| `search_symbols` | 代码/名称模糊搜索，`market` 过滤，`limit` 收敛 1~200 | `watchlists.Symbol` |
+| `resolve_symbol_name` | 代码 → 中文名（优先读库，回退 `watchlists.services.resolve_symbol_name`） | `watchlists` |
+| `query_kline` | 分表 K 线（缺省近 90 日，最多 500 根，超出保留最近 N 根） | `datasources.services.query_kline_table` |
+| `list_plans` / `get_plan` | Plan 列表（缺省 `published`）/ 详情（可选解析 `symbol_scope` 为标的列表） | `plans` + `resolve_plan_symbols` |
+| `list_cases` / `get_case` | Case 列表（`status`/`node_type` 过滤）/ 详情（含 `params`） | `cases.Case` |
+| `get_suite_topology` | Suite 递归拓扑快照 | `suites.services.build_topology_snapshot` |
+| `list_event_types` | 已注册事件类型（系统内置 + `EventTypeRegistry`） | `execution.registry.EventRegistry.list_all` |
+| `list_alerts` / `alert_statistics` | 告警列表（`status`/`severity`）/ 统计（与 `/api/execution/alerts/statistics/` 同口径） | `execution.Alert` |
+| `get_intraday_series` | 当日分时序列（市场时区 / `session_status` / `pre_close`），**不走外部网络** | `monitoring` 模型 + 序列化器 + `market_calendar` |
+| `list_suite_runs` | 最近运行实例（`plan_id` / `symbol` 过滤） | `execution.SuiteRun` |
+| `trigger_plan_execution` | **写操作**：为 Plan + 标的创建 `pending` SuiteRun（需 `MCP_ALLOW_TRIGGER=1`） | `execution.services.trigger_plan` |
+
+资源：`quant://docs/overview`（text/plain，系统概览与安全边界说明，同 `server.instructions`）。
+
+#### 输入输出契约
+
+- 所有输出经 `mcp_server/formatting.to_jsonable` 归一：`Decimal → 字符串`（与项目 DecimalField 序列化一致）、`date/datetime → ISO-8601`、模型实例 `→ pk`、其余 `→ str`，确保 MCP 结构化输出不含自定义类型。
+- 参数校验失败抛 `ValueError`（资源不存在 / 空代码 / 反向日期窗口），写开关未开启抛 `PermissionError`，均带可定位的中文提示。
+- `limit` 在工具内收敛上限（标的 200 / K 线 500 / 告警 100 / 运行 100），单次调用不会拉全表；分页 `N-01` 契约不适用于 MCP（工具自带 `limit`，非 REST 列表接口）。
+
+#### 装配与运行
+
+```powershell
+.\.venv\Scripts\python.exe -m mcp_server      # stdio 传输（由 MCP 客户端以子进程方式拉起）
+```
+
+- `mcp_server/server.py::create_server()` 装配 `MCPServer`（name/title/description/version/instructions）；`__main__.py` → `server.main()` → `bootstrap.setup_django()` → `run(transport='stdio')`。
+- `mcp_server/bootstrap.py` 默认 `DJANGO_SETTINGS_MODULE=quant_engine.settings.dev`（可用环境变量覆盖），并默认关闭分时更新器。
+- MCP 客户端配置示例见 `README.md`「MCP 服务（AI 助手接入）」。
+
+#### 测试（P1 阶段6）
+
+- `mcp_server/tests.py` 24 个用例：工具门面（搜索与 `market` 过滤、命名解析回退、分表 K 线窗口/截断/尾段保留、Plan 详情与标的解析、Case 过滤与拓扑、事件类型、告警列表与统计、SuiteRun 过滤、分时序列与字段契约）、错误契约（未入库标的、空代码、反向窗口、资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 记录为 0；空标的列表与未发布 Plan 仍被拒）、`to_jsonable` 归一、**装配层**（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）。
+- 端到端：以 MCP 客户端对 `python -m mcp_server` 完成 stdio 握手（`initialize` → `tools/list` → `tools/call`），14 个工具与 `quant://docs/overview` 资源可枚举，只读调用返回非错误。
+
+#### 已知边界与后续（P2）
+
+- 传输仅 `stdio`（本地单客户端）；远程 `streamable-http` + 鉴权未实现。
+- 无写操作审计日志（`trigger_plan_execution` 仅创建 `pending` SuiteRun，实际执行轨迹仍由 `SuiteRun`/`NodeRun`/`ExecutionLog` 记录）。
+- 工具返回体未做字段级脱敏白名单（当前未暴露 `auth_info` 等敏感字段，仍建议在扩展工具时逐个白名单化）。
+
+
+
 
 | 模块 | 状态 | 测试用例数 | 完成度 |
 |------|------|------------|--------|
@@ -1126,8 +1190,9 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 | `monitoring` | ✅ 已完成 | 54 通过 | 100%（后端模型/内部更新器/SSE 推送/API + 启动完整性回填 + 前端 ECharts 分时监控页均已落地，见模块9） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
+| `mcp_server` | ✅ 已完成 | 24 通过 | 100%（stdio MCP 服务：14 工具 + 1 概览资源 · 默认只读 · 写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun，见模块11） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准（v2.6：**290 个测试全部通过**）。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15）：391 个测试，⚠️ 20 failures + 1 error，全部为预存失败**（`watchlists` 15 / `datasources` 6 / `monitoring` 1，集中在分页契约改造后的列表接口与 gm 快照用例），与模块11 `mcp_server`（新增叶子包，未改动 `apps/*`）无关；修复预存失败应另立任务。
 
 
 ## 五、待办事项汇总
@@ -1162,6 +1227,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 告警管理（Alert 模型 + AlertChannel 渠道配置 + `alert_service` 通知服务；应用内 / 邮件多渠道，按最低级别与类型白名单分发；`/api/execution/alerts/`、`/api/execution/alert-channels/` 及操作/统计/重发接口；前端告警管理页 + 告警渠道配置页） | `execution`, `runner`, `plans`, `quant-frontend` | ✅ 已完成（21 个专项测试；EX-20 ~ EX-26） | EX-20、EX-21、EX-22、EX-23、EX-24、EX-25、EX-26 |
 | API 统一分页（列表接口统一 `{count, next, previous, page, total_pages, results}` 分页结构；`page` / `page_size` / `limit` 兼容别名；全局 `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` + 自定义列表动作分页；前端 axios 拦截器解包 `results` 保持旧字段兼容，列表调用默认 `page_size: 500`） | 全部 API, `quant-frontend` | ✅ 已完成（`quant_engine/pagination.py`，N-01；9 个专项测试：cases+1、suites+1、plans+1、watchlists+2、datasources+1、execution+3，另含既有用例的页内/limit 兼容断言） | N-01 |
 | 画布可视化编排前端对接（策略设计器 `/designer`：@vue-flow/core 拖拽节点/连线编排 Case 与子 Suite；编排边条件对话框，`event_condition` 白名单 + 操作符 `eq/neq/gt/gte/lt/lte/between`；拓扑读写与发布；执行轨迹回放：按 SuiteRun 步进/自动播放回放 NodeRun 节点状态与事件顺序；侧边导航新增菜单） | `quant-frontend`, `execution` | ✅ 已完成（2026-09-10；`src/views/Designer.vue` + 路由 `/designer`；后端新增 `GET /api/execution/run/{run_id}/node-runs/`；`vue-tsc` 0 错误、`vite build` 通过；2026-09-12 配套修正 NodeRun 列表测试按 N-01 分页契约解包 `results`） | S-09、EX-15、5.1.4 任务 11 |
+| MCP 服务（`mcp_server` 包：stdio 传输 + 14 个工具 + 1 个概览资源；`MCPServer` 装配层 + `bootstrap.setup_django()`；默认只读，`trigger_plan_execution` 写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun；`to_jsonable` 统一 JSON 安全输出） | `mcp_server`（入站适配器，复用 apps 模型与服务） | ✅ 已完成（2026-09-15，见模块11；24 个专项测试通过 + stdio 端到端握手验证；新增依赖 `mcp[cli]>=2.2.0`） | 模块11 设计 |
 
 #### 5.1.2 待开发任务
 
@@ -1174,6 +1240,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | P1 | ~~策略快速创建向导~~ → ✅ **全部完成（2026-09-14，见模块10）**：3 步向导 `/quick-strategy`，模板化生成 Case/Suite/Plan 并一键「创建→发布→（可选）启动」；**全链路由前端编排既有 API（后端零新增接口）** | `quant-frontend`（`cases`/`suites`/`plans` API 复用） | 关联新模块（见模块10 设计文档） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
+| P2 | MCP 服务增强（远程 `streamable-http` 传输 + 鉴权、写操作审计日志、工具返回字段级白名单）——**边界**：当前仅本地 stdio 且默认只读，`trigger_plan_execution` 已受 `MCP_ALLOW_TRIGGER=1` 保护，故不阻塞主线 | `mcp_server` | 模块11（已知边界与后续） |
 
 #### 5.1.3 开发顺序
 
@@ -1257,7 +1324,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
 | P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，模块11 提交前）**：✔ 391 个测试，⚠️ 20 failures + 1 error，全部为上述预存失败（`watchlists` 15 / `datasources` 6 / `monitoring` 1）；`mcp_server` 24 个用例全部通过，新增叶子包未改动 `apps/*` |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
@@ -1265,6 +1332,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；datasources `test_list_datasources_paginated`；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
 | P1 阶段4 | 分时监控专项测试 | ✅ 54 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
+| P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 24 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界））；另以 MCP 客户端对 `python -m mcp_server` 完成 stdio 端到端握手验证 | 远程传输与鉴权、写操作审计（P2，见模块11 已知边界） |
 
 #### 测试验收标准
 
