@@ -1,9 +1,17 @@
-"""MCPServer wiring for Quant Engine."""
+"""MCPServer wiring for Quant Engine（SSE 为主传输的 Web 接入层）."""
 from __future__ import annotations
+
+import argparse
+import logging
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
 from mcp_server import tools_impl
+from mcp_server.auth import BearerAuthMiddleware
+from mcp_server.config import McpTransportConfig, load_transport_config
+
+logger = logging.getLogger(__name__)
 
 
 def create_server() -> MCPServer:
@@ -18,6 +26,17 @@ def create_server() -> MCPServer:
     @server.resource('quant://docs/overview', mime_type='text/plain')
     def overview_resource() -> str:
         return tools_impl.system_overview_text()
+
+    @server.custom_route('/health', methods=['GET'], name='health')
+    async def health_route(request: Any) -> Any:
+        """健康检查（供部署探针使用；配置令牌后同样需要 Authorization 头）。"""
+        from starlette.responses import JSONResponse
+
+        return JSONResponse({
+            'status': 'ok',
+            'server': 'quant-engine',
+            'transport': 'sse',
+        })
 
     @server.tool(description='按代码或名称模糊搜索标的（watchlists.Symbol）。')
     def search_symbols(query: str = '', market: str = '', limit: int = 50) -> dict:
@@ -93,8 +112,114 @@ def create_server() -> MCPServer:
     return server
 
 
-def main() -> None:
+def build_transport_security(config: McpTransportConfig) -> Any:
+    """显式开启 DNS rebinding 保护（SDK 仅在绑定回环地址时自动开启）。
+
+    绑定非回环地址时若不显式开启，Host / Origin 将不做校验，
+    恶意网页可借浏览器直接访问本机（或内网）MCP 服务。
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(config.allowed_hosts),
+        allowed_origins=list(config.allowed_origins),
+    )
+
+
+def build_http_app(
+    server: MCPServer | None = None,
+    config: McpTransportConfig | None = None,
+) -> Any:
+    """构建 SSE（HTTP）ASGI 应用：MCP 端点 + 健康检查 + 鉴权 + 可选 CORS。
+
+    - `transport_security` 显式开启 DNS rebinding 保护，Host / Origin 白名单由
+      `MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` 决定；
+    - 配置 `MCP_AUTH_TOKEN` 时装配 `BearerAuthMiddleware`，`OPTIONS` 预检放行；
+    - 配置 `MCP_CORS_ORIGINS` 时装配 `CORSMiddleware` 并置于最外层，
+      使 401 响应也带上 CORS 头（便于浏览器客户端定位问题）。
+    """
+    server = server or create_server()
+    config = (config or load_transport_config()).validate()
+
+    app = server.sse_app(
+        sse_path=config.sse_path,
+        message_path=config.message_path,
+        transport_security=build_transport_security(config),
+        host=config.host,
+    )
+    if config.auth_enabled:
+        app.add_middleware(BearerAuthMiddleware, token=config.auth_token)
+    if config.cors_origins:
+        from starlette.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(config.cors_origins),
+            allow_methods=['GET', 'POST', 'OPTIONS'],
+            allow_headers=[
+                'Authorization', 'Content-Type', 'Accept',
+                'mcp-session-id', 'mcp-protocol-version',
+            ],
+            expose_headers=['mcp-session-id'],
+        )
+    return app
+
+
+def run_http_server(
+    config: McpTransportConfig | None = None,
+    app: Any = None,
+) -> None:
+    """以 uvicorn 启动 SSE 服务（阻塞直到进程退出）。"""
+    config = (config or load_transport_config()).validate()
+    app = app or build_http_app(config=config)
+    try:
+        import uvicorn
+    except ImportError as exc:  # pragma: no cover - uvicorn 随 mcp 依赖安装
+        raise RuntimeError('SSE 传输需要 uvicorn（随 `mcp` 依赖安装）') from exc
+
+    logger.info(
+        'MCP SSE 服务监听 %s · SSE=%s · 健康检查=%s · 鉴权=%s',
+        config.bind_addr,
+        config.sse_path,
+        config.health_path,
+        'Bearer 令牌' if config.auth_enabled else '关闭（仅回环地址）',
+    )
+    uvicorn.run(app, host=config.host, port=config.port, log_level='info')
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='python -m mcp_server',
+        description='Quant Engine MCP 服务（默认 SSE 传输；stdio 供本机 IDE 客户端）',
+    )
+    parser.add_argument('--transport', choices=('sse', 'stdio'), default=None)
+    parser.add_argument('--host', default=None)
+    parser.add_argument('--port', type=int, default=None)
+    parser.add_argument('--auth-token', dest='auth_token', default=None)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _build_arg_parser().parse_args(argv)
+    config = load_transport_config().with_overrides(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        auth_token=args.auth_token,
+    )
+
     from mcp_server.bootstrap import setup_django
 
     setup_django()
-    create_server().run(transport='stdio')
+
+    if config.transport == 'stdio':
+        # stdio 模式下 stdout 是协议通道，禁止打印任何日志
+        create_server().run(transport='stdio')
+        return
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    )
+    run_http_server(config=config)

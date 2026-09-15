@@ -330,6 +330,6 @@ def system_overview_text() -> str:
         'Quant Engine：本地优先的量化投研与交易系统。'
         'Django 负责数据与 REST API；runner 独立进程负责 Plan 调度与 Suite 事件循环。'
         '核心隐喻：Case（原子策略）→ Suite（DAG 编排）→ Plan（调度）→ SuiteRun/Order。'
-        'MCP 工具只读暴露标的、K 线、策略元数据、告警与分时；'
-        '触发 Plan 需 MCP_ALLOW_TRIGGER=1。'
+        'MCP 服务默认以 SSE（HTTP）传输暴露标的、K 线、策略元数据、告警与分时等只读视图；'
+        '触发 Plan 需 MCP_ALLOW_TRIGGER=1，且只创建 pending SuiteRun，不会直接下单。'
     )

@@ -46,35 +46,77 @@
 - 分时采样：随 Django 服务进程内自动执行（`MONITORING_UPDATER_ENABLED`，无单独命令）
 - 收盘清理兜底（一般无需手动）：`python manage.py clear_intraday`
 - Plan Cron 调度器：`python manage.py run_scheduler --interval 60`
-- MCP 服务（stdio 传输，由 AI 助手客户端拉起）：`.\.venv\Scripts\python.exe -m mcp_server`
+- MCP 服务（SSE，Web 接入）：`.\.venv\Scripts\python.exe .\manage.py run_mcp_server --port 8765`
 - MCP 专项测试：`.\.venv\Scripts\python.exe .\manage.py test mcp_server`
 
 ## MCP 服务（AI 助手接入 · 模块11）
 
-把既有系统以 **MCP（Model Context Protocol）** 工具形式暴露给 AI 助手 / 编码助手，用于查询标的、K 线、策略元数据、告警与分时监控。
+把既有系统以 **MCP（Model Context Protocol）** 工具形式暴露给 AI 助手 / 前端，用于查询标的、K 线、策略元数据、告警与分时监控。
 
-- 传输：`stdio`（`.\.venv\Scripts\python.exe -m mcp_server`）；工具清单与契约见 `documents.md` 模块11。
-- **默认只读**：14 个工具 + `quant://docs/overview` 概览资源；唯一写操作 `trigger_plan_execution` 需环境变量 `MCP_ALLOW_TRIGGER=1`，且只创建 `pending` `SuiteRun`（真正执行仍由 `runner` 负责），**MCP 不会直接下单**。
-- **不参与运行时调度**：`mcp_server` 是入站适配器叶子包，只读调用 `apps.*` 的模型与服务；写操作复用既有 `apps.execution.services`。
-- **不承担分时更新**：`mcp_server/bootstrap.py` 默认 `MONITORING_UPDATER_ENABLED=0`，避免 MCP 进程与 Django 服务进程重复采样（外部数据源请求 + 库写入）。
+### 启动
 
-MCP 客户端配置示例（通用 `mcpServers` 结构，路径按本机实际调整）：
+```powershell
+# 推荐：SSE（HTTP）常驻服务，客户端按 URL 接入
+.\.venv\Scripts\python.exe .\manage.py run_mcp_server --port 8765
+# 需要对外暴露时必须配令牌（否则拒绝启动）：
+#   --host 0.0.0.0 --auth-token <token>
+
+# 等价包入口
+.\.venv\Scripts\python.exe -m mcp_server --transport sse
+
+# 本机 IDE 客户端：stdio 子进程
+.\.venv\Scripts\python.exe -m mcp_server --transport stdio
+```
+
+端点：`GET /sse`（建连）· `POST /messages/`（消息回传）· `GET /health`（健康检查）。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MCP_TRANSPORT` | `sse` | `sse`（HTTP 服务）或 `stdio`（子进程） |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `8765` | 监听地址与端口（`--host` / `--port` 可覆盖） |
+| `MCP_AUTH_TOKEN` | 空（不鉴权） | Bearer 令牌；**绑定非回环地址时必填** |
+| `MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` | `127.0.0.1:*,localhost:*` 等 | DNS rebinding 保护白名单 |
+| `MCP_CORS_ORIGINS` | 空（不加 CORS 头） | 浏览器直连时允许的来源（逗号分隔） |
+| `MCP_ALLOW_TRIGGER` | 空（写操作关闭） | 置 `1` 才允许 `trigger_plan_execution` |
+
+### 客户端配置示例
+
+SSE（推荐；配置令牌时把 `headers` 一并带上）：
+
+```json
+{
+  "mcpServers": {
+    "quant-engine": {
+      "url": "http://127.0.0.1:8765/sse",
+      "headers": {"Authorization": "Bearer <MCP_AUTH_TOKEN>"}
+    }
+  }
+}
+```
+
+stdio（本机 IDE 以子进程方式拉起）：
 
 ```json
 {
   "mcpServers": {
     "quant-engine": {
       "command": "c:\\Users\\PC\\Documents\\quant_platform\\quant_engine\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "mcp_server"],
+      "args": ["-m", "mcp_server", "--transport", "stdio"],
       "cwd": "c:\\Users\\PC\\Documents\\quant_platform\\quant_engine",
-      "env": {
-        "DJANGO_SETTINGS_MODULE": "quant_engine.settings.dev",
-        "MONITORING_UPDATER_ENABLED": "0"
-      }
+      "env": {"DJANGO_SETTINGS_MODULE": "quant_engine.settings.dev"}
     }
   }
 }
 ```
 
-- 若确需允许 AI 触发 Plan 执行，在 `env` 中追加 `"MCP_ALLOW_TRIGGER": "1"`（仍只创建 `pending` `SuiteRun`）。
-- 验证：`.\.venv\Scripts\python.exe .\manage.py test mcp_server`（24 个用例：工具门面、错误契约、写开关、装配层）。
+- 安全：默认只读；`trigger_plan_execution` 仅创建 `pending` `SuiteRun`（实际执行由 `runner` 负责，**MCP 不会直接下单**）；令牌校验失败返回 401；非法 `Host`（DNS rebinding）直接拒绝建连。
+- 进程职责：MCP 服务进程不启动分时内部更新器（分时采样只由 Django 服务进程负责），避免多进程重复外部请求与写库。
+- 健康检查：`curl -H "Authorization: Bearer <token>" http://127.0.0.1:8765/health`
+- 工具清单、安全设计与测试口径见 `documents.md` 模块11。
+
+### mcp_server（模块11 · 模型/端点速览）
+
+- 无自有数据模型；14 个工具复用 `watchlists` / `datasources` / `cases` / `suites` / `plans` / `execution` / `monitoring` 的模型与服务
+- 资源：`quant://docs/overview`（系统概览与安全边界）

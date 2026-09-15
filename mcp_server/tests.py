@@ -1,15 +1,18 @@
-"""MCP 服务（模块11）测试：工具门面 + 装配层。
+"""MCP 服务（模块11）测试：工具门面 + 装配层 + SSE 传输与安全边界。
 
-需求编号：MCP-01 ~ MCP-09（见 documents.md 模块11）。
+需求编号：MCP-01 ~ MCP-17（见 documents.md 模块11）。
 只读工具直接查库；写操作仅"创建 pending SuiteRun"，不涉及任何真实下单。
 """
 import asyncio
+import json
 import os
+import sys
 from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
+from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -24,8 +27,9 @@ from apps.users.models import User
 from apps.watchlists.models import Symbol
 
 from mcp_server import tools_impl
+from mcp_server.config import McpConfigError, load_transport_config
 from mcp_server.formatting import to_jsonable
-from mcp_server.server import create_server
+from mcp_server.server import build_http_app, build_transport_security, create_server
 
 EXPECTED_TOOL_NAMES = {
     'search_symbols',
@@ -360,3 +364,185 @@ class McpServerWiringTest(SimpleTestCase):
         text = tools_impl.system_overview_text()
         self.assertIn('MCP_ALLOW_TRIGGER=1', text)
         self.assertIn('SuiteRun', text)
+
+
+class McpTransportConfigTest(SimpleTestCase):
+    """MCP-14：传输配置（SSE 默认、端口与路径校验、非回环绑定必须鉴权）。"""
+
+    def test_defaults_target_sse_on_loopback(self):
+        config = load_transport_config(env={})
+        self.assertEqual(config.transport, 'sse')
+        self.assertEqual(config.host, '127.0.0.1')
+        self.assertEqual(config.port, 8765)
+        self.assertEqual(config.sse_path, '/sse')
+        self.assertEqual(config.message_path, '/messages/')
+        self.assertEqual(config.sse_url, 'http://127.0.0.1:8765/sse')
+        self.assertTrue(config.is_loopback)
+        self.assertFalse(config.auth_enabled)
+
+    def test_env_overrides_and_list_parsing(self):
+        config = load_transport_config(env={
+            'MCP_TRANSPORT': 'SSE',
+            'MCP_PORT': '9100',
+            'MCP_SSE_PATH': 'rpc/sse',
+            'MCP_AUTH_TOKEN': ' secret-token ',
+            'MCP_ALLOWED_HOSTS': '127.0.0.1:*, mcp.local',
+            'MCP_ALLOWED_ORIGINS': 'http://localhost:5173',
+            'MCP_CORS_ORIGINS': 'http://localhost:5173,http://127.0.0.1:5173',
+        })
+        self.assertEqual(config.transport, 'sse')
+        self.assertEqual(config.port, 9100)
+        self.assertEqual(config.sse_path, '/rpc/sse')
+        self.assertEqual(config.auth_token, 'secret-token')
+        self.assertTrue(config.auth_enabled)
+        self.assertEqual(config.allowed_hosts, ('127.0.0.1:*', 'mcp.local'))
+        self.assertEqual(config.allowed_origins, ('http://localhost:5173',))
+        self.assertEqual(len(config.cors_origins), 2)
+
+    def test_invalid_values_raise_config_error(self):
+        with self.assertRaises(McpConfigError):
+            load_transport_config(env={'MCP_TRANSPORT': 'websocket'})
+        with self.assertRaises(McpConfigError):
+            load_transport_config(env={'MCP_PORT': 'abc'})
+        with self.assertRaises(McpConfigError):
+            load_transport_config(env={'MCP_PORT': '70000'})
+
+    def test_non_loopback_bind_requires_token(self):
+        """安全边界：对外暴露必须先有令牌，否则拒绝启动。"""
+        with self.assertRaises(McpConfigError):
+            load_transport_config(env={'MCP_HOST': '0.0.0.0'})
+        config = load_transport_config(env={'MCP_HOST': '0.0.0.0', 'MCP_AUTH_TOKEN': 'tk'})
+        self.assertFalse(config.is_loopback)
+        with self.assertRaises(McpConfigError):
+            load_transport_config(env={
+                'MCP_HOST': '0.0.0.0', 'MCP_AUTH_TOKEN': 'tk', 'MCP_ALLOWED_HOSTS': '*',
+            })
+
+    def test_with_overrides_applies_cli_arguments(self):
+        config = load_transport_config(env={}).with_overrides(transport='stdio', port=9999)
+        self.assertEqual(config.transport, 'stdio')
+        self.assertEqual(config.port, 9999)
+        kept = load_transport_config(env={}).with_overrides(transport=None, port=None)
+        self.assertEqual(kept.transport, 'sse')
+        self.assertEqual(kept.port, 8765)
+
+
+class McpHttpAppTest(SimpleTestCase):
+    """MCP-15/16：SSE 应用装配 —— 端点、健康检查、Bearer 鉴权、DNS rebinding 保护。"""
+
+    def _get(self, app, path, headers=None):
+        """直接驱动 ASGI 应用（httpx 未安装，故不使用 Starlette TestClient）。"""
+        scope = {
+            'type': 'http',
+            'asgi': {'version': '3.0'},
+            'http_version': '1.1',
+            'method': 'GET',
+            'scheme': 'http',
+            'path': path,
+            'raw_path': path.encode('utf-8'),
+            'query_string': b'',
+            'root_path': '',
+            'headers': [
+                (name.lower().encode('utf-8'), str(value).encode('utf-8'))
+                for name, value in (headers or {}).items()
+            ],
+            'client': ('127.0.0.1', 54321),
+            'server': ('127.0.0.1', 8765),
+        }
+        sent = []
+
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+        async def send(message):
+            sent.append(message)
+
+        asyncio.run(app(scope, receive, send))
+        status = next(
+            message['status'] for message in sent if message['type'] == 'http.response.start'
+        )
+        body = b''.join(
+            message.get('body', b'') for message in sent
+            if message['type'] == 'http.response.body'
+        )
+        return status, body
+
+    def test_routes_include_sse_messages_and_health(self):
+        app = build_http_app(config=load_transport_config(env={}))
+        paths = {getattr(route, 'path', None) for route in app.routes}
+        self.assertIn('/sse', paths)
+        self.assertIn('/messages', paths)
+        self.assertIn('/health', paths)
+
+    def test_health_open_without_token_and_requires_token_when_configured(self):
+        host = {'host': '127.0.0.1:8765'}
+        open_app = build_http_app(config=load_transport_config(env={}))
+        status, body = self._get(open_app, '/health', host)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['status'], 'ok')
+
+        guarded = build_http_app(config=load_transport_config(env={'MCP_AUTH_TOKEN': 'tk'}))
+        status, body = self._get(guarded, '/health', host)
+        self.assertEqual(status, 401)
+        self.assertIn('Bearer', body.decode('utf-8'))
+        status, _ = self._get(guarded, '/health', {**host, 'authorization': 'Bearer wrong'})
+        self.assertEqual(status, 401)
+        status, body = self._get(guarded, '/health', {**host, 'authorization': 'Bearer tk'})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['transport'], 'sse')
+
+    def test_transport_security_follows_config(self):
+        """DNS rebinding 保护必须显式开启，且白名单来自配置。"""
+        config = load_transport_config(env={
+            'MCP_ALLOWED_HOSTS': '127.0.0.1:*,mcp.local',
+            'MCP_ALLOWED_ORIGINS': 'http://localhost:5173',
+        })
+        security = build_transport_security(config)
+        self.assertTrue(security.enable_dns_rebinding_protection)
+        self.assertEqual(security.allowed_hosts, ['127.0.0.1:*', 'mcp.local'])
+        self.assertEqual(security.allowed_origins, ['http://localhost:5173'])
+
+    def test_dns_rebinding_protection_rejects_unknown_host(self):
+        """Host 不在白名单时拒绝建连，避免被恶意站点借浏览器访问本机服务。"""
+        app = build_http_app(config=load_transport_config(env={}))
+        with self.assertRaises(ValueError) as raised:
+            self._get(app, '/sse', {'host': 'evil.example.com'})
+        self.assertIn('validation failed', str(raised.exception).lower())
+
+
+class McpServiceProcessGateTest(TestCase):
+    """MCP-17：MCP 服务进程不启动分时更新器（分时更新只由 Django 服务进程负责）。"""
+
+    def _ready(self, argv, enabled=True):
+        from django.apps import apps as django_apps
+
+        app_config = django_apps.get_app_config('monitoring')
+        with mock.patch.object(settings, 'MONITORING_UPDATER_ENABLED', enabled), \
+                mock.patch.object(sys, 'argv', argv), \
+                mock.patch('apps.monitoring.updater.get_updater') as get_updater:
+            app_config.ready()
+        return get_updater
+
+    def test_mcp_service_process_skips_updater(self):
+        """`run_mcp_server` 管理命令进程不启动分时更新器。
+
+        `python -m mcp_server` 路径由 `bootstrap.setup_django()` 置
+        `MONITORING_UPDATER_ENABLED=0` 兜底（见 MCP-13 用例）。
+        """
+        for argv in (
+            ['manage.py', 'run_mcp_server'],
+            ['manage.py', 'run_mcp_server', '--port', '9100'],
+            ['manage.py', 'run_mcp_server', '--transport', 'sse'],
+        ):
+            get_updater = self._ready(argv)
+            get_updater.assert_not_called()
+
+    def test_disabled_setting_and_reloader_parent_skip_updater(self):
+        self._ready(['manage.py', 'runserver'], enabled=True).assert_not_called()
+        self._ready(['manage.py', 'run_mcp_server'], enabled=False).assert_not_called()
+
+    def test_runserver_child_process_starts_updater(self):
+        with mock.patch.dict(os.environ, {'RUN_MAIN': 'true'}):
+            get_updater = self._ready(['manage.py', 'runserver', '127.0.0.1:8000'])
+        get_updater.assert_called_once()
+        get_updater.return_value.start.assert_called_once()
