@@ -865,6 +865,85 @@ class IntradayUpdaterTest(TestCase):
         finally:
             updater_module.backfill_intraday = original
 
+    def test_startup_clear_wipes_all_once(self):
+        """服务启动时清空全部分时数据；每进程仅执行一次（幂等）。"""
+        from .models import IntradayPoint
+
+        past = datetime(2026, 9, 13, 1, 31, tzinfo=zoneinfo.ZoneInfo('UTC'))
+        now_pt = datetime(2026, 9, 14, 1, 31, tzinfo=zoneinfo.ZoneInfo('UTC'))
+        IntradayPoint.objects.create(
+            symbol=self.symbol, ts=past, price=Decimal('10.0'), change=Decimal('0'),
+            volume=100, amount=Decimal('1000'),
+        )
+        IntradayPoint.objects.create(
+            symbol=self.symbol, ts=now_pt, price=Decimal('10.5'), change=Decimal('1'),
+            volume=100, amount=Decimal('1050'),
+        )
+
+        self.updater._startup_clear(now=now_pt)
+        self.assertEqual(IntradayPoint.objects.count(), 0)
+        self.assertTrue(self.updater._startup_cleared)
+        # 第二次调用不再重复执行（幂等）
+        IntradayPoint.objects.create(
+            symbol=self.symbol, ts=now_pt, price=Decimal('10.6'), change=Decimal('2'),
+            volume=100, amount=Decimal('1060'),
+        )
+        self.updater._startup_clear(now=now_pt)
+        self.assertEqual(IntradayPoint.objects.count(), 1)
+
+    def test_open_clear_removes_history_during_trading(self):
+        """开盘（交易时段首轮）清理历史数据：删除早于当日当地零点的记录，当日数据保留。"""
+        import apps.monitoring.updater as updater_module
+        from .models import IntradayPoint
+
+        history = datetime(2026, 9, 11, 3, 0, tzinfo=zoneinfo.ZoneInfo('UTC'))  # 上周五
+        today_pt = datetime(2026, 9, 14, 1, 35, tzinfo=zoneinfo.ZoneInfo('UTC'))  # 周一 09:35 北京
+        IntradayPoint.objects.create(
+            symbol=self.symbol, ts=history, price=Decimal('10.0'), change=Decimal('0'),
+            volume=100, amount=Decimal('1000'),
+        )
+        IntradayPoint.objects.create(
+            symbol=self.symbol, ts=today_pt, price=Decimal('10.5'), change=Decimal('1'),
+            volume=100, amount=Decimal('1050'),
+        )
+
+        clear_calls = []
+        original = updater_module.clear_intraday
+        updater_module.clear_intraday = lambda before=None, now=None: clear_calls.append(before) or 1
+        try:
+            self.updater._maybe_open_clear(now=today_pt)
+            # 01:35 UTC 时 A（09:35 北京）与 HK（09:35 香港）同时处于交易时段 → 两个市场各自开盘清理
+            self.assertEqual(len(clear_calls), 2)
+            # A 市场清理边界为当日当地零点（2026-09-14 00:00 +08 == 2026-09-13 16:00 UTC）
+            self.assertIn(datetime(2026, 9, 13, 16, 0, tzinfo=zoneinfo.ZoneInfo('UTC')), clear_calls)
+            # 同一本地日重复调用不再触发（幂等）
+            self.updater._maybe_open_clear(now=today_pt)
+            self.assertEqual(len(clear_calls), 2)
+            # 非交易时段不触发
+            self.updater._market_clear_dates = {}
+            closed = datetime(2026, 9, 14, 8, 0, tzinfo=zoneinfo.ZoneInfo('UTC'))  # 北京 16:00 / 香港 16:00 已收盘
+            self.updater._maybe_open_clear(now=closed)
+            self.assertEqual(len(clear_calls), 2)
+        finally:
+            updater_module.clear_intraday = original
+
+    def test_startup_clear_failure_retries_next_round(self):
+        """启动清空抛异常时不置位，下一轮重试。"""
+        import apps.monitoring.updater as updater_module
+
+        def broken_clear(before=None, now=None):
+            raise RuntimeError('db busy')
+
+        original = updater_module.clear_intraday
+        updater_module.clear_intraday = broken_clear
+        try:
+            self.updater._startup_clear()
+            self.assertFalse(self.updater._startup_cleared)
+        finally:
+            updater_module.clear_intraday = original
+        self.updater._startup_clear()
+        self.assertTrue(self.updater._startup_cleared)
+
     def test_backfill_exception_does_not_lose_retry(self):
         """启动回填抛异常时置位不变，下一轮仍会重试。"""
         import apps.monitoring.updater as updater_module

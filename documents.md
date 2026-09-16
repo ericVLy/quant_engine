@@ -928,8 +928,9 @@ class IntradayPoint(models.Model):
 
 分时数据源更新由 **Django 服务进程内更新器** 自主管理（`apps/monitoring/updater.py`，随 `MonitoringConfig.ready()` 启动），**禁止单独的更新命令**（原 `manage.py sample_intraday` 已移除）：
 
-- 启动时执行开盘到当前的完整性回填（`backfill_intraday`）；**不完整时每轮重试直到完整**（覆盖启动瞬时故障，如 gm 终端连接未就绪），完整后跳过不再全表比对；
+- 启动时**清空全部分时数据**（2026-09-15：避免上次运行/前一交易日遗留点与新会话混叠；清空后由启动回填重建当日数据），再执行开盘到当前的完整性回填（`backfill_intraday`）；**不完整时每轮重试直到完整**（覆盖启动瞬时故障，如 gm 终端连接未就绪），完整后跳过不再全表比对；
 - 每 `MONITORING_UPDATER_INTERVAL` 秒（默认 60，环境变量可覆盖）执行一轮采样；
+- **市场开盘时清理历史数据**（2026-09-15）：每市场每本地日一次——该市场处于交易时段的首轮更新中，删除 `ts` 早于当日当地 00:00 的全部记录（往日历史），当日数据保留；非交易时段/周末不触发（UTC 23:00 收盘清理仍作兜底）；
 - UTC 23:00 自动触发当日 `clear_intraday`（每自然日最多一次，幂等）；
 - `MONITORING_UPDATER_ENABLED=0` 可整体关闭；test/migrate/shell 等管理命令进程不启动；
 - `manage.py clear_intraday` 保留为清理兜底（清理非更新，不写入数据）。
