@@ -66,35 +66,38 @@ class KLineViewSet(viewsets.GenericViewSet):
 
     @action(detail=False, methods=['post'], url_path='sync')
     def sync_kline(self, request):
-        """触发K线同步：POST 传入 symbol_code (或 'all'), start_date, end_date, adjust"""
+        """触发K线同步：POST 传入 symbol_code (或 'all'), start_date, end_date, adjust。
+
+        未提供 start_date 时按增量语义处理（服务端自动从库内最新日期之后拉取）。
+        """
         symbol_code = request.data.get('symbol')
         sync_type = request.data.get('sync_type', 'daily')
         start_date = request.data.get('start_date')
         end_date = request.data.get('end_date')
         adjust = request.data.get('adjust', 'qfq')
 
-        # 默认日期范围：最近30天
-        if not start_date:
-            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-        if not end_date:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+        # 请求窗口（用于日志记录）：缺省最近30天
+        log_start = start_date or (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        log_end = end_date or datetime.now().strftime('%Y-%m-%d')
+        # 未显式提供 start_date 时传 None，让服务端走增量判断（从库内最新日期之后拉取）
+        service_start = start_date or None
 
         if symbol_code == 'all':
-            results = sync_all_symbols(sync_type, start_date, end_date, adjust)
+            results = sync_all_symbols(sync_type, service_start, end_date or None, adjust)
             return Response({'status': 'completed', 'results': results})
         else:
             symbol = get_object_or_404(Symbol, code=symbol_code)
             added, skipped, error = sync_kline_for_symbol(
                 symbol, sync_type,
-                start_date=start_date,
+                start_date=service_start,
                 end_date=end_date,
                 adjust=adjust
             )
             KLineSyncLog.objects.create(
                 symbol=symbol,
                 sync_type=sync_type,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=log_start,
+                end_date=log_end,
                 records_added=added,
                 records_skipped=skipped,
                 status='success' if error is None else 'failed',

@@ -299,10 +299,26 @@ def fetch_kline_from_akshare(symbol, start_date, end_date, adjust='qfq'):
     return fetch_kline_from_ashare(symbol, start_date, end_date, adjust)
 
 
+def _fetch_existing_dates(symbol, table_name, db_alias, start_date, end_date):
+    """查询区间内已入库的日期列表（升序）。仅用于同步去重/缺口判断（写入路径允许 symbol_id 过滤）。"""
+    with connections[db_alias].cursor() as cursor:
+        cursor.execute(
+            f"SELECT date FROM {table_name} WHERE symbol_id = %s AND date BETWEEN %s AND %s ORDER BY date",
+            [symbol.id, start_date, end_date],
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
 def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=None, adjust='qfq'):
     """
     同步指定标的的 K 线数据
     返回: (records_added, records_skipped, error_msg)
+
+    增量优化：拉取前先查区间内已入库日期——
+    - 已覆盖整个请求区间（首尾都已有数据）→ 直接跳过远端拉取，省流量；
+    - 区间头部已覆盖（最早一条 <= start_date）→ 拉取窗口收窄为 (最新一条, end_date]；
+    - 区间头部未覆盖（可能有头部缺口）→ 保持全量拉取，由逐行去重兜底
+      （显式传入早于缺口的 start_date 可补齐历史缺口）。
     """
     if sync_type != 'daily':
         raise ValueError("当前仅支持日线同步")
@@ -318,6 +334,23 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
 
     table_name = ensure_kline_table(symbol)
     db_alias = get_kline_database_alias()
+
+    # ---- 增量判断：避免重复拉取已入库日期 ----
+    existing_dates = _fetch_existing_dates(symbol, table_name, db_alias, start_date, end_date)
+    if existing_dates:
+        min_existing, max_existing = existing_dates[0], existing_dates[-1]
+        if max_existing >= end_date and min_existing <= start_date:
+            # 区间首尾均已有数据：视为已覆盖（非交易日不产生数据），跳过远端拉取
+            logger.info(f"{symbol.code} {start_date}~{end_date} 已全部入库，跳过拉取")
+            return 0, len(existing_dates), None
+        if min_existing <= start_date and max_existing < end_date:
+            # 头部已覆盖：只拉最新一条之后的缺口
+            fetch_start = max_existing + timedelta(days=1)
+            if fetch_start > end_date:
+                return 0, len(existing_dates), None
+            logger.info(f"{symbol.code} 增量拉取 {fetch_start}~{end_date}（已有至 {max_existing}）")
+            start_date = fetch_start
+
     try:
         df = fetch_kline_from_ashare(symbol, start_date, end_date, adjust)
     except Exception as e:

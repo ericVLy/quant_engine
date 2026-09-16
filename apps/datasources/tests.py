@@ -406,7 +406,92 @@ class ServicesTest(TransactionTestCase):
         self.assertEqual(added, 0)
         self.assertEqual(skipped, 1)
         self.assertIsNone(error)
-        logger.info(f"新增 {added} 条，跳过 {skipped} 条")
+        # 增量优化：区间首尾均已有数据 → 不应发起任何远端拉取
+        mock_hist.assert_not_called()
+        logger.info(f"新增 {added} 条，跳过 {skipped} 条（未触发远端拉取）")
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_sync_kline_incremental_narrows_window(self, mock_hist):
+        """库内已有 2024-01-01~2024-01-05 中的 01-01 与 01-05，增量同步应只拉缺口之后的窗口。"""
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        for day, close in (('2024-01-01', '10.0'), ('2024-01-05', '10.4')):
+            runtime_model.objects.using('kline').create(
+                symbol_id=self.symbol_a.id,
+                date=date.fromisoformat(day),
+                open=Decimal('10.0'),
+                high=Decimal('10.5'),
+                low=Decimal('9.8'),
+                close=Decimal(close),
+                volume=1000000,
+                amount=Decimal('10200000'),
+                adj_factor=Decimal('1.0'),
+                turnover_rate=Decimal('0.5'),
+            )
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-08'],
+            '开盘': [10.0],
+            '收盘': [10.3],
+            '最高': [10.5],
+            '最低': [9.8],
+            '成交量': [1000000],
+            '成交额': [10200000],
+            '涨跌幅': [0.02],
+            '涨跌额': [0.2],
+            '换手率': [0.5],
+        })
+
+        added, skipped, error = sync_kline_for_symbol(
+            self.symbol_a,
+            start_date='2024-01-01',
+            end_date='2024-01-10',
+        )
+        self.assertIsNone(error)
+        self.assertEqual(added, 1)
+        # 头部已覆盖（min <= start）：拉取窗口收窄为 (max_existing, end] = 2024-01-06 起
+        mock_hist.assert_called_once()
+        kwargs = mock_hist.call_args.kwargs
+        self.assertEqual(kwargs['start_date'], date(2024, 1, 6))
+        self.assertEqual(kwargs['end_date'], date(2024, 1, 10))
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_sync_kline_head_gap_fetches_full_window(self, mock_hist):
+        """库内最早一条晚于 start_date（头部可能缺口）→ 保持全量拉取，由逐行去重兜底。"""
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        runtime_model.objects.using('kline').create(
+            symbol_id=self.symbol_a.id,
+            date=date(2024, 1, 5),
+            open=Decimal('10.0'),
+            high=Decimal('10.5'),
+            low=Decimal('9.8'),
+            close=Decimal('10.4'),
+            volume=1000000,
+            amount=Decimal('10200000'),
+            adj_factor=Decimal('1.0'),
+            turnover_rate=Decimal('0.5'),
+        )
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-01'],
+            '开盘': [10.0],
+            '收盘': [10.2],
+            '最高': [10.5],
+            '最低': [9.8],
+            '成交量': [1000000],
+            '成交额': [10200000],
+            '涨跌幅': [0.02],
+            '涨跌额': [0.2],
+            '换手率': [0.5],
+        })
+
+        added, skipped, error = sync_kline_for_symbol(
+            self.symbol_a,
+            start_date='2024-01-01',
+            end_date='2024-01-10',
+        )
+        self.assertIsNone(error)
+        mock_hist.assert_called_once()
+        kwargs = mock_hist.call_args.kwargs
+        self.assertEqual(kwargs['start_date'], date(2024, 1, 1))
+        self.assertEqual(kwargs['end_date'], date(2024, 1, 10))
 
     @patch('apps.datasources.services.ak.stock_zh_a_hist')
     def test_sync_all_symbols(self, mock_hist):

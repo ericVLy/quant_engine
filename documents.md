@@ -295,13 +295,13 @@ class Watchlist(models.Model):
 
 | 编号 | 需求描述 | 实现文件 |
 |------|----------|----------|
-| ~~D-01~~ | ~~数据源配置 CRUD（AkShare/TuShare/TDX/YFinance）~~ | ❌ **已移除（2026-09-15）**：用户自配第三方源不可行（系统无法适配异构数据结构）；`DataSource` 模型与 `/api/datasources/sources/` 已删除（迁移 0004），数据获取收敛为内置 ashare + gm 适配层 |
+| ~~D-01~~ | ~~数据源配置 CRUD（AkShare/TuShare/TDX/YFinance）~~ | ❌ **已移除（2026-09-15）**：用户自配第三方源不可行（系统无法适配异构数据结构）；`DataSource` 模型与 `/api/datasources/sources/` 已删除（迁移 0004），数据获取收敛为内置 ashare + gm 适配层；前端同步清理——`/datasources` 页移除数据源配置表格/新增/编辑对话框与 `datasourcesApi.sources/createSource/updateSource/deleteSource` 封装（页面保留快照/同步日志/K 线查询工具），`vue-tsc -b` 0 错误 + `vite build` 通过 |
 | D-02 | 实时快照存储（仅保留最新值，`OneToOneField`） | `models.py` (RealtimeSnapshot) |
 | D-03 | K线抽象基类（定义公共字段，不建表） | `models.py` (AbstractKLine) |
 | D-04 | A股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
 | D-05 | 港股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
 | D-06 | 美股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
-| D-07 | K线增量同步：按 symbol 生成表名并去重插入 | `services.py` (sync_kline_for_symbol) |
+| D-07 | K线增量同步：按 symbol 生成表名并去重插入 | ✅ 完成（`services.sync_kline_for_symbol`；**2026-09-15 增量优化**：拉取前先查区间内已入库日期——区间首尾均已有数据则**跳过远端拉取**（0 流量）；头部已覆盖则拉取窗口收窄为 `(最新一条, end]`（ashare count 按缺口天数计算，减小流量）；头部可能缺口时保持全量拉取由逐行去重兜底，显式传入早于缺口的 start_date 可补历史；API 未传 `start_date` 时走增量语义，`KLineSyncLog` 仍记录完整请求窗口） |
 | D-08 | K线同步日志（记录每次拉取状态） | `models.py` (KLineSyncLog) |
 | D-09 | K线查询接口（按标的 + 日期范围查询对应分表） | `views.py`, `services.py` |
 | D-10 | K线同步触发接口（单标的 / 全部） | `views.py`, `services.py` |
