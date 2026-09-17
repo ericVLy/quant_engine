@@ -23,6 +23,10 @@ class Command(BaseCommand):
             '--auth-token', dest='auth_token', default=None,
             help='Bearer 令牌，默认取 MCP_AUTH_TOKEN；绑定非回环地址时必填',
         )
+        parser.add_argument(
+            '--allow-trigger', dest='allow_trigger', action='store_true', default=False,
+            help='允许 trigger_plan_execution 写操作（等效 MCP_ALLOW_TRIGGER=1）',
+        )
 
     def handle(self, *args, **options):
         from mcp_server.server import main
@@ -36,4 +40,6 @@ class Command(BaseCommand):
             argv += ['--port', str(options['port'])]
         if options.get('auth_token'):
             argv += ['--auth-token', options['auth_token']]
+        if options.get('allow_trigger'):
+            argv += ['--allow-trigger']
         main(argv)

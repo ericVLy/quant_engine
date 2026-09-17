@@ -1,8 +1,8 @@
 ﻿# 量化交易系统 · 全模块需求文档
 
-> 版本：v2.11  
-> 日期：2026-09-15  
-> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口） · MCP 服务（模块11）已落地（`mcp_server` 包：**SSE（HTTP）为主传输** · 14 个工具 + 1 个概览资源 + `/health` · 默认只读 · 令牌鉴权与非回环绑定 fail-fast · 写操作需 `MCP_ALLOW_TRIGGER=1` · 36 个专项测试通过）
+> 版本：v2.12
+> 日期：2026-09-17
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口） · MCP 服务（模块11）已落地（`mcp_server` 包：**SSE（HTTP）为主传输** · 14 个工具 + 1 个概览资源 + `/health` · 默认只读 · 令牌鉴权与非回环绑定 fail-fast · 写操作支持 `MCP_ALLOW_TRIGGER=1` 或 `--allow-trigger` · 41 个专项测试通过）
 
 
 ## 一、项目概述
@@ -1174,6 +1174,26 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - `mcp_server/bootstrap.py` 默认 `DJANGO_SETTINGS_MODULE=quant_engine.settings.dev`（可用环境变量覆盖），并默认关闭分时更新器。
 - 传输配置（`MCP_TRANSPORT`/`MCP_HOST`/`MCP_PORT`/`MCP_AUTH_TOKEN`/`MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS`/`MCP_CORS_ORIGINS`）见模块11「传输、鉴权与运维」；MCP 客户端配置示例见 `README.md`「MCP 服务（AI 助手接入）」。
 
+#### 命令行写开关（MCP-18，2026-09-17）
+
+- ✅ 已完成：`--allow-trigger` 支持管理命令与包入口，适用于 SSE 和 stdio；等效于当前进程设置 `MCP_ALLOW_TRIGGER=1`。
+- 显式传入开关优先于环境变量（包括 `MCP_ALLOW_TRIGGER=0`）；未传参则沿用环境变量（`1` / `true` / `yes` 开启），未配置时仍为只读。此参数不接受附加值。
+- 只开放既有 `trigger_plan_execution` 门禁；仅创建 `pending SuiteRun`，不直接下单，不绕过 Plan/标的校验及非回环地址的令牌要求。
+- 无新增 REST API、数据模型、JSON 白名单字段或依赖；MCP 工具保持 14 个。SSE 客户端不能通过连接参数开启写权限；stdio 客户端可在启动 `args` 中追加 `"--allow-trigger"`。配置变更需重启 MCP 服务。
+
+```powershell
+& 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' 'c:\Users\PC\Documents\quant_platform\quant_engine\manage.py' run_mcp_server --port 8765 --allow-trigger
+& 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' -m mcp_server --transport stdio --allow-trigger
+```
+
+验证（2026-09-17）：MCP 专项 **41 个测试全部通过**（原 36 个 + 本次 5 个）。覆盖配置解析、入口转发、两种传输下的实际工具门禁、环境变量兼容及鉴权不可绕过；新增启动与触发测试使用 mock，不提交实盘订单。两个入口的 `--help` 均已验证。下方 2026-09-15 的 36 个用例记录为历史基线。
+
+完整回归（2026-09-17）：`manage.py test --noinput -v 0` **437 个测试全部通过（OK，Python 子进程退出码 0）**，包含跨模块联动；数量以该次无标签运行输出为准，不对各模块求和。日志中仍有既有动态 K 线模型重复注册警告。
+
+```powershell
+& 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' 'c:\Users\PC\Documents\quant_platform\quant_engine\manage.py' test mcp_server -v 1 --noinput
+```
+
 #### 测试（P1 阶段6）
 
 - `mcp_server/tests.py` 36 个用例：
@@ -1207,7 +1227,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 | `monitoring` | ✅ 已完成 | 65 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
-| `mcp_server` | ✅ 已完成 | 36 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun，见模块11） |
+| `mcp_server` | ✅ 已完成 | 41 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18） |
 
 > 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15）：✔ 402 个测试全部通过（OK）** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 

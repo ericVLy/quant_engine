@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -103,7 +104,8 @@ def create_server() -> MCPServer:
     @server.tool(
         description=(
             '为指定 Plan 与标的创建 pending SuiteRun（写操作）。'
-            '默认禁用；需环境变量 MCP_ALLOW_TRIGGER=1。'
+            '默认禁用；需环境变量 MCP_ALLOW_TRIGGER=1，'
+            '或启动 MCP 服务时加 --allow-trigger。'
         ),
     )
     def trigger_plan_execution(plan_id: int, symbols: list[str]) -> dict:
@@ -196,7 +198,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--transport', choices=('sse', 'stdio'), default=None)
     parser.add_argument('--host', default=None)
     parser.add_argument('--port', type=int, default=None)
-    parser.add_argument('--auth-token', dest='auth_token', default=None)
+    parser.add_argument(
+        '--auth-token', dest='auth_token', default=None,
+        help='Bearer 令牌，默认取 MCP_AUTH_TOKEN；绑定非回环地址时必填',
+    )
+    parser.add_argument(
+        '--allow-trigger', dest='allow_trigger', action='store_true', default=None,
+        help='允许 trigger_plan_execution 写操作（等效 MCP_ALLOW_TRIGGER=1）',
+    )
     return parser
 
 
@@ -207,7 +216,13 @@ def main(argv: list[str] | None = None) -> None:
         host=args.host,
         port=args.port,
         auth_token=args.auth_token,
+        allow_trigger=args.allow_trigger,
     )
+
+    # CLI 显式开启时回写当前进程环境，复用工具层的写操作门禁；
+    # 未传参数则保留环境变量，默认仍为只读。
+    if args.allow_trigger:
+        os.environ['MCP_ALLOW_TRIGGER'] = '1'
 
     from mcp_server.bootstrap import setup_django
 

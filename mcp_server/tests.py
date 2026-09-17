@@ -426,6 +426,102 @@ class McpTransportConfigTest(SimpleTestCase):
         self.assertEqual(kept.transport, 'sse')
         self.assertEqual(kept.port, 8765)
 
+    def test_allow_trigger_env_and_cli_override(self):
+        """MCP-10 配置面：写开关默认关闭，环境变量或 CLI 参数均可开启。"""
+        self.assertFalse(load_transport_config(env={}).allow_trigger)
+        self.assertTrue(
+            load_transport_config(env={'MCP_ALLOW_TRIGGER': '1'}).allow_trigger
+        )
+        self.assertTrue(
+            load_transport_config(env={'MCP_ALLOW_TRIGGER': 'yes'}).allow_trigger
+        )
+        cli_on = load_transport_config(env={}).with_overrides(allow_trigger=True)
+        self.assertTrue(cli_on.allow_trigger)
+        # CLI 未传参（None）时不得覆盖环境变量语义
+        cli_absent = load_transport_config(
+            env={'MCP_ALLOW_TRIGGER': '1'}
+        ).with_overrides(allow_trigger=None)
+        self.assertTrue(cli_absent.allow_trigger)
+
+    def test_cli_parser_accepts_allow_trigger(self):
+        """两个 CLI 入口（python -m mcp_server / manage.py run_mcp_server）均支持 --allow-trigger。"""
+        from mcp_server.server import _build_arg_parser
+
+        self.assertTrue(_build_arg_parser().parse_args(['--allow-trigger']).allow_trigger)
+        self.assertIsNone(_build_arg_parser().parse_args([]).allow_trigger)
+        self.assertTrue(
+            _build_arg_parser().parse_args(
+                ['--transport', 'sse', '--allow-trigger']
+            ).allow_trigger
+        )
+
+
+class McpTriggerCliTest(SimpleTestCase):
+    """MCP-18：两个启动入口的写开关转发、兼容性与安全边界。"""
+
+    def test_management_command_forwards_flag(self):
+        from django.core.management import call_command
+
+        for flags in ([], ['--allow-trigger']):
+            with self.subTest(flags=flags), mock.patch('mcp_server.server.main') as main:
+                call_command('run_mcp_server', *flags)
+                main.assert_called_once_with(flags)
+
+    def test_main_applies_gate_for_both_transports(self):
+        from mcp_server.server import main
+
+        for transport in ('sse', 'stdio'):
+            for env_value, flags, enabled in (
+                ('', [], False), ('0', [], False), ('1', [], True),
+                ('true', [], True), ('yes', [], True),
+                ('', ['--allow-trigger'], True), ('0', ['--allow-trigger'], True),
+            ):
+                with self.subTest(transport=transport, env=env_value, flags=flags):
+                    with (
+                        mock.patch.dict(os.environ, {'MCP_ALLOW_TRIGGER': env_value}, clear=True),
+                        mock.patch('mcp_server.bootstrap.setup_django'),
+                        mock.patch('mcp_server.server.create_server') as create,
+                        mock.patch('mcp_server.server.run_http_server') as run_http,
+                        mock.patch('apps.execution.services.trigger_plan', return_value=[]) as trigger,
+                    ):
+                        def check_gate(*args, **kwargs):
+                            if enabled:
+                                self.assertEqual(
+                                    tools_impl.trigger_plan_execution(1, ['000001'])['count'], 0,
+                                )
+                                trigger.assert_called_once_with(1, ['000001'])
+                            else:
+                                with self.assertRaises(PermissionError):
+                                    tools_impl.trigger_plan_execution(1, ['000001'])
+                                trigger.assert_not_called()
+
+                        run_http.side_effect = check_gate
+                        create.return_value.run.side_effect = check_gate
+                        main(['--transport', transport, *flags])
+                        if transport == 'sse':
+                            self.assertEqual(run_http.call_args.kwargs['config'].allow_trigger, enabled)
+                            create.assert_not_called()
+                        else:
+                            create.return_value.run.assert_called_once_with(transport='stdio')
+                            run_http.assert_not_called()
+                        self.assertEqual(
+                            os.environ['MCP_ALLOW_TRIGGER'], '1' if flags else env_value,
+                        )
+
+    def test_allow_trigger_does_not_bypass_bind_auth(self):
+        from mcp_server.server import main
+
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch('mcp_server.bootstrap.setup_django') as setup,
+            mock.patch('mcp_server.server.run_http_server') as run_http,
+        ):
+            with self.assertRaises(McpConfigError):
+                main(['--host', '0.0.0.0', '--allow-trigger'])
+            self.assertNotIn('MCP_ALLOW_TRIGGER', os.environ)
+            setup.assert_not_called()
+            run_http.assert_not_called()
+
 
 class McpHttpAppTest(SimpleTestCase):
     """MCP-15/16：SSE 应用装配 —— 端点、健康检查、Bearer 鉴权、DNS rebinding 保护。"""

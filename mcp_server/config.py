@@ -16,6 +16,7 @@ stdio 仅保留给本机 IDE 类客户端以子进程方式接入。
 | `MCP_ALLOWED_HOSTS` | `127.0.0.1:*,localhost:*,[::1]:*` | DNS rebinding 保护：允许的 Host |
 | `MCP_ALLOWED_ORIGINS` | `http://127.0.0.1:*,http://localhost:*` | DNS rebinding 保护：允许的 Origin |
 | `MCP_CORS_ORIGINS` | 空（不加 CORS 头） | 浏览器直连时允许的来源（逗号分隔） |
+| `MCP_ALLOW_TRIGGER` | 空（写操作关闭） | 置 `1`/`true`/`yes` 才允许 `trigger_plan_execution`；**命令行 `--allow-trigger` 等效** |
 """
 from __future__ import annotations
 
@@ -32,6 +33,11 @@ DEFAULT_ALLOWED_ORIGINS = ('http://127.0.0.1:*', 'http://localhost:*')
 DEFAULT_HEALTH_PATH = '/health'
 LOOPBACK_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1', '[::1]'})
 VALID_TRANSPORTS = ('sse', 'stdio')
+_TRUTHY = frozenset({'1', 'true', 'yes'})
+
+
+def _parse_bool(raw: str | None) -> bool:
+    return str(raw or '').strip().lower() in _TRUTHY
 
 
 class McpConfigError(ValueError):
@@ -63,6 +69,7 @@ class McpTransportConfig:
     allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
     cors_origins: tuple[str, ...] = ()
+    allow_trigger: bool = False
 
     @property
     def is_loopback(self) -> bool:
@@ -136,5 +143,6 @@ def load_transport_config(env: dict[str, str] | None = None) -> McpTransportConf
             _split_csv(source.get('MCP_ALLOWED_ORIGINS')) or DEFAULT_ALLOWED_ORIGINS
         ),
         cors_origins=tuple(_split_csv(source.get('MCP_CORS_ORIGINS'))),
+        allow_trigger=_parse_bool(source.get('MCP_ALLOW_TRIGGER')),
     )
     return config.validate()

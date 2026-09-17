@@ -311,7 +311,8 @@ def list_suite_runs(plan_id: int = 0, symbol: str = '', limit: int = 20) -> dict
 def trigger_plan_execution(plan_id: int, symbols: list[str]) -> dict[str, Any]:
     if os.getenv('MCP_ALLOW_TRIGGER', '').strip().lower() not in ('1', 'true', 'yes'):
         raise PermissionError(
-            'MCP 写操作已禁用。设置环境变量 MCP_ALLOW_TRIGGER=1 后重试。'
+            'MCP 写操作已禁用。设置环境变量 MCP_ALLOW_TRIGGER=1，'
+            '或通过命令行参数 --allow-trigger 启动 MCP 服务后重试。'
         )
     from apps.execution.services import trigger_plan
 
@@ -327,9 +328,9 @@ def trigger_plan_execution(plan_id: int, symbols: list[str]) -> dict[str, Any]:
 
 def system_overview_text() -> str:
     return (
-        'Quant Engine：本地优先的量化投研与交易系统。'
-        'Django 负责数据与 REST API；runner 独立进程负责 Plan 调度与 Suite 事件循环。'
-        '核心隐喻：Case（原子策略）→ Suite（DAG 编排）→ Plan（调度）→ SuiteRun/Order。'
-        'MCP 服务默认以 SSE（HTTP）传输暴露标的、K 线、策略元数据、告警与分时等只读视图；'
-        '触发 Plan 需 MCP_ALLOW_TRIGGER=1，且只创建 pending SuiteRun，不会直接下单。'
+        'Quant Engine：本地优先的量化投研与交易系统。\n'
+        'Django 负责数据与 REST API；runner 独立进程负责 Plan 调度与 Suite 事件循环。\n'
+        '核心隐喻：Case（原子策略）→ Suite（DAG 编排）→ Plan（调度）→ SuiteRun/Order。\n'
+        'MCP 服务默认以 SSE（HTTP）传输暴露标的、K 线、策略元数据、告警与分时等只读视图；\n'
+        '触发 Plan 需 MCP_ALLOW_TRIGGER=1（或启动参数 --allow-trigger），且只创建 pending SuiteRun，不会直接下单。\n'
     )
