@@ -942,7 +942,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 ```
 
 - 删除 `ts < --before`（默认当日 00:00 UTC）的全部记录。
-- Scheduler 在 UTC 23:00 自动触发（美股收盘后、A 股开盘前，全市场当日数据同时过期）。
+- 内部更新器在 **UTC 23:00** 自动触发（美股收盘后、A 股开盘前，全市场当日数据同时过期）；各市场**开盘时**另有一次「清理历史」动作（删除早于当日当地零点的记录）。
 - 也可次日开盘前手动兜底。
 
 #### API 端点
@@ -986,13 +986,13 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 | 交付物 | 说明 |
 |--------|------|
-| `apps/monitoring` 新 Django 应用 | `models.py`（IntradayPoint）、`market_calendar.py`、`snapshot_provider.py`、`services.py`、`updater.py`、`serializers.py`、`views.py`、`urls.py`、`admin.py`、`tests.py`（54 个专项测试） |
+| `apps/monitoring` 新 Django 应用 | `models.py`（IntradayPoint）、`market_calendar.py`、`snapshot_provider.py`、`services.py`、`updater.py`、`serializers.py`、`views.py`、`urls.py`、`admin.py`、`tests.py`（65 个专项测试） |
 | `IntradayPoint` | 主库 `default` 常规表；(symbol, ts) 唯一约束 + (symbol, -ts) 索引；ts 存 UTC；`sample_intraday` 按分钟对齐 `ts` 并用 `update_or_create` 覆盖（同分钟幂等） |
 | `market_calendar.py` | `MARKET_TIMEZONES` / `TRADING_SESSIONS` / `session_status()` / `in_trading_session()`；美股经 zoneinfo 自动处理 EDT/EST |
 | `snapshot_provider.py` | `MarketSnapshotProvider` 抽象 + `AkshareSpotProvider`（A `stock_zh_a_spot_em` / HK `stock_hk_spot_em` / US `stock_us_spot_em`）+ `GmSnapshotProvider`（gm SDK tick，A 股 SHSE/SZSE）+ `CompositeSnapshotProvider`（gm 主源 + akshare 回退）；与 `runner/fundamentals.py` 相同的依赖注入模式，测试 mock 不依赖网络 |
 | 管理命令 | ~~`manage.py sample_intraday`~~ **已移除（2026-09-14）**：分时数据更新由 Django 服务进程内更新器 `updater.py` 自主管理（启动回填 + 周期采样 + UTC 23:00 清理），禁止单独更新命令；`manage.py clear_intraday` 保留为清理兜底 |
 | API | `GET /api/monitoring/intraday/?symbol=`（当日序列，时间升序）· `GET /api/monitoring/intraday/realtime/?symbol=`（最新一条 + RealtimeSnapshot 合并）· `GET /api/monitoring/intraday/stream/?symbol=`（SSE 持久化推送）；**不走分页**；响应含 `market` / `timezone` / `session_status` / `pre_close` / `points[]`（`ts` 为 UTC ISO-8601，`local_time` 为市场本地 HH:MM） |
-| 内部更新器 + SSE（2026-09-14） | `updater.py`：`IntradayUpdater` 守护线程随 `MonitoringConfig.ready()` 启动（启动回填 → 每 60s 采样 → UTC 23:00 清理；`MONITORING_UPDATER_ENABLED`/`_INTERVAL` 配置；test/migrate/shell 进程不启动，runserver 仅 RUN_MAIN 子进程启动）；`views.stream`：`StreamingHttpResponse` SSE（`snapshot`→`tick`→`session`，interval 5~60s 缺省 15）；`sample_intraday` 管理命令已删除 |
+| 内部更新器 + SSE（2026-09-14，**2026-09-15 增补**） | `updater.py`：`IntradayUpdater` 守护线程随 `MonitoringConfig.ready()` 启动（**启动清空全表 → 启动回填 → 每 60s 采样 → 开盘清理历史 → UTC 23:00 兜底清理**；`MONITORING_UPDATER_ENABLED`/`_INTERVAL` 配置；test/migrate/shell/`run_mcp_server` 进程不启动，runserver 仅 RUN_MAIN 子进程启动）；`views.stream`：`StreamingHttpResponse` SSE（`snapshot`→`tick`→`session`，interval 5~60s 缺省 15）；`sample_intraday` 管理命令已删除 |
 
 设计落地说明：
 
@@ -1004,7 +1004,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - **标的代码字符串处理 · 指数/个股区分（2026-09-14）**：统一规则收敛于 `apps/watchlists/services.py`——`normalize_a_share_code`（剥前后缀、补零到 6 位）、`is_a_share_index`、`resolve_a_share_exchange`。指数专属段（399/880/930/931/932/980/899）纯前缀判定；**000xxx 二义段**（000001 既是平安银行也是上证指数）必须以 `exchange` 显式标注或 `sh` 前缀判为沪指数，缺省保守按深市个股。**原始代码带 `sh/sz/bj` 前缀（如库中 `code='sh000001'`）视为显式市场标记**：交易所解析在剥前缀**之前**依据原始代码判定（`resolve_a_share_exchange`），`gm_symbol_for` 传原始代码——已实测 `sh000001` → `SHSE.000001`（上证指数）而非深市个股。接入点：`monitoring.gm_symbol_for`（SHSE/SZSE/BJSE 前缀，含北交所）、`datasources.ashare._normalize_ashare_code`（sh/sz 前缀保留指数语义）、`watchlists.sync_market_data` 交易所解析、`monitoring.AkshareSpotProvider`（A 市场请求含指数时按需合并 `stock_zh_index_spot_sina` 指数行情，全个股请求不触发指数接口；`_normalize_returned_code` 兼容 sina `sh000300` 前缀）。专项测试：watchlists 3 个 + datasources 4 个 + monitoring 4 个（含 `test_gm_symbol_for_distinguishes_index_and_stock`、指数回退合并/跳过/二义缺省）。
 - 数值渲染：价格/涨跌幅以 Decimal 4 位小数字符串输出（与本项目其他模块 DecimalField 序列化一致）；单位随上游数据源原样存储，不做换算。
 - 采样标的缺省范围：已发布 Plan 的 `symbol_scope` 并集；无已发布 Plan 时回退全部标的（保证独立可用）。
-- 采样触发：默认由外部 cron / Windows 计划任务每分钟调用 `sample_intraday`（单机部署）；`clear_intraday` 建议挂在 UTC 23:00。
+- 采样触发：由 **Django 服务进程内的 `updater.py` 自主管理**（启动清空 → 启动回填 → 每 `MONITORING_UPDATER_INTERVAL` 秒采样 → 开盘清理 → UTC 23:00 兜底清理），**不存在外部 cron / 计划任务调用路径**（`sample_intraday` 命令已移除）。
 
 ##### 前端实施记录（2026-09-12）
 
@@ -1159,12 +1159,20 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 #### 装配与运行
 
 ```powershell
-.\.venv\Scripts\python.exe -m mcp_server      # stdio 传输（由 MCP 客户端以子进程方式拉起）
+# 推荐：SSE（HTTP）常驻服务，客户端按 URL 接入
+.\.venv\Scripts\python.exe .\manage.py run_mcp_server --port 8765
+# 需要对外暴露时必须配令牌（否则拒绝启动）：--host 0.0.0.0 --auth-token <token>
+
+# 等价包入口
+.\.venv\Scripts\python.exe -m mcp_server --transport sse
+
+# 本机 IDE 客户端：stdio 子进程
+.\.venv\Scripts\python.exe -m mcp_server --transport stdio
 ```
 
-- `mcp_server/server.py::create_server()` 装配 `MCPServer`（name/title/description/version/instructions）；`__main__.py` → `server.main()` → `bootstrap.setup_django()` → `run(transport='stdio')`。
+- `mcp_server/server.py::create_server()` 装配 `MCPServer`（工具/资源/`/health`）；`build_http_app()` 装配 SSE ASGI 应用（DNS rebinding 保护 + Bearer 鉴权 + 可选 CORS）；`run_http_server()` 以 uvicorn 常驻监听；`__main__.py` → `server.main()`（解析 `--transport/--host/--port/--auth-token`）→ `bootstrap.setup_django()`。
 - `mcp_server/bootstrap.py` 默认 `DJANGO_SETTINGS_MODULE=quant_engine.settings.dev`（可用环境变量覆盖），并默认关闭分时更新器。
-- MCP 客户端配置示例见 `README.md`「MCP 服务（AI 助手接入）」。
+- 传输配置（`MCP_TRANSPORT`/`MCP_HOST`/`MCP_PORT`/`MCP_AUTH_TOKEN`/`MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS`/`MCP_CORS_ORIGINS`）见模块11「传输、鉴权与运维」；MCP 客户端配置示例见 `README.md`「MCP 服务（AI 助手接入）」。
 
 #### 测试（P1 阶段6）
 
@@ -1190,18 +1198,18 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 模块 | 状态 | 测试用例数 | 完成度 |
 |------|------|------------|--------|
 | `users` | ✅ 已完成 | 5 通过 | 100% |
-| `watchlists` | ✅ 已完成 | 18 通过 | 100% |
-| `datasources` | ✅ 已完成 | 24 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步/基本面缓存） |
-| `execution` | 🟢 执行闭环完成 | 77 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪） |
+| `watchlists` | ✅ 已完成 | 22 通过 | 100% |
+| `datasources` | ✅ 已完成 | 30 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步（**含增量优化**）/基本面缓存） |
+| `execution` | 🟢 执行闭环完成 | 84 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
 | `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
-| `monitoring` | ✅ 已完成 | 54 通过 | 100%（后端模型/内部更新器/SSE 推送/API + 启动完整性回填 + 前端 ECharts 分时监控页均已落地，见模块9） |
+| `monitoring` | ✅ 已完成 | 65 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 | `mcp_server` | ✅ 已完成 | 36 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun，见模块11） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15，D-01/`DataSource` 移除后）：✔ 397 个测试全部通过（OK）**。根因定位：此前的 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15）：✔ 402 个测试全部通过（OK）** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 
 
 ## 五、待办事项汇总
@@ -1283,7 +1291,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 |------|----------|------------|----------|------|
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
 | 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验、交易失败告警通道已完成；剩余真实交易环境验证） |
-| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、加密、日志清理、**分时监控** | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**、**分时监控模块9 已完成**（见模块9）；`auth_info` 加密、日志清理待做；多实例治理已随单机部署目标降为 P4） |
+| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、日志清理、**分时监控** | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**、**分时监控模块9 已完成**（见模块9）；**日志清理（N-04）与 PII/日志卫生（N-05 剩余）待做**；~~`auth_info` 加密~~已随 D-01 移除而取消；多实例治理已随单机部署目标降为 P4） |
 | 4 | P1 产品体验增强 | **策略快速创建向导（模块10）**：3 步向导一键生成「Case/Suite/Plan 并发布」 | 模块10 设计 | ✅ 已完成（2026-09-14，见模块10 前端实施记录） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
@@ -1356,16 +1364,16 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P0 阶段3 | `suites` CRUD、拓扑、DAG 与发布快照测试 | ✅ 10 个通过 | ✅ 画布前端拓扑测试已落地（Designer 页对接 topology 读写/发布接口并经 `vue-tsc` + `vite build` 验证；边条件操作符测试已并入 P1 阶段2 完成） |
 | P0 阶段4 | `plans` CRUD、发布、标的解析、调度与版本管理测试 | ✅ 13 个通过 | ~~多实例调度治理测试~~（已随任务降级 P4：单机部署单实例无需验证，见 5.1.2） |
 | P0 阶段5 | `runner`、编排（tests_orchestration）、gm SDK 和 execution 联动测试 | ✅ 71 个通过（含编排、Cron 边界、WorkerPool 重试失败传播、数据上下文、订单生命周期用例） | 生产行情、风控边界、真实交易环境测试 |
-| P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；并发资金扣减待补 |
+| P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；~~并发资金扣减待补~~ → ✅ 已完成（三层行级锁原子扣减，见 5.1.1） |
 | P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，预存失败修复后）**：✔ **403 个测试全部通过**。根因：21 个失败全部为测试环境/用例缺陷（arcis 默认限流 429、gm 昨收用例时间炸弹、Decimal 字符串断言依赖 MySQL 精度展示），非业务缺陷；已新增 `quant_engine/settings/test.py` 隔离限流并修正 3 处用例 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，多次变更后）**：✔ **402 个测试全部通过**（D-01/`DataSource` 移除 → 397；K 线增量同步 +2；分时启动清空/开盘清理 +3）。根因：早期 21 个失败全部为测试环境/用例缺陷（arcis 默认限流 429、gm 昨收用例时间炸弹、Decimal 字符串断言依赖 MySQL 精度展示），非业务缺陷；已新增 `quant_engine/settings/test.py` 隔离限流并修正 3 处用例 |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
 | P1 阶段2 | Suite 拓扑完整性校验专项测试 | ✅ 5 个通过（跨树入边、重复边、非法权重、孤立节点、合法递归子 Suite） | — |
 | P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；~~datasources `test_list_datasources_paginated`~~ 已随 D-01 移除；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
-| P1 阶段4 | 分时监控专项测试 | ✅ 54 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
+| P1 阶段4 | 分时监控专项测试 | ✅ 65 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等/**启动清空（全清一次 + 失败重试）**/**开盘清理（交易时段触发、边界为当地零点、同日幂等、收盘不触发）**）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
 | P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 36 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
 
@@ -1385,8 +1393,8 @@ Suite 边条件操作符 → 拓扑完整性校验
 | N-01 | 所有 API 支持分页 | ✅ 已实现；P1；关联开发任务：API 统一分页（见 5.1.1）；关联测试任务：P1 阶段3 |
 | N-02 | API 响应时间 < 500ms（不含外部数据源调用） | P2 |
 | N-03 | 策略配置变更支持热加载（无需重启服务） | ✅ 已实现；P0；关联开发任务：PlanRegistry/调度配置刷新；关联测试任务：5.2-4 |
-| N-04 | 执行日志保留 30 天（自动清理） | P2 |
-| N-05 | ~~敏感信息加密存储（数据源 `auth_info`）~~ → **随 D-01/`DataSource` 模块移除而取消**（2026-09-15）：用户自配第三方数据源已删除，`auth_info` 字段不复存在；剩余范围收敛为 PII 与日志卫生（账户 ID / 联系方式 / 交易明细不进日志与通知明文） | P1 |
+| N-04 | 执行日志保留 30 天（自动清理） | P2；关联开发任务：日志清理（5.1.2，待做） |
+| N-05 | ~~敏感信息加密存储（数据源 `auth_info`）~~ → **随 D-01/`DataSource` 模块移除而取消**（2026-09-15）：用户自配第三方数据源已删除，`auth_info` 字段不复存在；剩余范围收敛为 PII 与日志卫生（账户 ID / 联系方式 / 交易明细不进日志与通知明文） | P1；关联开发任务：PII/日志卫生（5.1.2，待做） |
 
 
 ## 六、附录

@@ -174,10 +174,10 @@ class OrderViewSet(viewsets.ModelViewSet):
 
 
 class AlertChannelViewSet(viewsets.ModelViewSet):
-    """告警渠道配置管理"""
+    """告警渠道配置管理（管理员功能：渠道含收件人邮箱等 PII，见 N-05 权限分级）"""
     queryset = AlertChannel.objects.all()
     serializer_class = AlertChannelSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAdminUser]
     filterset_fields = ['channel_type', 'is_enabled', 'min_severity']
     
     def perform_update(self, serializer):
@@ -285,6 +285,6 @@ class AlertViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'status': 'ok', 'message': '告警通知已重新发送'})
         except Exception as e:
             return Response(
-                {'detail': f'发送通知失败: {str(e)}'},
+                {'detail': f'发送通知失败: {redact_text(str(e))}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

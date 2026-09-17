@@ -125,7 +125,13 @@ class AlertChannelSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = AlertChannel
-        fields = '__all__'
+        # 显式白名单（弃用 '__all__'）：渠道配置含收件人邮箱等 PII，新增字段须显式放行（N-05）
+        fields = (
+            'id', 'channel_type', 'channel_type_display', 'is_enabled',
+            'email_recipients', 'email_subject_prefix',
+            'min_severity', 'min_severity_display', 'alert_types',
+            'created_at', 'updated_at',
+        )
         read_only_fields = ('created_at', 'updated_at')
     
     def validate_alert_types(self, value):

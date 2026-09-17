@@ -1,10 +1,15 @@
+import logging
 from datetime import datetime
 from threading import Event
+
+from django.conf import settings
 
 from apps.watchlists.services import resolve_symbol_scope
 
 from .queue import TaskQueue
 from .registry import PlanRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class Scheduler:
@@ -17,6 +22,7 @@ class Scheduler:
         self.poll_interval = poll_interval
         self._enqueued = set()
         self._stop_event = Event()
+        self._last_purge_date = None
 
     def due_plans(self, now):
         """从注册中心（热加载）读取已发布的时间驱动 Plan，命中 Cron 者返回。"""
@@ -91,8 +97,31 @@ class Scheduler:
         self._stop_event.set()
 
     def run_forever(self, stop_event=None, clock=datetime.now):
-        """持续刷新数据库配置并轮询 Cron，直到收到停止请求。"""
+        """持续刷新数据库配置并轮询 Cron，直到收到停止请求。
+
+        同时在每轮执行一次「执行日志生命周期清理」门禁（每日至多一次，见 N-04），
+        清理失败只记日志、不影响调度。
+        """
         event = stop_event or self._stop_event
         while not event.is_set():
-            self.poll_once(clock())
+            now = clock()
+            self.poll_once(now)
+            self._maybe_purge_logs(now)
             event.wait(self.poll_interval)
+
+    def _maybe_purge_logs(self, now):
+        """每日一次清理过期执行痕迹（N-04）；受 settings 开关控制。"""
+        if not getattr(settings, 'EXECUTION_LOG_RETENTION_ENABLED', True):
+            return None
+        today = now.date()
+        if self._last_purge_date == today:
+            return None
+        from apps.execution.retention import purge_execution_history
+
+        try:
+            stats = purge_execution_history(now=now)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception('执行日志清理失败，下一轮重试')
+            return None
+        self._last_purge_date = today
+        return stats

@@ -102,6 +102,10 @@ import os  # noqa: E402  # pylint: disable=wrong-import-position
 MONITORING_UPDATER_ENABLED = os.getenv('MONITORING_UPDATER_ENABLED', '1').lower() in {'1', 'true', 'yes'}
 MONITORING_UPDATER_INTERVAL = int(os.getenv('MONITORING_UPDATER_INTERVAL', '60'))
 
+# 执行日志生命周期（N-04）：默认保留 30 天，Scheduler 每日自动清理一次
+EXECUTION_LOG_RETENTION_ENABLED = os.getenv('EXECUTION_LOG_RETENTION_ENABLED', '1').lower() in {'1', 'true', 'yes'}
+EXECUTION_LOG_RETENTION_DAYS = int(os.getenv('EXECUTION_LOG_RETENTION_DAYS', '30'))
+
 # DRF 全局配置
 REST_FRAMEWORK = {
     # N-01：所有列表接口统一分页

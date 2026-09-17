@@ -1,3 +1,5 @@
+from .redaction import redact_text, mask_email
+
 """
 告警服务模块：提供应用内通知和邮件通知功能
 """
@@ -118,12 +120,12 @@ class AlertService:
                     if channel.channel_type == 'in_app':
                         self._send_in_app_notification(alert, channel)
                     elif channel.channel_type == 'email':
-                        print("!!!!!!发送邮件通知!!!!!!!!!!!")
                         self._send_email_notification(alert, channel)
             except Exception as e:
-                logger.error(f"发送告警通知失败 (渠道: {channel.channel_type}): {e}")
+                # N-05 日志卫生：异常消息可能夹带 PII/栈细节，脱敏后再入日志与库
+                logger.error(f"发送告警通知失败 (渠道: {channel.channel_type}): {redact_text(str(e))}")
                 # 记录通知错误
-                alert.notification_error += f"{channel.channel_type}: {str(e)}\n"
+                alert.notification_error += f"{channel.channel_type}: {redact_text(str(e))}\n"
                 alert.save(update_fields=['notification_error'])
     
     def _send_in_app_notification(self, alert: Alert, channel: AlertChannel):
@@ -144,7 +146,7 @@ class AlertService:
             logger.info(f"应用内通知已发送: {alert.title}")
             
         except Exception as e:
-            logger.error(f"发送应用内通知失败: {e}")
+            logger.error(f"发送应用内通知失败: {redact_text(str(e))}")
             raise
     
     def _send_email_notification(self, alert: Alert, channel: AlertChannel):
@@ -165,12 +167,12 @@ class AlertService:
             # 检查邮件配置
             if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
                 logger.warning("邮件服务器未配置，跳过发送邮件通知")
-                print("!!!!!!邮件服务器未配置，跳过发送邮件通知!!!!!!!!!!!")
                 return
             
             # 构建邮件主题
             subject = f"{channel.email_subject_prefix} [{alert.severity.upper()}] {alert.title}"
-            logger.info(f"准备发送邮件: 主题={subject}, 收件人={recipients}")
+            # N-05 PII：收件人邮箱为个人信息，日志只保留脱敏形态
+            logger.info(f"准备发送邮件: 主题={subject}, 收件人={[mask_email(r) for r in recipients]}")
             
             # 构建邮件内容
             context = {
@@ -186,10 +188,11 @@ class AlertService:
                 html_message = render_to_string('emails/alert_notification.html', context)
                 logger.info("HTML邮件模板渲染成功")
             except Exception as e:
-                logger.warning(f"渲染HTML邮件模板失败，使用纯文本格式: {e}")
+                logger.warning(f"渲染HTML邮件模板失败，使用纯文本格式: {redact_text(str(e))}")
                 html_message = None
             
             # 构建纯文本内容（备用）
+            # N-05：邮件正文不夹带异常栈与 PII 明文（邮箱/手机号/账户与订单 UUID/密钥串）
             text_message = f"""
 告警类型: {alert.get_alert_type_display()}
 严重程度: {alert.get_severity_display()}
@@ -197,7 +200,7 @@ class AlertService:
 时间: {alert.created_at.strftime('%Y-%m-%d %H:%M:%S')}
 错误代码: {alert.error_code or '无'}
 详细消息:
-{alert.message}
+{redact_text(alert.message)}
 """
             # 关联信息
             if alert.plan:
@@ -211,7 +214,6 @@ class AlertService:
             
             # 发送邮件
             logger.info("开始发送邮件...")
-            # print("!!!!!!开始发送邮件!!!!!!!!!!!")
             send_mail(
                 subject=subject,
                 message=text_message,
@@ -221,16 +223,15 @@ class AlertService:
                 fail_silently=False
             )
             logger.info("邮件发送成功")
-            # print("!!!!!!邮件发送成功!!!!!!!!!!!")
             # 标记邮件通知已发送
             alert.email_notified = True
             alert.save(update_fields=['email_notified'])
             logger.info(f"邮件通知标记已设置: email_notified={alert.email_notified}")
             
-            logger.info(f"邮件通知已发送: {alert.title} -> {recipients}")
+            logger.info(f"邮件通知已发送: {alert.title} -> {[mask_email(r) for r in recipients]}")
             
         except Exception as e:
-            logger.error(f"发送邮件通知失败: {e}")
+            logger.error(f"发送邮件通知失败: {redact_text(str(e))}")
             raise
     
     def create_order_failed_alert(

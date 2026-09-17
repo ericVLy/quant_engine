@@ -53,16 +53,21 @@ LOGGING = {
             "style": "{",
         },
     },
+    "filters": {
+        "redaction": {"()": "apps.execution.redaction.RedactionLogFilter"},
+    },
     "handlers": {
         "file": {
             'formatter': 'verbose',
             "level": "INFO",
+            "filters": ["redaction"],
             "class": "logging.FileHandler",
             "filename": os.path.join(__log_path__, 
                                         f"django_logfile_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S_%f')[:23]}.log"),
         },
         "console": {
             "level": "INFO",
+            "filters": ["redaction"],
             "class": "logging.StreamHandler",
             "formatter": "verbose"
         }
