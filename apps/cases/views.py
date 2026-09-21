@@ -5,6 +5,7 @@ from rest_framework.response import Response
 
 from .models import Case, CaseVersion
 from .serializers import CaseSerializer, CaseVersionSerializer, validate_case_schema
+from .services import CaseError, delete_case
 
 
 class CaseViewSet(viewsets.ModelViewSet):
@@ -23,13 +24,13 @@ class CaseViewSet(viewsets.ModelViewSet):
         return queryset
 
     def destroy(self, request, *args, **kwargs):
-        case = self.get_object()
-        if case.suites.exists():
+        try:
+            delete_case(self.get_object())
+        except CaseError as exc:
             return Response(
-                {'detail': 'Case 已被 Suite 引用，不能删除'},
+                {'detail': str(exc)},
                 status=status.HTTP_409_CONFLICT,
             )
-        case.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'])

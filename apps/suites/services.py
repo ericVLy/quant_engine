@@ -7,6 +7,20 @@ class SuiteError(Exception):
     """Raised when a Suite cannot be changed or published."""
 
 
+def delete_suite(suite):
+    """Delete a Suite only when no Plan references it.
+
+    Args:
+        suite: ``suites.models.Suite`` 实例。
+
+    Raises:
+        SuiteError: Suite 已被 Plan 引用（REST 语义 409 Conflict）。
+    """
+    if suite.plans.exists():
+        raise SuiteError('Suite 已被 Plan 引用，不能删除')
+    suite.delete()
+
+
 def validate_event_condition_obj(value):
     """Strictly validate event_condition JSON for topology edges."""
     if not isinstance(value, dict):

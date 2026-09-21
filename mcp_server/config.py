@@ -17,6 +17,7 @@ stdio 仅保留给本机 IDE 类客户端以子进程方式接入。
 | `MCP_ALLOWED_ORIGINS` | `http://127.0.0.1:*,http://localhost:*` | DNS rebinding 保护：允许的 Origin |
 | `MCP_CORS_ORIGINS` | 空（不加 CORS 头） | 浏览器直连时允许的来源（逗号分隔） |
 | `MCP_ALLOW_TRIGGER` | 空（写操作关闭） | 置 `1`/`true`/`yes` 才允许 `trigger_plan_execution`；**命令行 `--allow-trigger` 等效** |
+| `MCP_ALLOW_MUTATE` | 空（写操作关闭） | 置 `1`/`true`/`yes` 才允许配置写工具（创建/编辑/删除 Case、Suite、Plan，MCP-20）；**命令行 `--allow-mutate` 等效**；与 `MCP_ALLOW_TRIGGER` 相互独立（读取见 `mcp_server/mutations.py`） |
 """
 from __future__ import annotations
 

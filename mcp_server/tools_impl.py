@@ -525,4 +525,6 @@ def system_overview_text() -> str:
         '核心隐喻：Case（原子策略）→ Suite（DAG 编排）→ Plan（调度）→ SuiteRun/Order。\n'
         'MCP 服务默认以 SSE（HTTP）传输暴露标的、K 线、策略元数据、告警与分时等只读视图；\n'
         '触发 Plan 需 MCP_ALLOW_TRIGGER=1（或启动参数 --allow-trigger），且只创建 pending SuiteRun，不会直接下单。\n'
+        '创建/编辑/删除 Case、Suite、Plan 的配置写操作默认禁用：需 MCP_ALLOW_MUTATE=1 或 --allow-mutate，'
+        '且只改 draft 配置，不发布、不启动、不下单；发布与启停仍走 REST 动作接口。\n'
     )

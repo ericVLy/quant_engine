@@ -1,7 +1,7 @@
 """MCP 服务（模块11）测试：工具门面 + 装配层 + SSE 传输与安全边界。
 
-需求编号：MCP-01 ~ MCP-17（见 documents.md 模块11）。
-只读工具直接查库；写操作仅"创建 pending SuiteRun"，不涉及任何真实下单。
+需求编号：MCP-01 ~ MCP-20（见 documents.md 模块11）。
+只读工具直接查库；写操作仅"创建 pending SuiteRun"与"受控配置写"，不涉及任何真实下单。
 """
 import ast
 import asyncio
@@ -50,6 +50,16 @@ EXPECTED_TOOL_NAMES = {
     'get_intraday_series',
     'list_suite_runs',
     'trigger_plan_execution',
+    'create_case',
+    'update_case',
+    'delete_case',
+    'create_suite',
+    'update_suite',
+    'update_suite_topology',
+    'delete_suite',
+    'create_plan',
+    'update_plan',
+    'delete_plan',
 }
 
 
@@ -394,10 +404,11 @@ class McpToolSchemaTest(SimpleTestCase):
         self.assertEqual(missing, {})
 
     def test_schema_variables_match_facade_signature(self):
-        """MCP-19：入参名与必填项集合必须与 tools_impl 门面签名逐一对应。"""
+        """MCP-19：入参名与必填项集合必须与门面签名逐一对应（读/触发→tools_impl，写→mutations）。"""
         for name, tool in self._tools().items():
             with self.subTest(tool=name):
-                parameters = inspect.signature(getattr(tools_impl, name)).parameters
+                facade = self._facade(name)
+                parameters = inspect.signature(facade).parameters
                 self.assertEqual(set(self._variables(tool)), set(parameters))
                 self.assertEqual(
                     set(tool.input_schema.get('required') or []),
@@ -412,7 +423,7 @@ class McpToolSchemaTest(SimpleTestCase):
         """MCP-19：工具级说明非空，门面 docstring 逐个变量给出 Args/Returns。"""
         for name, tool in self._tools().items():
             with self.subTest(tool=name):
-                facade = getattr(tools_impl, name)
+                facade = self._facade(name)
                 self.assertTrue(str(tool.description or '').strip())
                 docstring = inspect.getdoc(facade) or ''
                 self.assertIn('Returns:', docstring)
@@ -421,6 +432,15 @@ class McpToolSchemaTest(SimpleTestCase):
                     self.assertIn('Args:', docstring)
                 for variable in signature.parameters:
                     self.assertIn(f'{variable}:', docstring)
+
+    @staticmethod
+    def _facade(name: str):
+        """按工具名取门面函数：写操作在 ``mutations``，其余在 ``tools_impl``。"""
+        from mcp_server import mutations
+
+        if name in mutations.__all__:
+            return getattr(mutations, name)
+        return getattr(tools_impl, name)
 
 
 class McpVariablesDocumentationTest(SimpleTestCase):
@@ -431,7 +451,7 @@ class McpVariablesDocumentationTest(SimpleTestCase):
 
         from mcp_server.server import _build_arg_parser
 
-        mcp_options = {'transport', 'host', 'port', 'auth_token', 'allow_trigger'}
+        mcp_options = {'transport', 'host', 'port', 'auth_token', 'allow_trigger', 'allow_mutate'}
         parsers = {
             'python -m mcp_server': _build_arg_parser(),
             'manage.py run_mcp_server': Command().create_parser('manage.py', 'run_mcp_server'),
@@ -736,3 +756,310 @@ class McpServiceProcessGateTest(TestCase):
             get_updater = self._ready(['manage.py', 'runserver', '127.0.0.1:8000'])
         get_updater.assert_called_once()
         get_updater.return_value.start.assert_called_once()
+
+
+class McpMutationsTest(TestCase):
+    """MCP-20：配置写门面（默认禁用 + 开启后与 REST 同源校验 + 409 语义）。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='mcp_mut', password='test')
+        self.case = Case.objects.create(
+            name='mut-case', node_type='signal',
+            params={'trigger': {'event_type': 'SUITE_INIT'}}, created_by=self.user,
+        )
+        self.suite = Suite.objects.create(name='mut-suite', created_by=self.user)
+        self.plan = Plan.objects.create(
+            name='mut-plan', root_suite=self.suite,
+            trigger_type='manual', symbol_scope={'type': 'all'}, created_by=self.user,
+        )
+
+    def test_all_mutations_blocked_by_default(self):
+        """MCP-20：默认（无 MCP_ALLOW_MUTATE）10 个写操作全部 PermissionError，不落库。"""
+        from mcp_server import mutations
+
+        with self.assertRaises(PermissionError):
+            mutations.create_case('x', 'signal')
+        with self.assertRaises(PermissionError):
+            mutations.update_case(self.case.id, name='x')
+        with self.assertRaises(PermissionError):
+            mutations.delete_case(self.case.id)
+        with self.assertRaises(PermissionError):
+            mutations.create_suite('x')
+        with self.assertRaises(PermissionError):
+            mutations.update_suite(self.suite.id, name='x')
+        with self.assertRaises(PermissionError):
+            mutations.update_suite_topology(self.suite.id, [], [])
+        with self.assertRaises(PermissionError):
+            mutations.delete_suite(self.suite.id)
+        with self.assertRaises(PermissionError):
+            mutations.create_plan('x', self.suite.id)
+        with self.assertRaises(PermissionError):
+            mutations.update_plan(self.plan.id, name='x')
+        with self.assertRaises(PermissionError):
+            mutations.delete_plan(self.plan.id)
+        self.assertEqual(Case.objects.filter(name='x').count(), 0)
+        self.assertEqual(Suite.objects.filter(name='x').count(), 0)
+        self.assertEqual(Plan.objects.filter(name='x').count(), 0)
+
+    def test_switch_is_independent_from_trigger_switch(self):
+        """MCP-20：开启 MCP_ALLOW_TRIGGER 不会连带开启配置写（反之亦然）。"""
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_TRIGGER': '1'}):
+            with self.assertRaises(PermissionError):
+                mutations.create_case('x', 'signal')
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(PermissionError):
+                tools_impl.trigger_plan_execution(self.plan.id, ['000001'])
+
+    def test_case_create_update_delete_roundtrip(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            created = mutations.create_case(
+                'round-case', 'executor',
+                params={'order': {'direction': 'buy', 'price': 10, 'volume': 100}},
+            )
+            self.assertEqual(created['status'], 'draft')
+            self.assertEqual(created['version'], 1)
+            self.assertEqual(created['params']['order']['volume'], 100)
+
+            updated = mutations.update_case(created['id'], name='round-case-2')
+            self.assertEqual(updated['name'], 'round-case-2')
+            self.assertEqual(updated['node_type'], 'executor')
+
+            deleted = mutations.delete_case(created['id'])
+        self.assertEqual(deleted, {'deleted': 'case', 'id': created['id']})
+        self.assertFalse(Case.objects.filter(pk=created['id']).exists())
+
+    def test_case_rejects_whitelist_and_registry_violations(self):
+        """MCP-20：params 白名单 / 未注册事件 / 非法 order 与 REST 同源拒绝。"""
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(ValueError):
+                mutations.create_case('bad', 'signal', params={'evil': 1})
+            with self.assertRaises(ValueError):
+                mutations.create_case('bad', 'signal', params={'trigger': {'event_type': 'NOPE'}})
+            with self.assertRaises(ValueError):
+                mutations.create_case(
+                    'bad', 'executor',
+                    params={'order': {'direction': 'buy', 'price': 0, 'volume': 100}},
+                )
+            with self.assertRaises(ValueError):
+                mutations.update_case(999999, name='x')
+
+    def test_delete_case_conflict_when_referenced(self):
+        from mcp_server import mutations
+
+        self.suite.cases.add(self.case)
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.delete_case(self.case.id)
+        self.assertTrue(Case.objects.filter(pk=self.case.id).exists())
+
+    def test_suite_create_update_topology_delete_roundtrip(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            created = mutations.create_suite(
+                'round-suite', aggregate_method='vote', case_ids=[self.case.id],
+            )
+            self.assertEqual(created['status'], 'draft')
+            self.assertEqual(created['cases'], [self.case.id])
+
+            updated = mutations.update_suite(created['id'], name='round-suite-2')
+            self.assertEqual(updated['name'], 'round-suite-2')
+
+            result = mutations.update_suite_topology(
+                created['id'], case_ids=[self.case.id],
+                edges=[{
+                    'from_suite': created['id'], 'to_suite': self.suite.id,
+                    'event_condition': {'event_type': 'CASE_COMPLETED'},
+                    'weight': 1.0,
+                }],
+            )
+            self.assertEqual(result, {'topology_updated': created['id']})
+
+            deleted = mutations.delete_suite(created['id'])
+        self.assertEqual(deleted, {'deleted': 'suite', 'id': created['id']})
+        self.assertFalse(Suite.objects.filter(pk=created['id']).exists())
+
+    def test_update_suite_topology_rejects_invalid_condition(self):
+        """MCP-20：自环边 / 非法 event_condition 与 REST 400 同源拒绝。"""
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(ValueError):
+                mutations.update_suite_topology(
+                    self.suite.id, case_ids=[self.case.id],
+                    edges=[{
+                        'from_suite': self.suite.id, 'to_suite': self.suite.id,
+                        'event_condition': {'event_type': 'CASE_COMPLETED'},
+                    }],
+                )
+            with self.assertRaises(ValueError):
+                mutations.update_suite_topology(
+                    self.suite.id, case_ids=[self.case.id],
+                    edges=[{
+                        'from_suite': self.suite.id, 'to_suite': self.suite.id,
+                        'event_condition': {'event_type': 'CASE_COMPLETED', 'evil': 1},
+                    }],
+                )
+
+    def test_delete_suite_conflict_when_plan_references(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.delete_suite(self.suite.id)
+        self.assertTrue(Suite.objects.filter(pk=self.suite.id).exists())
+
+    def test_plan_create_update_delete_roundtrip(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            created = mutations.create_plan(
+                'round-plan', root_suite_id=self.suite.id,
+                trigger_type='manual',
+                symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
+            )
+            self.assertEqual(created['status'], 'draft')
+            self.assertEqual(created['symbol_scope']['symbol_codes'], ['000001'])
+
+            updated = mutations.update_plan(created['id'], name='round-plan-2')
+            self.assertEqual(updated['name'], 'round-plan-2')
+
+            deleted = mutations.delete_plan(created['id'])
+        self.assertEqual(deleted, {'deleted': 'plan', 'id': created['id']})
+        self.assertFalse(Plan.objects.filter(pk=created['id']).exists())
+
+    def test_plan_rejects_symbol_scope_and_cron_violations(self):
+        """MCP-20：symbol_scope 白名单 / time 触发缺 cron 与 REST 400 同源。"""
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(ValueError):
+                mutations.create_plan(
+                    'bad', root_suite_id=self.suite.id, trigger_type='manual',
+                    symbol_scope={'type': 'symbols'},
+                )
+            with self.assertRaises(ValueError):
+                mutations.create_plan('bad', root_suite_id=self.suite.id, trigger_type='time')
+            with self.assertRaises(ValueError):
+                mutations.update_plan(999999, name='x')
+
+    def test_delete_plan_conflict_with_existing_runs(self):
+        from mcp_server import mutations
+
+        SuiteRun.objects.create(
+            plan=self.plan, suite=self.suite, symbol='000001',
+            status='pending', event_queue=[],
+        )
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.delete_plan(self.plan.id)
+        self.assertTrue(Plan.objects.filter(pk=self.plan.id).exists())
+
+    def test_suite_create_update_topology_delete_roundtrip(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            created = mutations.create_suite(
+                'round-suite', aggregate_method='vote', case_ids=[self.case.id],
+            )
+            self.assertEqual(created['status'], 'draft')
+            self.assertEqual(created['cases'], [self.case.id])
+
+            updated = mutations.update_suite(created['id'], name='round-suite-2')
+            self.assertEqual(updated['name'], 'round-suite-2')
+
+            result = mutations.update_suite_topology(
+                created['id'], case_ids=[self.case.id],
+                edges=[{
+                    'from_suite': created['id'], 'to_suite': self.suite.id,
+                    'event_condition': {'event_type': 'CASE_COMPLETED'},
+                    'weight': 1.0,
+                }],
+            )
+            self.assertEqual(result, {'topology_updated': created['id']})
+
+            deleted = mutations.delete_suite(created['id'])
+        self.assertEqual(deleted, {'deleted': 'suite', 'id': created['id']})
+        self.assertFalse(Suite.objects.filter(pk=created['id']).exists())
+
+    def test_update_suite_topology_rejects_invalid_condition(self):
+        """MCP-20：非法 event_condition / 自环边经 SuiteError 映射为冲突错误。"""
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.update_suite_topology(
+                    self.suite.id, case_ids=[self.case.id],
+                    edges=[{
+                        'from_suite': self.suite.id, 'to_suite': self.suite.id,
+                        'event_condition': {'event_type': 'CASE_COMPLETED'},
+                    }],
+                )
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.update_suite_topology(
+                    self.suite.id, case_ids=[self.case.id],
+                    edges=[{
+                        'from_suite': self.suite.id, 'to_suite': self.suite.id,
+                        'event_condition': {'event_type': 'CASE_COMPLETED', 'evil': 1},
+                    }],
+                )
+
+    def test_delete_suite_conflict_when_plan_references(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.delete_suite(self.suite.id)
+        self.assertTrue(Suite.objects.filter(pk=self.suite.id).exists())
+
+    def test_plan_create_update_delete_roundtrip(self):
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            created = mutations.create_plan(
+                'round-plan', root_suite_id=self.suite.id,
+                trigger_type='manual',
+                symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
+            )
+            self.assertEqual(created['status'], 'draft')
+            self.assertEqual(created['symbol_scope']['symbol_codes'], ['000001'])
+
+            updated = mutations.update_plan(created['id'], name='round-plan-2')
+            self.assertEqual(updated['name'], 'round-plan-2')
+
+            deleted = mutations.delete_plan(created['id'])
+        self.assertEqual(deleted, {'deleted': 'plan', 'id': created['id']})
+        self.assertFalse(Plan.objects.filter(pk=created['id']).exists())
+
+    def test_plan_rejects_symbol_scope_and_cron_violations(self):
+        """MCP-20：symbol_scope 白名单 / time 触发缺 cron 与 REST 400 同源。"""
+        from mcp_server import mutations
+
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(ValueError):
+                mutations.create_plan(
+                    'bad', root_suite_id=self.suite.id, trigger_type='manual',
+                    symbol_scope={'type': 'symbols'},
+                )
+            with self.assertRaises(ValueError):
+                mutations.create_plan('bad', root_suite_id=self.suite.id, trigger_type='time')
+            with self.assertRaises(ValueError):
+                mutations.update_plan(999999, name='x')
+
+    def test_delete_plan_conflict_with_existing_runs(self):
+        from mcp_server import mutations
+
+        SuiteRun.objects.create(
+            plan=self.plan, suite=self.suite, symbol='000001',
+            status='pending', event_queue=[],
+        )
+        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
+            with self.assertRaises(mutations.MutationConflictError):
+                mutations.delete_plan(self.plan.id)
+        self.assertTrue(Plan.objects.filter(pk=self.plan.id).exists())

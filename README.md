@@ -79,20 +79,25 @@
 | `MCP_AUTH_TOKEN` | 空（不鉴权） | Bearer 令牌；**绑定非回环地址时必填** |
 | `MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` | `127.0.0.1:*,localhost:*` 等 | DNS rebinding 保护白名单 |
 | `MCP_CORS_ORIGINS` | 空（不加 CORS 头） | 浏览器直连时允许的来源（逗号分隔） |
-| `MCP_ALLOW_TRIGGER` | 空（写操作关闭） | 置 `1` / `true` / `yes` 开启；也可使用启动参数 `--allow-trigger` |
+| `MCP_ALLOW_TRIGGER` | 空（写操作关闭） | 置 `1` / `true` / `yes` 开启；也可使用启动参数 `--allow-trigger`（仅触发执行：创建 pending SuiteRun） |
+| `MCP_ALLOW_MUTATE` | 空（写操作关闭） | 置 `1` / `true` / `yes` 开启配置写（创建/编辑/删除 Case、Suite、Plan，共 10 个工具）；也可使用启动参数 `--allow-mutate`；与 `MCP_ALLOW_TRIGGER` 相互独立 |
 
 ### 命令行开启写操作
 
-两个入口、SSE 与 stdio 均支持 `--allow-trigger`（布尔开关，不需要附加值）：
+两个入口、SSE 与 stdio 均支持 `--allow-trigger` 与 `--allow-mutate`（布尔开关，不需要附加值，相互独立）：
 
 ```powershell
 & 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' 'c:\Users\PC\Documents\quant_platform\quant_engine\manage.py' run_mcp_server --port 8765 --allow-trigger
 & 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' -m mcp_server --transport stdio --allow-trigger
+
+# 额外开放配置写（仍只改 draft，不发布、不启动、不下单）
+& 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' 'c:\Users\PC\Documents\quant_platform\quant_engine\manage.py' run_mcp_server --port 8765 --allow-mutate
+& 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' -m mcp_server --transport stdio --allow-mutate
 ```
 
-- 显式传入时覆盖 `MCP_ALLOW_TRIGGER=0`；未传入时保留环境变量配置，未配置则默认只读。
-- stdio 客户端可在上述配置的 `args` 数组末尾追加 `"--allow-trigger"`；SSE 客户端需在服务端启动命令中配置，不能通过连接 URL 开启。
-- 开关只作用于当前 MCP 进程；修改后需重启服务。开启后仅允许创建 `pending SuiteRun`，不会直接下单，也不会绕过非回环绑定的令牌要求。
+- 显式传入时覆盖 `MCP_ALLOW_TRIGGER=0` / `MCP_ALLOW_MUTATE=0`；未传入时保留环境变量配置，未配置则默认只读。
+- stdio 客户端可在上述配置的 `args` 数组末尾追加 `"--allow-trigger"` / `"--allow-mutate"`；SSE 客户端需在服务端启动命令中配置，不能通过连接 URL 开启。
+- 开关只作用于当前 MCP 进程；修改后需重启服务。`--allow-trigger` 仅允许创建 `pending SuiteRun`，不会直接下单；`--allow-mutate` 只创建/编辑/删除 **draft** 配置（复用 REST 同源校验与删除保护 409 语义），发布 / 启停仍走 REST 动作接口。两个开关都不会绕过非回环绑定的令牌要求。
 
 
 ### 客户端配置示例

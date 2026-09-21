@@ -36,6 +36,12 @@ class Command(BaseCommand):
             help='允许 trigger_plan_execution 写操作（等效 MCP_ALLOW_TRIGGER=1；'
                  '布尔开关，仅创建 pending SuiteRun，不直接下单）',
         )
+        parser.add_argument(
+            '--allow-mutate', dest='allow_mutate', action='store_true', default=False,
+            help='允许配置写操作：创建/编辑/删除 Case、Suite、Plan（等效 MCP_ALLOW_MUTATE=1；'
+                 '布尔开关，与 --allow-trigger 相互独立；'
+                 '仅改 draft 配置，不发布、不启动、不下单）',
+        )
 
     def handle(self, *args, **options):
         from mcp_server.server import main
@@ -51,4 +57,6 @@ class Command(BaseCommand):
             argv += ['--auth-token', options['auth_token']]
         if options.get('allow_trigger'):
             argv += ['--allow-trigger']
+        if options.get('allow_mutate'):
+            argv += ['--allow-mutate']
         main(argv)

@@ -4,7 +4,7 @@ from rest_framework.response import Response
 
 from .models import Edge, Suite
 from .serializers import EdgeSerializer, SuiteSerializer
-from .services import SuiteError, publish_suite, update_topology
+from .services import SuiteError, delete_suite, publish_suite, update_topology
 from apps.execution.state_machine import start_suite, interrupt_suite, StateMachineError
 
 
@@ -24,13 +24,13 @@ class SuiteViewSet(viewsets.ModelViewSet):
         return queryset
 
     def destroy(self, request, *args, **kwargs):
-        suite = self.get_object()
-        if suite.plans.exists():
+        try:
+            delete_suite(self.get_object())
+        except SuiteError as exc:
             return Response(
-                {'detail': 'Suite 已被 Plan 引用，不能删除'},
+                {'detail': str(exc)},
                 status=status.HTTP_409_CONFLICT,
             )
-        suite.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['get', 'post'])
