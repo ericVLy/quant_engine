@@ -3,13 +3,17 @@
 需求编号：MCP-01 ~ MCP-17（见 documents.md 模块11）。
 只读工具直接查库；写操作仅"创建 pending SuiteRun"，不涉及任何真实下单。
 """
+import ast
 import asyncio
+import inspect
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
 from decimal import Decimal
+from pathlib import Path
 from unittest import mock
 
 from django.conf import settings
@@ -364,6 +368,96 @@ class McpServerWiringTest(SimpleTestCase):
         text = tools_impl.system_overview_text()
         self.assertIn('MCP_ALLOW_TRIGGER=1', text)
         self.assertIn('SuiteRun', text)
+
+
+class McpToolSchemaTest(SimpleTestCase):
+    """MCP-19：tools/list 为每个变量下发描述，且与门面实现签名严格一致。"""
+
+    @staticmethod
+    def _tools() -> dict:
+        return {tool.name: tool for tool in asyncio.run(create_server().list_tools())}
+
+    @staticmethod
+    def _variables(tool) -> dict:
+        return dict(tool.input_schema.get('properties') or {})
+
+    def test_every_tool_variable_has_description(self):
+        """MCP-19：每个入参都在 inputSchema 中带描述，缺失即视为客户端无法理解该变量。"""
+        tools = self._tools()
+        self.assertEqual(set(tools), EXPECTED_TOOL_NAMES)
+        missing: dict[str, list[str]] = {}
+        for name, tool in tools.items():
+            for variable, spec in self._variables(tool).items():
+                description = str(spec.get('description') or '').strip()
+                if len(description) < 6:
+                    missing.setdefault(name, []).append(variable)
+        self.assertEqual(missing, {})
+
+    def test_schema_variables_match_facade_signature(self):
+        """MCP-19：入参名与必填项集合必须与 tools_impl 门面签名逐一对应。"""
+        for name, tool in self._tools().items():
+            with self.subTest(tool=name):
+                parameters = inspect.signature(getattr(tools_impl, name)).parameters
+                self.assertEqual(set(self._variables(tool)), set(parameters))
+                self.assertEqual(
+                    set(tool.input_schema.get('required') or []),
+                    {
+                        variable
+                        for variable, param in parameters.items()
+                        if param.default is inspect.Parameter.empty
+                    },
+                )
+
+    def test_tool_and_facade_docstrings_document_variables(self):
+        """MCP-19：工具级说明非空，门面 docstring 逐个变量给出 Args/Returns。"""
+        for name, tool in self._tools().items():
+            with self.subTest(tool=name):
+                facade = getattr(tools_impl, name)
+                self.assertTrue(str(tool.description or '').strip())
+                docstring = inspect.getdoc(facade) or ''
+                self.assertIn('Returns:', docstring)
+                signature = inspect.signature(facade)
+                if signature.parameters:
+                    self.assertIn('Args:', docstring)
+                for variable in signature.parameters:
+                    self.assertIn(f'{variable}:', docstring)
+
+
+class McpVariablesDocumentationTest(SimpleTestCase):
+    """MCP-19：命令行与配置变量同样逐个带说明，防止新增变量漏写文档。"""
+
+    def test_cli_options_have_help_text(self):
+        from apps.execution.management.commands.run_mcp_server import Command
+
+        from mcp_server.server import _build_arg_parser
+
+        mcp_options = {'transport', 'host', 'port', 'auth_token', 'allow_trigger'}
+        parsers = {
+            'python -m mcp_server': _build_arg_parser(),
+            'manage.py run_mcp_server': Command().create_parser('manage.py', 'run_mcp_server'),
+        }
+        for entry, parser in parsers.items():
+            # 管理命令解析器还含 Django 通用参数（--verbosity 等），这里只校验 MCP 自有变量
+            actions = {
+                action.dest: action
+                for action in parser._actions
+                if action.dest in mcp_options
+            }
+            with self.subTest(entry=entry):
+                self.assertEqual(set(actions), mcp_options)
+            for dest, action in actions.items():
+                with self.subTest(entry=entry, option=dest):
+                    self.assertTrue(str(action.help or '').strip())
+
+    def test_config_env_vars_are_documented(self):
+        """MCP-19：代码读取的每个 MCP_* 变量都必须出现在 config.py 模块文档表格中。"""
+        from mcp_server import config as config_module
+
+        source = Path(config_module.__file__).read_text(encoding='utf-8')
+        docstring = ast.get_docstring(ast.parse(source)) or ''
+        env_vars = set(re.findall(r"'(MCP_[A-Z_]+)'", source))
+        self.assertIn('MCP_ALLOW_TRIGGER', env_vars)
+        self.assertEqual(sorted(name for name in env_vars if name not in docstring), [])
 
 
 class McpTransportConfigTest(SimpleTestCase):

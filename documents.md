@@ -1,8 +1,8 @@
 ﻿# 量化交易系统 · 全模块需求文档
 
-> 版本：v2.12
-> 日期：2026-09-17
-> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口） · MCP 服务（模块11）已落地（`mcp_server` 包：**SSE（HTTP）为主传输** · 14 个工具 + 1 个概览资源 + `/health` · 默认只读 · 令牌鉴权与非回环绑定 fail-fast · 写操作支持 `MCP_ALLOW_TRIGGER=1` 或 `--allow-trigger` · 41 个专项测试通过）
+> 版本：v2.13
+> 日期：2026-09-21
+> 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口） · MCP 服务（模块11）已落地（`mcp_server` 包：**SSE（HTTP）为主传输** · 14 个工具 + 1 个概览资源 + `/health` · 默认只读 · 令牌鉴权与非回环绑定 fail-fast · 写操作支持 `MCP_ALLOW_TRIGGER=1` 或 `--allow-trigger` · **MCP-19 变量描述：14 个工具逐变量带 `inputSchema` 描述，CLI 参数与 `MCP_*` 配置项逐个带说明** · 46 个专项测试通过 · 全量回归 442 个测试通过）
 
 
 ## 一、项目概述
@@ -1119,10 +1119,10 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 | 属性 | 说明 |
 |------|------|
-| **状态** | ✅ 全部完成（2026-09-15：`mcp_server` 包（**SSE/HTTP 为主传输**，`stdio` 保留）+ 14 个工具 + 1 个概览资源 + `/health` 健康检查；36 个专项测试通过；`manage.py run_mcp_server` 的 SSE 握手与令牌鉴权已实测） |
+| **状态** | ✅ 全部完成（2026-09-15：`mcp_server` 包（**SSE/HTTP 为主传输**，`stdio` 保留）+ 14 个工具 + 1 个概览资源 + `/health` 健康检查；`manage.py run_mcp_server` 的 SSE 握手与令牌鉴权已实测。2026-09-17：命令行 `--allow-trigger` 写开关（MCP-18）。**2026-09-21：MCP-19 变量描述——14 个工具逐变量带 `inputSchema` 描述 + CLI/配置变量逐个带说明**；46 个专项测试通过） |
 | **优先级** | P1 |
 | **依赖** | `watchlists` / `datasources` / `cases` / `suites` / `plans` / `execution` / `monitoring` 既有模型与服务（只读门面，**后端零新增 REST 接口**） |
-| **新增依赖** | `mcp[cli]>=2.2.0`；`uvicorn>=0.31.1`、`starlette>=0.27`（SSE 服务与 CORS/响应，已显式登记 `requirements.txt`） |
+| **新增依赖** | `mcp[cli]>=2.2.0`；`uvicorn>=0.31.1`、`starlette>=0.27`（SSE 服务与 CORS/响应）；`pydantic>=2.0`（工具变量描述 `Annotated[<类型>, Field(description=...)]`，MCP-19）——三者均已显式登记 `requirements.txt` |
 
 #### 定位与边界
 
@@ -1155,6 +1155,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - 所有输出经 `mcp_server/formatting.to_jsonable` 归一：`Decimal → 字符串`（与项目 DecimalField 序列化一致）、`date/datetime → ISO-8601`、模型实例 `→ pk`、其余 `→ str`，确保 MCP 结构化输出不含自定义类型。
 - 参数校验失败抛 `ValueError`（资源不存在 / 空代码 / 反向日期窗口），写开关未开启抛 `PermissionError`，均带可定位的中文提示。
 - `limit` 在工具内收敛上限（标的 200 / K 线 500 / 告警 100 / 运行 100），单次调用不会拉全表；分页 `N-01` 契约不适用于 MCP（工具自带 `limit`，非 REST 列表接口）。
+- **变量描述（MCP-19）**：每个工具入参都用 `Annotated[<类型>, Field(description=...)]` 声明中文说明，随 `tools/list` 下发为 `inputSchema.properties.<变量>.description`（mcp 2.x 不再解析 docstring 参数段落，故必须显式标注）；`tools_impl` 门面函数逐个变量给出 `Args` / `Returns` / `Raises`；命令行参数与 `MCP_*` 配置项分别由 `argparse` 的 `help` 与 `config.py` 模块文档 + 字段行内注释承载。
 
 #### 装配与运行
 
@@ -1194,15 +1195,28 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 & 'c:\Users\PC\Documents\quant_platform\quant_engine\.venv\Scripts\python.exe' 'c:\Users\PC\Documents\quant_platform\quant_engine\manage.py' test mcp_server -v 1 --noinput
 ```
 
+#### 变量描述（MCP-19，2026-09-21）
+
+- ✅ 已完成：为 MCP 服务的每一类「变量」补齐描述，AI 客户端与运维不必再猜语义（**只补描述，不改契约**）。
+  - **工具入参（14 个工具 / 29 个变量）**：`mcp_server/server.py` 的 `@server.tool` 函数改用 `Annotated[<类型>, Field(description=...)]`，SDK 转成 `tools/list → inputSchema.properties.<变量>.description`，说明中给出含义、默认值、取值域与收敛规则（如 `limit` 越界收敛、`status` 可选枚举）。
+  - **门面实现**：`mcp_server/tools_impl.py` 14 个函数逐个补 `Args` / `Returns` / `Raises`，逐变量说明入参与输出字段（含 `symbol_scope` 解析上限、`bars` 归一方式、异常类型）；`formatting.to_jsonable` 亦说明归一规则。
+  - **命令行变量**：`server._build_arg_parser()` 与 `manage.py run_mcp_server` 的 `--transport` / `--host` / `--port` / `--auth-token` / `--allow-trigger` 全部带 `help`（默认值来源 + 取值域 + 安全约束），`--help` 可直接当运维手册。
+  - **配置变量**：`mcp_server/config.py` 保留 `MCP_*` 变量表，并为每个 dataclass 字段、`DEFAULT_*` 常量加行内注释（含「非回环绑定必须令牌」「`MCP_ALLOW_TRIGGER` 默认关闭」等边界）。
+- 契约测试（`mcp_server/tests.py` 新增 5 个用例）：① 每个入参 `description` 非空且长度 ≥ 6；② `inputSchema` 变量名与必填集合必须与 `tools_impl` 门面签名逐一相等；③ 工具说明非空且门面 docstring 覆盖每个变量（`Args` / `Returns`）；④ 两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致；⑤ 代码读取的每个 `MCP_*` 变量都必须出现在 `config.py` 模块文档中（防止新增变量漏文档）。
+- 边界：工具数量（14）、入参名、默认值、必填项、返回结构与安全门禁（只读默认、`MCP_ALLOW_TRIGGER` / `--allow-trigger`、非回环绑定令牌）均未变；无新增 REST API、数据模型或 JSON 白名单字段。新增直接依赖 `pydantic>=2.0`（`mcp[cli]` 的必需传递依赖，本机已安装，无新增下载），仅用于 `Field` 描述声明。
+
+验证（2026-09-21）：MCP 专项 **46 个测试全部通过**（原 41 个 + MCP-19 5 个）；`tools/list` 实测 14 个工具、29 个入参全部带中文描述，门面签名与 schema 完全一致。全量回归 `manage.py test --noinput -v 0` **442 个测试全部通过（OK，退出码 0）**。
+
 #### 测试（P1 阶段6）
 
-- `mcp_server/tests.py` 36 个用例：
+- `mcp_server/tests.py` 46 个用例：
   - 工具门面（MCP-02 ~ MCP-12）：搜索与 `market` 过滤、命名解析库内命中与回退、分表 K 线窗口与尾段截断、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约、`to_jsonable` 归一；
   - 错误契约：未入库标的、空代码、反向日期窗口、资源不存在（均抛可定位 `ValueError`）；
   - 写开关（MCP-10）：默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝；
   - 装配层（MCP-01/13）：14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界；
   - **SSE 传输与安全（MCP-14 ~ MCP-16）**：配置默认值与覆盖、端口/传输类型校验、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查在开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`；
-  - **进程门禁（MCP-17）**：`run_mcp_server` 进程不启动分时更新器，`runserver` 子进程仍启动。
+  - **进程门禁（MCP-17）**：`run_mcp_server` 进程不启动分时更新器，`runserver` 子进程仍启动；
+  - **变量描述（MCP-19）**：`McpToolSchemaTest`（29 个入参 `inputSchema` 描述非空且长度 ≥ 6；变量名与必填集合与 `tools_impl` 门面签名逐一相等；工具说明非空且门面 docstring 逐变量给出 `Args`/`Returns`）+ `McpVariablesDocumentationTest`（两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致；代码读取的每个 `MCP_*` 变量都出现在 `config.py` 模块文档中）。
 - 端到端实测（2026-09-15）：`manage.py run_mcp_server --port 8791` 常驻监听；MCP SSE 客户端 `initialize` → `tools/list`（14 个）→ `tools/call`（`search_symbols` 返回非错误）→ `resources/list`（`quant://docs/overview`）全部通过；配置令牌后 `/health` 与 `/sse` 在缺令牌/错令牌时返回 401、正确令牌通过；MCP 进程日志内无分时更新器采样。
 
 #### 已知边界与后续（P2）
@@ -1227,9 +1241,9 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
 | `monitoring` | ✅ 已完成 | 65 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
-| `mcp_server` | ✅ 已完成 | 41 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18） |
+| `mcp_server` | ✅ 已完成 | 46 通过 | 100%（**SSE（HTTP）MCP 服务**：14 工具 + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18 · **MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，CLI 与 `MCP_*` 配置变量逐个带说明**） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-15）：✔ 402 个测试全部通过（OK）** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-21）：✔ 442 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（数量演进：2026-09-15 → 402；2026-09-17 MCP-18 +5 → 437；2026-09-21 MCP-19 变量描述 +5 → **442**）。此前基线：**2026-09-15 ✔ 402 个测试全部通过** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36；**2026-09-17 ✔ 437 个**（mcp_server 41）。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 
 
 ## 五、待办事项汇总
@@ -1264,7 +1278,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 告警管理（Alert 模型 + AlertChannel 渠道配置 + `alert_service` 通知服务；应用内 / 邮件多渠道，按最低级别与类型白名单分发；`/api/execution/alerts/`、`/api/execution/alert-channels/` 及操作/统计/重发接口；前端告警管理页 + 告警渠道配置页） | `execution`, `runner`, `plans`, `quant-frontend` | ✅ 已完成（21 个专项测试；EX-20 ~ EX-26） | EX-20、EX-21、EX-22、EX-23、EX-24、EX-25、EX-26 |
 | API 统一分页（列表接口统一 `{count, next, previous, page, total_pages, results}` 分页结构；`page` / `page_size` / `limit` 兼容别名；全局 `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` + 自定义列表动作分页；前端 axios 拦截器解包 `results` 保持旧字段兼容，列表调用默认 `page_size: 500`） | 全部 API, `quant-frontend` | ✅ 已完成（`quant_engine/pagination.py`，N-01；9 个专项测试：cases+1、suites+1、plans+1、watchlists+2、datasources+1、execution+3，另含既有用例的页内/limit 兼容断言） | N-01 |
 | 画布可视化编排前端对接（策略设计器 `/designer`：@vue-flow/core 拖拽节点/连线编排 Case 与子 Suite；编排边条件对话框，`event_condition` 白名单 + 操作符 `eq/neq/gt/gte/lt/lte/between`；拓扑读写与发布；执行轨迹回放：按 SuiteRun 步进/自动播放回放 NodeRun 节点状态与事件顺序；侧边导航新增菜单） | `quant-frontend`, `execution` | ✅ 已完成（2026-09-10；`src/views/Designer.vue` + 路由 `/designer`；后端新增 `GET /api/execution/run/{run_id}/node-runs/`；`vue-tsc` 0 错误、`vite build` 通过；2026-09-12 配套修正 NodeRun 列表测试按 N-01 分页契约解包 `results`） | S-09、EX-15、5.1.4 任务 11 |
-| MCP 服务（`mcp_server` 包：**SSE（HTTP）为主传输**（`manage.py run_mcp_server` / `python -m mcp_server`，`--transport stdio` 保留）+ 14 个工具 + 1 个概览资源 + `/health` 健康检查；ASGI 装配（`build_http_app`）+ `BearerAuthMiddleware` 令牌鉴权 + DNS rebinding 保护 + 可选 CORS；`McpTransportConfig` 配置校验（非回环绑定必须令牌，否则 fail-fast）；默认只读，`trigger_plan_execution` 写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun；`to_jsonable` 统一 JSON 安全输出；MCP 服务进程不启动分时更新器） | `mcp_server`（入站适配器，复用 apps 模型与服务） | ✅ 已完成（2026-09-15，见模块11；36 个专项测试通过 + SSE 端到端握手与令牌鉴权实测；新增依赖 `mcp[cli]>=2.2.0`、`uvicorn>=0.31.1`、`starlette>=0.27`） | 模块11 设计 |
+| MCP 服务（`mcp_server` 包：**SSE（HTTP）为主传输**（`manage.py run_mcp_server` / `python -m mcp_server`，`--transport stdio` 保留）+ 14 个工具 + 1 个概览资源 + `/health` 健康检查；ASGI 装配（`build_http_app`）+ `BearerAuthMiddleware` 令牌鉴权 + DNS rebinding 保护 + 可选 CORS；`McpTransportConfig` 配置校验（非回环绑定必须令牌，否则 fail-fast）；默认只读，`trigger_plan_execution` 写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun；`to_jsonable` 统一 JSON 安全输出；MCP 服务进程不启动分时更新器；MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，门面 docstring 逐变量给 `Args`/`Returns`，CLI 参数与 `MCP_*` 配置变量逐个带说明） | `mcp_server`（入站适配器，复用 apps 模型与服务） | ✅ 已完成（2026-09-15 落地，2026-09-17 MCP-18、2026-09-21 MCP-19，见模块11；**46 个专项测试通过** + SSE 端到端握手与令牌鉴权实测；新增依赖 `mcp[cli]>=2.2.0`、`uvicorn>=0.31.1`、`starlette>=0.27`、`pydantic>=2.0`） | 模块11 设计、MCP-18、MCP-19 |
 
 #### 5.1.2 待开发任务
 
@@ -1387,7 +1401,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段1 | 交易安全闭环单元与跨模块测试 | ✅ 99 个通过（execution + plans + runner 联合回归，含订单生命周期） | 真实模拟账户链路已跑通（2026-09-07）；~~并发资金扣减待补~~ → ✅ 已完成（三层行级锁原子扣减，见 5.1.1） |
 | P1 阶段1 | 告警（Alert）专项测试（模型/服务/渠道过滤/API/集成） | ✅ 21 个通过（tests_alerts；含渠道过滤、邮件/应用内通知、确认/解决动作、统计与集成用例） | 生产邮件网关（SMTP）与真实通知链路联调 |
 | P1 阶段2 | 运行状态机专项测试 | ✅ 25 个通过（Case/Suite/Plan 三级 run_status 流转、自动完成、中断、手动停止、资金校验） | — |
-| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，多次变更后）**：✔ **402 个测试全部通过**（D-01/`DataSource` 移除 → 397；K 线增量同步 +2；分时启动清空/开盘清理 +3）。根因：早期 21 个失败全部为测试环境/用例缺陷（arcis 默认限流 429、gm 昨收用例时间炸弹、Decimal 字符串断言依赖 MySQL 精度展示），非业务缺陷；已新增 `quant_engine/settings/test.py` 隔离限流并修正 3 处用例 |
+| 阶段6 | 全项目回归测试 | ⚠️ 历史统计口径不统一；最近一次完整回归：✔ **345 个测试**（2026-09-14，含 monitoring 48 个；同一命令口径：`manage.py test` 无标签，含 runner）。**注意**：当前 develop_backend 基线（a64e53c）完整回归本身即报 16 failures + 2 errors（集中在 watchlists，与本次分时监控 gm 替换/回填无关）；monitoring 模块独立运行 48 个全部通过 | 以同一次完整回归命令的实际输出为准；建议另立任务修复 watchlists 预存失败。**更新（2026-09-15，多次变更后）**：✔ **402 个测试全部通过**（D-01/`DataSource` 移除 → 397；K 线增量同步 +2；分时启动清空/开盘清理 +3）。根因：早期 21 个失败全部为测试环境/用例缺陷（arcis 默认限流 429、gm 昨收用例时间炸弹、Decimal 字符串断言依赖 MySQL 精度展示），非业务缺陷；已新增 `quant_engine/settings/test.py` 隔离限流并修正 3 处用例。**更新（2026-09-17，MCP-18）**：✔ **437 个测试全部通过**。**更新（2026-09-21，MCP-19 变量描述）**：✔ **442 个测试全部通过**（`manage.py test --noinput -v 0` 退出码 0；442 = 437 + MCP-19 5 个用例） |
 | P1 阶段2 | 基本面财务数据扩展专项测试 | ✅ 21 个通过（Provider 抽象、三大报表 + 财务指标、子报表独立降级、英文契约） | — |
 | P1 阶段2 | 基本面缓存与历史时点专项测试 | ✅ 7 个通过（asof 历史点读、TTL 命中/过期、回源回填、回源失败降级、命中/未命中统计） | 真实外部数据源联调 |
 | P1 阶段2 | Suite 边条件操作符专项测试 | ✅ 13 个通过（eq/neq/gt/gte/lt/lte/between 边界值、成组校验、旧契约兼容） | 前端契约同步后补前端耦合测试 |
@@ -1395,7 +1409,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段3 | API 统一分页专项测试（接口契约：`count/next/previous/page/total_pages/results`；`page/page_size` 翻页与 `limit` 兼容别名；覆盖 cases/suites/plans/watchlists/datasources/execution 各模块列表接口与自定义列表动作） | ✅ 专项断言并入各模块用例（cases `test_list_cases_paginated`；suites `test_suite_list_paginated`；plans `test_plan_list_paginated`；watchlists `test_list_symbols_paginated`/`test_list_groups_paginated`；~~datasources `test_list_datasources_paginated`~~ 已随 D-01 移除；execution `PaginationContractTest` 3 个用例） | 前端分页交互（逐页翻页 UI）待做 |
 | P1 阶段4 | 分时监控专项测试 | ✅ 65 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等/**启动清空（全清一次 + 失败重试）**/**开盘清理（交易时段触发、边界为当地零点、同日幂等、收盘不触发）**）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
-| P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 36 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
+| P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 46 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200）；**MCP-19 变量描述**（`McpToolSchemaTest` 3 个：29 个入参 `inputSchema` 描述非空且长度 ≥ 6、变量名与必填集合与 `tools_impl` 门面签名逐一相等、工具说明与门面 docstring 逐变量覆盖 `Args`/`Returns`；`McpVariablesDocumentationTest` 2 个：两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致、代码读取的每个 `MCP_*` 变量都出现在 `config.py` 模块文档中） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
 
 #### 测试验收标准
 

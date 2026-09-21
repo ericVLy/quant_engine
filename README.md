@@ -126,6 +126,7 @@ stdio（本机 IDE 以子进程方式拉起）：
 ```
 
 - 安全：默认只读；`trigger_plan_execution` 仅创建 `pending` `SuiteRun`（实际执行由 `runner` 负责，**MCP 不会直接下单**）；令牌校验失败返回 401；非法 `Host`（DNS rebinding）直接拒绝建连。
+- 变量描述：14 个工具的每个入参都在 `tools/list` 的 `inputSchema.properties.<变量>.description` 中带说明（`server.py` 用 `Annotated[<类型>, Field(description=...)]` 声明，`pydantic` 因此显式登记到 `requirements.txt`）；门面函数 `tools_impl.py` 逐个变量给出 `Args` / `Returns` / `Raises`，命令行 `--transport / --host / --port / --auth-token / --allow-trigger` 与 `MCP_*` 环境变量同样逐个带说明。
 - 进程职责：MCP 服务进程不启动分时内部更新器（分时采样只由 Django 服务进程负责），避免多进程重复外部请求与写库。
 - 健康检查：`curl -H "Authorization: Bearer <token>" http://127.0.0.1:8765/health`
 - 工具清单、安全设计与测试口径见 `documents.md` 模块11。

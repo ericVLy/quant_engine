@@ -11,6 +11,14 @@ from mcp_server.formatting import to_jsonable
 
 
 def _symbol_brief(symbol) -> dict[str, Any]:
+    """把 Symbol 实例压成工具输出用的摘要（只保留可公开字段）。
+
+    Args:
+        symbol: ``watchlists.models.Symbol`` 实例。
+
+    Returns:
+        dict: ``id`` / ``code`` / ``name`` / ``market`` / ``exchange``。
+    """
     return {
         'id': symbol.id,
         'code': symbol.code,
@@ -21,6 +29,17 @@ def _symbol_brief(symbol) -> dict[str, Any]:
 
 
 def search_symbols(query: str = '', market: str = '', limit: int = 50) -> dict[str, Any]:
+    """按代码或名称模糊搜索标的（只读）。
+
+    Args:
+        query: 模糊关键字，匹配 ``Symbol.code`` 或 ``Symbol.name``；空串=不过滤关键字。
+        market: 市场过滤 ``A`` / ``HK`` / ``US``（大小写不敏感）；空串=全部市场。
+        limit: 返回条数上限，收敛到 1~200。
+
+    Returns:
+        dict: ``count`` 为本次返回条数；``symbols`` 每项含
+        ``id`` / ``code`` / ``name`` / ``market`` / ``exchange``。
+    """
     from apps.watchlists.models import Symbol
 
     limit = max(1, min(int(limit), 200))
@@ -35,6 +54,21 @@ def search_symbols(query: str = '', market: str = '', limit: int = 50) -> dict[s
 
 
 def resolve_symbol_name(code: str, market: str = '') -> dict[str, Any]:
+    """把标的代码解析为中文名称（只读）。
+
+    Args:
+        code: 标的代码（如 ``000001``）；空串或纯空白直接报错。
+        market: 市场提示 ``A`` / ``HK`` / ``US``；库内未命中时传给
+            ``watchlists.services.resolve_symbol_name`` 做回退解析，空串=不限市场。
+
+    Returns:
+        dict: ``code`` 去空白后的代码；``name`` 解析出的中文名称；
+        ``symbol`` 命中的库内标的摘要（``id`` / ``code`` / ``name`` / ``market`` /
+        ``exchange``），未命中为 ``None``。
+
+    Raises:
+        ValueError: ``code`` 为空。
+    """
     from apps.watchlists.models import Symbol
     from apps.watchlists.services import resolve_symbol_name as lookup_name
 
@@ -58,6 +92,23 @@ def query_kline(
     end_date: str = '',
     limit: int = 120,
 ) -> dict[str, Any]:
+    """按日期窗口查询单标的 K 线（只读，走 datasources 分表）。
+
+    Args:
+        symbol_code: 标的代码，必须已存在于 ``watchlists.Symbol``。
+        start_date: 起始日期 ``YYYY-MM-DD``；空串=``end_date`` 前 90 天。
+        end_date: 结束日期 ``YYYY-MM-DD``；空串=今天（服务器本地日期）。
+        limit: 返回根数上限，收敛到 1~500；超出时保留最近 N 根。
+
+    Returns:
+        dict: ``symbol`` / ``market`` / ``start_date`` / ``end_date`` 回显实际查询窗口；
+        ``count`` 为返回根数；``bars`` 为逐根 K 线（Decimal→字符串、date→ISO，
+        归一逻辑见 :func:`mcp_server.formatting.to_jsonable`）。
+
+    Raises:
+        ValueError: 代码为空、标的未入库、日期非法（``date.fromisoformat``）
+            或 ``start_date`` 晚于 ``end_date``。
+    """
     from apps.datasources.services import query_kline_table
     from apps.watchlists.models import Symbol
 
@@ -89,6 +140,17 @@ def query_kline(
 
 
 def list_plans(status: str = 'published', limit: int = 50) -> dict[str, Any]:
+    """列出 Plan（只读，按 ``-updated_at`` 排序）。
+
+    Args:
+        status: 状态过滤 ``draft`` / ``published`` / ``archived``；空串=全部状态。
+        limit: 返回条数上限，收敛到 1~200。
+
+    Returns:
+        dict: ``count`` 为本次返回条数；``plans`` 每项含 ``id`` / ``name`` / ``status`` /
+        ``version`` / ``trigger_type`` / ``exec_mode`` / ``run_status`` /
+        ``root_suite_id`` / ``root_suite_name``。
+    """
     from apps.plans.models import Plan
 
     limit = max(1, min(int(limit), 200))
@@ -112,6 +174,22 @@ def list_plans(status: str = 'published', limit: int = 50) -> dict[str, Any]:
 
 
 def get_plan(plan_id: int, include_symbols: bool = True) -> dict[str, Any]:
+    """读取单个 Plan 详情（只读）。
+
+    Args:
+        plan_id: Plan 主键。
+        include_symbols: 是否把 ``symbol_scope`` 解析为标的列表；True 时追加
+            ``symbols``（最多 500 条）与 ``symbol_count``。
+
+    Returns:
+        dict: ``id`` / ``name`` / ``status`` / ``version`` / ``trigger_type`` /
+        ``cron_expr`` / ``event_type`` / ``symbol_scope`` / ``exec_mode`` /
+        ``retry_policy`` / ``run_status``，以及 ``root_suite``
+        （``id`` / ``name`` / ``status``）。
+
+    Raises:
+        ValueError: Plan 不存在。
+    """
     from apps.plans.models import Plan
     from apps.plans.services import resolve_plan_symbols
 
@@ -144,6 +222,18 @@ def get_plan(plan_id: int, include_symbols: bool = True) -> dict[str, Any]:
 
 
 def list_cases(status: str = '', node_type: str = '', limit: int = 50) -> dict[str, Any]:
+    """列出 Case（只读，按 ``-updated_at`` 排序）。
+
+    Args:
+        status: 状态过滤 ``draft`` / ``published`` / ``archived``；空串=全部状态。
+        node_type: 节点类型过滤 ``signal`` / ``filter`` / ``verdict`` / ``executor``；
+            空串=全部节点类型。
+        limit: 返回条数上限，收敛到 1~200。
+
+    Returns:
+        dict: ``count`` 为本次返回条数；``cases`` 每项含 ``id`` / ``name`` /
+        ``node_type`` / ``status`` / ``version`` / ``run_status``。
+    """
     from apps.cases.models import Case
 
     limit = max(1, min(int(limit), 200))
@@ -167,6 +257,18 @@ def list_cases(status: str = '', node_type: str = '', limit: int = 50) -> dict[s
 
 
 def get_case(case_id: int) -> dict[str, Any]:
+    """读取单个 Case 详情（只读）。
+
+    Args:
+        case_id: Case 主键。
+
+    Returns:
+        dict: ``id`` / ``name`` / ``node_type`` / ``status`` / ``version`` /
+        ``run_status`` / ``params``（完整参数 JSON，白名单见 documents.md 3.1）。
+
+    Raises:
+        ValueError: Case 不存在。
+    """
     from apps.cases.models import Case
 
     case = Case.objects.filter(pk=case_id).first()
@@ -184,6 +286,18 @@ def get_case(case_id: int) -> dict[str, Any]:
 
 
 def get_suite_topology(suite_id: int) -> dict[str, Any]:
+    """读取 Suite 的递归拓扑快照（只读）。
+
+    Args:
+        suite_id: Suite 主键，作为递归拓扑快照的根节点。
+
+    Returns:
+        dict: ``id`` / ``name`` / ``status`` / ``version``，以及 ``topology``
+        （``suites.services.build_topology_snapshot`` 输出：子 Suite、Case 集合与出边）。
+
+    Raises:
+        ValueError: Suite 不存在。
+    """
     from apps.suites.models import Suite
     from apps.suites.services import build_topology_snapshot
 
@@ -200,6 +314,16 @@ def get_suite_topology(suite_id: int) -> dict[str, Any]:
 
 
 def list_event_types(include_system: bool = True) -> dict[str, Any]:
+    """列出已注册的事件类型（只读）。
+
+    Args:
+        include_system: 是否包含系统内置事件（``EventType``）；False 时仅返回
+            ``EventTypeRegistry`` 中注册的自定义类型。
+
+    Returns:
+        dict: ``count`` 为本次返回条数；``event_types`` 每项含
+        ``name`` / ``scope`` / ``description`` 等注册中心字段。
+    """
     from apps.execution.registry import EventRegistry
 
     items = EventRegistry.list_all(include_system=include_system)
@@ -211,6 +335,17 @@ def list_alerts(
     severity: str = '',
     limit: int = 30,
 ) -> dict[str, Any]:
+    """列出最近告警（只读，按 ``-created_at`` 排序）。
+
+    Args:
+        status: 状态过滤 ``pending`` / ``acknowledged`` / ``resolved``；空串=全部状态。
+        severity: 级别过滤 ``low`` / ``medium`` / ``high`` / ``critical``；空串=全部级别。
+        limit: 返回条数上限，收敛到 1~100。
+
+    Returns:
+        dict: ``count`` 为本次返回条数；``alerts`` 每项含 ``id`` / ``alert_type`` /
+        ``severity`` / ``status`` / ``title`` / ``plan_id`` / ``created_at``（ISO-8601）。
+    """
     from apps.execution.models import Alert
 
     limit = max(1, min(int(limit), 100))
@@ -234,6 +369,13 @@ def list_alerts(
 
 
 def alert_statistics() -> dict[str, Any]:
+    """告警统计（只读，与 REST ``/api/execution/alerts/statistics/`` 同口径）。
+
+    Returns:
+        dict: ``overview`` 含 ``total`` / ``pending`` / ``acknowledged`` / ``resolved`` /
+        ``high_severity`` / ``critical_severity``；``by_type`` 为
+        ``[{alert_type, count}]`` 按数量降序。
+    """
     from apps.execution.models import Alert
 
     stats = Alert.objects.aggregate(
@@ -251,6 +393,23 @@ def alert_statistics() -> dict[str, Any]:
 
 
 def get_intraday_series(symbol_code: str, limit: int = 240) -> dict[str, Any]:
+    """读取当日分时序列（只读，直接查库，不访问外部行情源）。
+
+    Args:
+        symbol_code: 标的代码，必须已存在于 ``watchlists.Symbol``。
+        limit: 返回分时点上限，收敛到 1~500；超出时保留最近 N 个点。
+
+    Returns:
+        dict: ``symbol`` / ``market`` 标的与市场；``timezone`` 市场时区名；
+        ``session_status`` 为 ``trading`` / ``lunch_break`` / ``closed`` / ``pre_market``；
+        ``pre_close`` 最新点的昨收（字符串或 ``None``）；``count`` 为返回点数；
+        ``points`` 为序列化分时点（``ts`` UTC ISO-8601、``local_time`` 市场本地时间、
+        ``price`` / ``change`` / ``volume`` / ``amount`` / ``avg_price`` / ``high`` /
+        ``low`` / ``open_price`` / ``pre_close``）。
+
+    Raises:
+        ValueError: 代码为空或标的未入库。
+    """
     from apps.monitoring.market_calendar import MARKET_TIMEZONES, session_status, to_market_local
     from apps.monitoring.models import IntradayPoint
     from apps.monitoring.serializers import IntradayPointSerializer
@@ -286,6 +445,17 @@ def get_intraday_series(symbol_code: str, limit: int = 240) -> dict[str, Any]:
 
 
 def list_suite_runs(plan_id: int = 0, symbol: str = '', limit: int = 20) -> dict[str, Any]:
+    """列出最近的 SuiteRun 执行实例（只读，按 ``-started_at, -id`` 排序）。
+
+    Args:
+        plan_id: 按 Plan 主键过滤；0 表示不过滤。
+        symbol: 按标的代码精确过滤（去空格）；空串表示不过滤。
+        limit: 返回条数上限，收敛到 1~100。
+
+    Returns:
+        dict: ``count`` 为本次返回条数；``runs`` 每项含 ``id`` / ``plan_id`` /
+        ``suite_id`` / ``symbol`` / ``status`` / ``started_at`` / ``ended_at``（ISO-8601 或 None）。
+    """
     from apps.execution.models import SuiteRun
 
     limit = max(1, min(int(limit), 100))
@@ -309,6 +479,23 @@ def list_suite_runs(plan_id: int = 0, symbol: str = '', limit: int = 20) -> dict
 
 
 def trigger_plan_execution(plan_id: int, symbols: list[str]) -> dict[str, Any]:
+    """受控写操作：为 Plan + 标的创建 pending SuiteRun（不直接下单）。
+
+    Args:
+        plan_id: Plan 主键，必须为已发布（``published``）Plan。
+        symbols: 标的代码数组（如 ``['000001', '600000']``）；逐项去空格后各建一个
+            pending SuiteRun，空数组直接报错。
+
+    Returns:
+        dict: ``plan_id`` 回显；``created_run_ids`` 新建 SuiteRun 主键列表；
+        ``count`` 为创建数量。
+
+    Raises:
+        PermissionError: 写开关未开启（需 ``MCP_ALLOW_TRIGGER=1`` 或 ``--allow-trigger``）。
+        ValueError: ``symbols`` 为空。
+        apps.execution.services.ExecutionError: Plan 未发布等生命周期校验失败。
+        apps.plans.models.Plan.DoesNotExist: ``plan_id`` 不存在。
+    """
     if os.getenv('MCP_ALLOW_TRIGGER', '').strip().lower() not in ('1', 'true', 'yes'):
         raise PermissionError(
             'MCP 写操作已禁用。设置环境变量 MCP_ALLOW_TRIGGER=1，'
@@ -327,6 +514,11 @@ def trigger_plan_execution(plan_id: int, symbols: list[str]) -> dict[str, Any]:
 
 
 def system_overview_text() -> str:
+    """返回 MCP 概览文本（同时用于 ``server.instructions`` 与 ``quant://docs/overview`` 资源）。
+
+    Returns:
+        str: 系统定位、核心隐喻（Case→Suite→Plan）、传输方式与写操作边界说明。
+    """
     return (
         'Quant Engine：本地优先的量化投研与交易系统。\n'
         'Django 负责数据与 REST API；runner 独立进程负责 Plan 调度与 Suite 事件循环。\n'
