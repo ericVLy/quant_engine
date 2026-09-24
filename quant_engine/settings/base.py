@@ -172,3 +172,8 @@ LOGGING = {
     'handlers': {'file': {'level': 'DEBUG','class': 'logging.FileHandler','filename': 'logs/django.log'}},
     'loggers': {'django': {'handlers': ['file'],'level': 'DEBUG','propagate': True}}
 }
+
+# SQLite 连接调优（WAL + busy_timeout）：多进程开发栈（run_dev_stack：Django + MCP）
+# 并发访问 SQLite 时消除 "database is locked"。仅 SQLite 生效，生产 MariaDB 不受影响。
+from quant_engine import db_tuning  # noqa: E402,F401  pylint: disable=unused-import
+

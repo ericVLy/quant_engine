@@ -23,14 +23,22 @@ except ImportError:
     # SECURITY WARNING: keep the secret key used in production secret!
     SECRET_KEY = 'django-insecure-7ya^@-)^rrgxn!!)r(r)#^eo^zu3d_#r$0ibpyv@$_a$nmvgdp'
     # Database (development default: SQLite for both main app DB and K-line DB)
+    # SQLite 多进程写并发调优（见 DB_TUNING / tests_db_tuning）：
+    # - transaction_mode=IMMEDIATE：写事务提前抢占，避免升级死锁（Django 5.1+）
+    # - WAL 持久化由 init 脚本/连接设置（tests_db_tuning 验证）
+    # - timeout=30：busy 等待 30s，吸收 web/mcp 两个进程 updater 同时写主库的竞争
+    _SQLITE_OPTIONS = {'transaction_mode': 'IMMEDIATE', 'timeout': 30}
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': dict(_SQLITE_OPTIONS),
         },
         KLINE_DB_ALIAS: {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'kline.sqlite3',
+            'OPTIONS': dict(_SQLITE_OPTIONS),
+            # 与主库相同：多进程写并发启用 WAL，消除 "database is locked"（见 DB_TUNING）
         },
     }
 

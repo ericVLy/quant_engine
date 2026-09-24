@@ -1,5 +1,5 @@
 """run_dev_stack 一键启动命令的编排契约测试（子进程全部 mock，不真正拉起服务）。"""
-from argparse import Namespace
+from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -39,7 +39,8 @@ class RunDevStackCommandTest(SimpleTestCase):
             return procs[-1]
 
         with patch.object(cmd_mod.subprocess, 'Popen', side_effect=fake_popen):
-            call_command(Command(), **opts)
+            # 命令会向 stdout 打印 [dev-stack] 启动/停止行；测试内吞掉，保持回归日志干净
+            call_command(Command(), stdout=StringIO(), stderr=StringIO(), **opts)
         return procs
 
     def test_starts_django_and_mcp_by_default(self):
