@@ -24,6 +24,8 @@ try:
 except ImportError:
     import secrets
     GM_TOKEN = os.getenv('GM_TOKEN', '')
+    # 远程掘金终端服务地址（如 "192.168.1.10:7001"）；空 = 本机终端（SDK 缺省）。
+    GM_SERV_ADDR = os.getenv('GM_SERV_ADDR', '')
 
     # 预期行为（2026-09-15 确认）：SECRET_KEY 仅覆盖登录态（Session/CSRF），
     # 随机刷新仅导致用户重新登录；若需跨重启固定，经 local.py 或环境变量注入。

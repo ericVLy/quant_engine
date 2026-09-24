@@ -808,7 +808,7 @@ class Plan(models.Model):
 | R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 完成 |
 | R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 完成 |
 
-当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`、`runner/gm_adapter.py`、`runner/fundamentals.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；`GmBrokerAdapter` 已封装 gm SDK 的 `set_token`、`subscribe`、`history`、`history_n`、`schedule`、`order_volume`、`get_orders` 及订单状态回调。真实因子、行情 Fixture、风控和交易回报的生产策略仍可在该适配边界上继续扩展。
+当前实现文件：`runner/executor.py`、`runner/engine.py`、`runner/queue.py`、`runner/scheduler.py`、`runner/gm_adapter.py`、`runner/fundamentals.py`。Case 可通过 `params.result` 声明 direction、payload 和 order；`GmBrokerAdapter` 已封装 gm SDK 的 `set_token`、`set_serv_addr`（远程终端连接）、`subscribe`、`history`、`history_n`、`schedule`、`order_volume`、`get_orders` 及订单状态回调。**远程连接掘金终端（2026-09-24）**：新增 `GM_SERV_ADDR` 配置（settings 大写配置 / 环境变量，形如 `192.168.1.10:7001`，掘金终端服务端口 7001）；`GmBrokerAdapter` 在 `set_token` 之前调用 gm SDK 的 `set_serv_addr(addr)`，空值保持 SDK 缺省的本机终端服务；`gm_live_link` 命令支持 `--serv-addr`。真实因子、行情 Fixture、风控和交易回报的生产策略仍可在该适配边界上继续扩展。
 
 #### 基本面数据上下文设计
 

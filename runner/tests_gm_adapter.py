@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase
 
@@ -45,6 +45,30 @@ class GmBrokerAdapterTest(SimpleTestCase):
         self.api.get_positions.return_value = [{'symbol': 'SHSE.600000', 'volume': 100}]
         self.assertEqual(self.adapter.get_account(), {'available': 1000})
         self.assertEqual(self.adapter.get_positions()[0]['volume'], 100)
+
+    def test_remote_serv_addr_is_set_before_token(self):
+        """显式 serv_addr 时先 set_serv_addr 再 set_token（远程终端连接契约）。
+
+        使用全新 Mock，避免 setUp 中默认 token 已在共享 mock 上调用 set_token。
+        """
+        api = Mock()
+        with patch.object(GmBrokerAdapter, '_default_token', return_value=None):
+            adapter = GmBrokerAdapter(api=api, token='tok-1',
+                                      serv_addr='192.168.1.10:7001')
+        api.set_serv_addr.assert_called_once_with('192.168.1.10:7001')
+        api.set_token.assert_called_once_with('tok-1')
+        # 顺序：set_serv_addr 必须先于 set_token（SDK 需在初始化前指定终端服务）
+        calls = [c[0] for c in api.method_calls]
+        self.assertLess(calls.index('set_serv_addr'), calls.index('set_token'))
+        self.assertEqual(adapter.account_id, None)
+
+    def test_empty_serv_addr_keeps_local_terminal_default(self):
+        """未提供 serv_addr 时不调用 set_serv_addr，沿用本机终端缺省。"""
+        api = Mock()
+        with patch.object(GmBrokerAdapter, '_default_token', return_value=None):
+            GmBrokerAdapter(api=api, token='tok-2')
+        api.set_serv_addr.assert_not_called()
+        api.set_token.assert_called_once_with('tok-2')
 
     def test_gm_status_values_are_translated(self):
         self.assertEqual(self.adapter._status(3), 'filled')

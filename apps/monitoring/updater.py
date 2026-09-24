@@ -19,7 +19,7 @@ from datetime import timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-from .market_calendar import MARKET_TIMEZONES, in_trading_session, to_market_local
+from .market_calendar import MARKET_TIMEZONES, in_trading_session, market_timezone, to_market_local
 from .services import backfill_intraday, clear_intraday, sample_intraday
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,10 @@ class IntradayUpdater:
             if not in_trading_session(market, local_now):
                 continue
             local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-            deleted = clear_intraday(before=local_midnight.astimezone(dt_timezone.utc))
+            # naive 本地零点必须先挂市场时区再转 UTC；直接 astimezone 会被
+            # 解释为系统时区（Windows +08 碰巧正确，Linux UTC 下边界错 8 小时）。
+            midnight_utc = local_midnight.replace(tzinfo=market_timezone(market))
+            deleted = clear_intraday(before=midnight_utc.astimezone(dt_timezone.utc))
             self._market_clear_dates[market] = local_date
             logger.info(
                 '[monitoring-updater] [%s] 开盘清理历史数据（< %s），删除 %s 条',

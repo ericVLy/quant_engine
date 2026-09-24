@@ -31,6 +31,9 @@ class Command(BaseCommand):
                             help='gm 模拟账户 ID（掘金模拟账户，例如 12345678）')
         parser.add_argument('--token', type=str, default=None,
                             help='gm token；缺省使用 settings.GM_TOKEN / 环境变量')
+        parser.add_argument('--serv-addr', type=str, default=None,
+                            help='远程掘金终端服务地址（如 192.168.1.10:7001）；'
+                                 '缺省使用 settings.GM_SERV_ADDR / 环境变量，空则连本机终端')
         parser.add_argument('--probe', action='store_true',
                             help='只读连通性探测，不提交任何委托')
         parser.add_argument('--symbol', type=str, default='SZSE.000001',
@@ -45,7 +48,9 @@ class Command(BaseCommand):
                             help='最大回报轮询次数')
 
     def handle(self, *args, **options):
-        adapter = GmBrokerAdapter(token=options['token'], account_id=options['account'])
+        adapter = GmBrokerAdapter(token=options['token'],
+                                  account_id=options['account'],
+                                  serv_addr=options.get('serv_addr'))
         if options['probe']:
             return self._probe(adapter, options)
         return self._lifecycle(adapter, options)

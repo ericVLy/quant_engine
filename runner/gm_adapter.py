@@ -16,11 +16,20 @@ class GmBrokerAdapter:
     environments that do not connect to a GoldMiner terminal.
     """
 
-    def __init__(self, token=None, api=None, account_id=None):
+    def __init__(self, token=None, api=None, account_id=None, serv_addr=None):
         if api is None:
             from gm import api as gm_api
             api = gm_api
         self.api = api
+        # 远程连接掘金终端：SDK 默认连本机终端服务；跨机连接远端终端时，
+        # 必须在 set_token / 初始化之前调用 set_serv_addr("远端IP:7001")
+        # （掘金终端服务端口 7001，见官方 FAQ「外部运行策略提示无法连接到终端服务」）。
+        addr = serv_addr or self._default_serv_addr()
+        if addr:
+            setter = getattr(self.api, 'set_serv_addr', None)
+            if setter is None:
+                raise NotImplementedError('当前 gm SDK 版本未暴露 set_serv_addr；无法连接远程终端')
+            setter(addr)
         default_token = self._default_token()
         if token:
             self.api.set_token(token)
@@ -29,6 +38,13 @@ class GmBrokerAdapter:
         self.account_id = account_id
         if account_id:
             self.set_account_id(account_id)
+
+    @staticmethod
+    def _default_serv_addr():
+        # 终端服务地址：settings.GM_SERV_ADDR / 环境变量 GM_SERV_ADDR，
+        # 形如 "192.168.1.10:7001"；为空表示使用 SDK 缺省的本机终端服务。
+        return (getattr(settings, 'GM_SERV_ADDR', None)
+                or os.getenv('GM_SERV_ADDR', '') or None)
 
     @staticmethod
     def _default_token():

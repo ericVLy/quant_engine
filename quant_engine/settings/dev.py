@@ -18,6 +18,8 @@ try:
     from .local import *
 except ImportError:
     GM_TOKEN = os.getenv('GM_TOKEN', '')
+    # 远程掘金终端服务地址（如 "192.168.1.10:7001"）；空 = 本机终端（SDK 缺省）。
+    GM_SERV_ADDR = os.getenv('GM_SERV_ADDR', '')
     # SECURITY WARNING: keep the secret key used in production secret!
     SECRET_KEY = 'django-insecure-7ya^@-)^rrgxn!!)r(r)#^eo^zu3d_#r$0ibpyv@$_a$nmvgdp'
     # Database (development default: SQLite for both main app DB and K-line DB)
