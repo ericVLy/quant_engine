@@ -15,6 +15,12 @@ class GmBrokerAdapterTest(SimpleTestCase):
             PositionEffect_Open=1,
             PositionEffect_Close=2,
         )
+        # 屏蔽本机/远端 GM_SERV_ADDR 配置：stub mock 未实现 set_serv_addr 时
+        # 不应因环境配置触发远程终端分支（按需在具体用例显式传 serv_addr）。
+        self._serv_patcher = patch.object(
+            GmBrokerAdapter, '_default_serv_addr', return_value=None)
+        self._serv_patcher.start()
+        self.addCleanup(self._serv_patcher.stop)
         self.adapter = GmBrokerAdapter(api=self.api)
 
     def test_selected_market_data_interfaces_are_forwarded(self):
@@ -102,6 +108,9 @@ class GmBrokerAdapterTest(SimpleTestCase):
             OrderSide_Sell = 2
 
             def set_token(self, token):
+                return None
+
+            def set_serv_addr(self, addr):
                 return None
         adapter = GmBrokerAdapter(api=_BareSDK())
         with self.assertRaises(NotImplementedError):

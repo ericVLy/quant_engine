@@ -18,9 +18,12 @@ from .gm_adapter import GmBrokerAdapter
 
 
 class _GmStubAPI(object):
-    """测试桩：仅提供无副作用的 set_token，屏蔽真实 GM_TOKEN 配置。"""
+    """测试桩：仅提供无副作用的 set_token / set_serv_addr，屏蔽真实 GM 配置。"""
 
     def set_token(self, token):
+        return None
+
+    def set_serv_addr(self, addr):
         return None
 from .risk import RiskController
 from .scheduler import Scheduler
