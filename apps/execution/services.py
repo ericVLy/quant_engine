@@ -77,6 +77,12 @@ def enqueue_event(run, event_type, source='', payload=None):
     if not EventRegistry.validate(event_name):
         raise ExecutionError(f'未注册的事件类型: {event_name}')
 
+    base_event_type = EventRegistry.get_base_event_type(event_name)
+    if base_event_type:
+        # 叠加事件（用户/插件基于系统自带事件注册）：强制注入基事件类型，
+        # 用于事件溯源与 Edge 条件按基事件回落匹配（见 _event_condition_matches）。
+        event_payload['base_event_type'] = base_event_type
+
     event = Event.objects.create(
         run=run,
         event_type=event_name,
@@ -90,10 +96,24 @@ def enqueue_event(run, event_type, source='', payload=None):
 
 
 def _event_condition_matches(condition, payload):
-    """Match simple equality conditions used by Suite edges."""
+    """Match simple equality conditions used by Suite edges.
+
+    ``event_type`` 条件支持叠加事件回落匹配：事件自身类型或其叠加基事件
+    （payload.base_event_type，由 enqueue_event 注入）命中条件即视为匹配，
+    使用户叠加事件透明复用系统自带事件的 Edge 路由。
+    """
     if not condition:
         return True
-    return all(payload.get(key) == value for key, value in condition.items() if key != 'next_event')
+    for key, value in condition.items():
+        if key == 'next_event':
+            continue
+        if key == 'event_type':
+            if payload.get('event_type') == value or payload.get('base_event_type') == value:
+                continue
+            return False
+        if payload.get(key) != value:
+            return False
+    return True
 
 
 def process_next_event(run):

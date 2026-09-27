@@ -4,7 +4,7 @@ from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, Ale
 
 @admin.register(EventTypeRegistry)
 class EventTypeRegistryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'scope', 'plugin_id', 'is_active', 'created_at')
+    list_display = ('name', 'scope', 'base_event_type', 'plugin_id', 'is_active', 'created_at')
     search_fields = ('name', 'description')
     list_filter = ('scope', 'is_active')
 

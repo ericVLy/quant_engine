@@ -97,6 +97,10 @@ class EventTypeRegistry(models.Model):
     plugin_id = models.CharField(max_length=50, blank=True, null=True, verbose_name="来源插件")
     description = models.CharField(max_length=200, blank=True, verbose_name="描述")
     payload_schema = models.JSONField(default=dict, blank=True, verbose_name="载荷 JSON Schema")
+    base_event_type = models.CharField(
+        max_length=50, blank=True, null=True, verbose_name="叠加基事件",
+        help_text="用户自定义事件必须叠加在系统自带事件之上（base_event_type 为系统内置事件名）；插件事件可选叠加。",
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

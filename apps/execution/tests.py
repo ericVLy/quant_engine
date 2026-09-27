@@ -7,7 +7,7 @@ from rest_framework import status
 from unittest.mock import patch, MagicMock
 
 from apps.plans.models import Plan
-from apps.suites.models import Suite
+from apps.suites.models import Edge, Suite
 
 from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order
 from .events import EventType
@@ -15,6 +15,7 @@ from .registry import EventRegistry
 from .services import (
     ExecutionError,
     complete_suite_run,
+    enqueue_event,
     process_next_event,
     start_suite_run,
     trigger_plan,
@@ -69,6 +70,7 @@ class EventTypeRegistryTest(TestLoggingMixin, APITestCase):
             'name': 'MY_CUSTOM_EVENT',
             'scope': 'user',
             'description': '用户自定义事件',
+            'base_event_type': EventType.CASE_COMPLETED,
         }
         response = self.client.post(self.list_url, data)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -76,8 +78,13 @@ class EventTypeRegistryTest(TestLoggingMixin, APITestCase):
         EventRegistry.clear_cache()
         obj = EventTypeRegistry.objects.get(name='MY_CUSTOM_EVENT')
         self.assertEqual(obj.scope, 'user')
+        self.assertEqual(obj.base_event_type, EventType.CASE_COMPLETED)
 
         self.assertTrue(EventRegistry.validate('MY_CUSTOM_EVENT'))
+        self.assertEqual(
+            EventRegistry.get_base_event_type('MY_CUSTOM_EVENT'),
+            EventType.CASE_COMPLETED,
+        )
 
     def test_duplicate_builtin_event_type(self):
         data = {
@@ -89,6 +96,161 @@ class EventTypeRegistryTest(TestLoggingMixin, APITestCase):
         self.assertIn('系统内置事件', response.data['name'][0])
 
 
+class UserEventOverlayConstraintTest(TestLoggingMixin, APITestCase):
+    """叠加约束：用户自定义事件仅支持叠加在系统自带事件之上"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(username='overlay-admin', password='admin123')
+        self.client.force_authenticate(user=self.admin)
+        self.list_url = '/api/execution/event-types/'
+
+    def _payload(self, **overrides):
+        data = {
+            'name': 'OVERLAY_SURGE',
+            'scope': 'user',
+            'description': '叠加在系统事件上的用户事件',
+            'base_event_type': EventType.PRICE_SURGE,
+        }
+        data.update(overrides)
+        return data
+
+    def test_user_event_with_builtin_base_is_accepted(self):
+        response = self.client.post(self.list_url, self._payload())
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        EventRegistry.clear_cache()
+        obj = EventTypeRegistry.objects.get(name='OVERLAY_SURGE')
+        self.assertEqual(obj.base_event_type, EventType.PRICE_SURGE)
+        self.assertTrue(EventRegistry.validate('OVERLAY_SURGE'))
+        self.assertEqual(
+            EventRegistry.get_base_event_type('OVERLAY_SURGE'), EventType.PRICE_SURGE)
+
+    def test_user_event_requires_base_event(self):
+        response = self.client.post(self.list_url, self._payload(base_event_type=''))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        messages = ' '.join(str(value) for value in response.data.values())
+        self.assertIn('叠加', messages)
+        self.assertFalse(EventRegistry.validate('OVERLAY_SURGE'))
+
+    def test_user_event_base_must_be_builtin(self):
+        """不允许以其他用户/插件注册的事件为基（防止叠加套娃）。"""
+        EventRegistry.register('OTHER_USER_EVENT', scope='user', base_event_type=EventType.TIMER)
+        try:
+            response = self.client.post(
+                self.list_url,
+                self._payload(name='NESTED_OVERLAY', base_event_type='OTHER_USER_EVENT'),
+            )
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            messages = ' '.join(str(value) for value in response.data.values())
+            self.assertIn('系统自带事件', messages)
+            self.assertFalse(EventRegistry.validate('NESTED_OVERLAY'))
+        finally:
+            EventTypeRegistry.objects.filter(name='OTHER_USER_EVENT').delete()
+            EventRegistry.clear_cache()
+
+    def test_system_scope_registration_rejected(self):
+        """系统内置事件由代码定义，禁止通过注册表 API 冒充创建。"""
+        response = self.client.post(
+            self.list_url, self._payload(name='FAKE_SYSTEM_EVENT', scope='system'))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(EventRegistry.validate('FAKE_SYSTEM_EVENT'))
+
+    def test_plugin_event_base_optional_but_must_be_builtin(self):
+        response = self.client.post(
+            self.list_url, self._payload(name='PLUGIN_EVENT', scope='plugin', base_event_type=''))
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        response = self.client.post(
+            self.list_url, self._payload(name='PLUGIN_OVERLAY', scope='plugin'))
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        obj = EventTypeRegistry.objects.get(name='PLUGIN_OVERLAY')
+        self.assertEqual(obj.base_event_type, EventType.PRICE_SURGE)
+
+        response = self.client.post(
+            self.list_url,
+            self._payload(name='PLUGIN_BAD_BASE', scope='plugin', base_event_type='PLUGIN_EVENT'),
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_all_exposes_base_event_type(self):
+        self.client.post(self.list_url, self._payload())
+        response = self.client.get(self.list_url + 'list-all/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_name = {item['name']: item for item in response.data['results']}
+        self.assertIsNone(by_name[EventType.SUITE_INIT]['base_event_type'])
+        self.assertEqual(by_name['OVERLAY_SURGE']['base_event_type'], EventType.PRICE_SURGE)
+
+    def tearDown(self):
+        EventTypeRegistry.objects.filter(
+            name__in=['OVERLAY_SURGE', 'PLUGIN_EVENT', 'PLUGIN_OVERLAY']).delete()
+        EventRegistry.clear_cache()
+        super().tearDown()
+
+
+class EventOverlayRuntimeTest(TestLoggingMixin, TestCase):
+    """叠加事件运行时语义：入队注入基事件 + Edge 条件按基事件回落匹配"""
+
+    def setUp(self):
+        self.suite = Suite.objects.create(name='叠加运行时 Suite', status='published')
+        self.downstream = Suite.objects.create(
+            name='下游 Suite', status='published', parent=self.suite)
+        self.plan = Plan.objects.create(
+            name='叠加运行时 Plan', root_suite=self.suite, status='published',
+            symbol_scope={'type': 'symbols'},
+        )
+        self.run = SuiteRun.objects.create(
+            plan=self.plan, suite=self.suite, symbol='000001', status='running',
+            event_queue=[],
+        )
+        EventRegistry.register('OVERLAY_SURGE', scope='user', base_event_type=EventType.PRICE_SURGE)
+        EventRegistry.clear_cache()
+
+    def tearDown(self):
+        EventTypeRegistry.objects.filter(name='OVERLAY_SURGE').delete()
+        EventRegistry.clear_cache()
+        super().tearDown()
+
+    def test_enqueue_overlay_event_injects_base_event_type(self):
+        event = enqueue_event(self.run, 'OVERLAY_SURGE', source='test', payload={'symbol': '000001'})
+        self.assertEqual(event.payload['base_event_type'], EventType.PRICE_SURGE)
+        self.assertEqual(
+            Event.objects.get(pk=event.pk).payload['base_event_type'], EventType.PRICE_SURGE)
+
+    def test_builtin_event_payload_has_no_base_event_type(self):
+        event = enqueue_event(self.run, EventType.SUITE_INIT, source='test')
+        self.assertNotIn('base_event_type', event.payload)
+
+    def test_edge_condition_on_base_event_matches_overlay_event(self):
+        """基事件（PRICE_SURGE）的 Edge 条件可被叠加事件命中。"""
+        Edge.objects.create(
+            from_suite=self.suite, to_suite=self.downstream,
+            event_condition={'event_type': EventType.PRICE_SURGE, 'next_event': EventType.CASE_START},
+        )
+        enqueue_event(self.run, 'OVERLAY_SURGE', source='test')
+        processed = process_next_event(self.run)
+        self.assertEqual(processed.event_type, 'OVERLAY_SURGE')
+        self.assertEqual(processed.status, 'done')
+
+        run = SuiteRun.objects.get(pk=self.run.pk)
+        follow_event = Event.objects.get(pk=run.event_queue[-1])
+        self.assertEqual(follow_event.event_type, EventType.CASE_START)
+
+    def test_edge_condition_on_unrelated_event_does_not_match(self):
+        Edge.objects.create(
+            from_suite=self.suite, to_suite=self.downstream,
+            event_condition={'event_type': EventType.MACRO_CPI, 'next_event': EventType.CASE_START},
+        )
+        enqueue_event(self.run, 'OVERLAY_SURGE', source='test')
+        process_next_event(self.run)
+
+        run = SuiteRun.objects.get(pk=self.run.pk)
+        # 无条件命中的 Edge → 无后续事件入队（已处理的叠加事件本身被弹出）
+        self.assertEqual(len(run.event_queue), 0)
+        self.assertFalse(
+            Event.objects.filter(run=self.run, event_type=EventType.CASE_START).exists())
+
+
 class EventRegistryTest(TestLoggingMixin, TestCase):
     """测试事件注册中心功能"""
 
@@ -98,13 +260,17 @@ class EventRegistryTest(TestLoggingMixin, TestCase):
         self.assertFalse(EventRegistry.validate('NON_EXISTENT_EVENT'))
 
     def test_register_custom(self):
-        EventRegistry.register('TEST_EVENT', scope='user', description='测试事件')
+        EventRegistry.register(
+            'TEST_EVENT', scope='user', description='测试事件',
+            base_event_type=EventType.SUITE_INIT,
+        )
         EventRegistry.clear_cache()
         EventRegistry._get_cache()
         self.assertTrue(EventRegistry.validate('TEST_EVENT'))
         info = EventRegistry.get('TEST_EVENT')
         self.assertEqual(info['scope'], 'user')
         self.assertEqual(info['description'], '测试事件')
+        self.assertEqual(info['base_event_type'], EventType.SUITE_INIT)
         EventTypeRegistry.objects.filter(name='TEST_EVENT').delete()
         EventRegistry.clear_cache()
 
@@ -225,7 +391,7 @@ class EventAPITest(TestLoggingMixin, APITestCase):
             status='running',
             event_queue=[]
         )
-        EventRegistry.register('TEST_EVENT_TYPE', scope='user')
+        EventRegistry.register('TEST_EVENT_TYPE', scope='user', base_event_type=EventType.CASE_COMPLETED)
         EventRegistry.clear_cache()
         EventRegistry._get_cache()
 
@@ -345,7 +511,7 @@ class PaginationContractTest(TestLoggingMixin, APITestCase):
                 self.assertIsInstance(response.data['results'], list)
 
     def test_event_types_list_all_paginated(self):
-        EventRegistry.register('PAGING_EVENT', scope='user')
+        EventRegistry.register('PAGING_EVENT', scope='user', base_event_type=EventType.SUITE_INIT)
         EventRegistry.clear_cache()
         EventRegistry._get_cache()
         try:

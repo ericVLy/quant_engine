@@ -19,6 +19,40 @@ class EventTypeRegistrySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(f"'{value}' 是系统内置事件，不允许重复注册")
         return value
 
+    def validate(self, attrs):
+        """叠加约束：用户自定义事件只能叠加在系统自带事件之上。
+
+        - scope='user'：base_event_type 必填，且必须是系统内置事件
+          （不允许以其他用户/插件注册的事件为基，防止叠加套娃）；
+        - scope='plugin'：base_event_type 可选；提供时同样必须是系统内置事件；
+        - scope='system'：系统内置事件由代码定义，禁止通过注册表 API 冒充创建。
+        """
+        from .events import EventType
+
+        scope = attrs.get('scope') or getattr(self.instance, 'scope', 'user')
+        if 'base_event_type' in attrs:
+            base = attrs.get('base_event_type') or None
+        else:
+            base = getattr(self.instance, 'base_event_type', None) or None
+
+        if scope == 'system':
+            if self.instance is None:
+                raise serializers.ValidationError(
+                    "系统内置事件由代码定义（events.EventType），不允许创建 scope='system' 的事件类型"
+                )
+            return attrs
+
+        if scope == 'user' and not base:
+            raise serializers.ValidationError(
+                "用户自定义事件必须叠加在系统自带事件之上：请指定 base_event_type 为系统内置事件"
+            )
+        if base and not EventType.is_valid(base):
+            raise serializers.ValidationError(
+                f"叠加基事件 '{base}' 不是系统自带事件；"
+                f"仅支持叠加系统自带事件（如 {', '.join(EventType.all()[:6])} 等）"
+            )
+        return attrs
+
 
 class EventSerializer(serializers.ModelSerializer):
     class Meta:

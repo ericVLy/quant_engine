@@ -225,7 +225,7 @@ class CaseAPITest(APITestCase):
 
 class CaseModelTest(TestCase):
     def test_event_registry_accepts_custom_trigger(self):
-        EventRegistry.register('CASE_CUSTOM_TRIGGER', scope='user')
+        EventRegistry.register('CASE_CUSTOM_TRIGGER', scope='user', base_event_type=EventType.SUITE_INIT)
         case = Case.objects.create(
             name='自定义触发',
             node_type='signal',

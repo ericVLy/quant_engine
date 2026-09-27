@@ -442,7 +442,7 @@ cd c:\Users\linye\Documents\quant_engine
 | EX-01 | 系统内置事件类型常量（EventType） | ✅ 完成 | `events.py` |
 | EX-02 | 事件对象基类与具体事件类（BaseEvent + 子类） | ✅ 完成 | `events.py` |
 | EX-03 | 事件类型注册中心（缓存 + 校验 + 列表） | ✅ 完成 | `registry.py` |
-| EX-04 | 自定义事件类型注册表模型（EventTypeRegistry） | ✅ 完成 | `models.py` |
+| EX-04 | 自定义事件类型注册表模型（EventTypeRegistry，含叠加基事件 `base_event_type`） | ✅ 完成 | `models.py` |
 | EX-05 | 执行实例模型（SuiteRun） | ✅ 完成 | `models.py` |
 | EX-06 | 事件模型（Event） | ✅ 完成 | `models.py` |
 | EX-07 | 执行日志模型（ExecutionLog） | ✅ 完成 | `models.py` |
@@ -465,6 +465,7 @@ cd c:\Users\linye\Documents\quant_engine
 | EX-24 | **告警渠道配置 API（CRUD + 重载）** | ✅ 完成 | `views.py`, `serializers.py`, `urls.py` |
 | EX-25 | **告警 API 认证与授权** | ✅ 完成（DRF `IsAuthenticated`；未认证返回 403） | `views.py` |
 | EX-26 | **告警统计与通知重发接口** | ✅ 完成 | `views.py` |
+| EX-27 | **用户自定义事件叠加约束（仅支持系统自带事件叠加为用户事件）** | ✅ 完成（`base_event_type` 必填且须为系统内置事件；禁止冒充 scope='system'、禁止以其他自定义事件为基；入队注入 `base_event_type`、Edge 条件按基事件回落匹配；16 个专项测试） | `models.py`, `registry.py`, `serializers.py`, `services.py`, `admin.py` |
 
 #### API 端点
 
@@ -511,6 +512,7 @@ class EventTypeRegistry(models.Model):
     scope = models.CharField(choices=[('system','系统内置'),('plugin','插件定义'),('user','用户自定义')])
     description = models.CharField(max_length=200, blank=True)
     payload_schema = models.JSONField(default=dict, blank=True)
+    base_event_type = models.CharField(max_length=50, blank=True, null=True)  # 叠加基事件：用户事件必填且须为系统内置事件
     is_active = models.BooleanField(default=True)
 
 class Alert(models.Model):
@@ -1472,7 +1474,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | `VOLUME_SPIKE` | 外部事件 | 成交量放大 |
 | `MACRO_CPI` | 外部事件 | CPI 数据公布 |
 | `MACRO_INTEREST` | 外部事件 | 利率决议公布 |
-| （用户自定义） | 用户自定义 | 通过 `EventTypeRegistry` 注册 |
+| （用户自定义） | 用户自定义 | 仅支持叠加在系统自带事件之上（`EventTypeRegistry` 注册时 `base_event_type` 必填为系统内置事件；运行时入队注入基事件、Edge 条件按基事件回落匹配） |
 
 ### 6.2 关键路径时序
 
