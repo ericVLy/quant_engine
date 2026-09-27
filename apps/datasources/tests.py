@@ -548,3 +548,179 @@ class AshareCodeNormalizeTest(TestCase):
     def test_short_code_zero_pad(self):
         from apps.datasources.ashare import _normalize_ashare_code
         self.assertEqual(_normalize_ashare_code('426'), 'sz000426')
+    def test_short_code_zero_pad(self):
+        from apps.datasources.ashare import _normalize_ashare_code
+        self.assertEqual(_normalize_ashare_code('426'), 'sz000426')
+
+
+class MultiMarketKlineFetchTest(APITransactionTestCase):
+    """港股/美股日线拉取（akshare 东财）与按市场分派防回归。
+
+    背景：拉取层原先只实现 A 股（ashare/sina/腾讯），新增港股标的时
+    `_normalize_ashare_code('00700')` 会把港股代码补零成 `000700` 当深市
+    A 股拉取（错误行情静默入库）；美股代码 sina 不识别，永远返回空。
+    修复后 HK/US 分派到 akshare 东财接口，并禁止再落入 A 股 ashare 通道。
+    """
+
+    databases = ['default', 'kline']
+
+    def setUp(self):
+        self.symbol_hk = Symbol.objects.create(
+            code='00700', name='腾讯控股', market='HK', exchange='HKEX'
+        )
+        self.symbol_us = Symbol.objects.create(
+            code='AAPL', name='苹果', market='US', exchange='NASDAQ'
+        )
+        self.symbol_a_index = Symbol.objects.create(
+            code='000300', name='沪深300', market='A', exchange='SSE'
+        )
+
+    @staticmethod
+    def _akshare_hist_df():
+        """akshare 东财日线接口的中文列名返回结构。"""
+        return pd.DataFrame({
+            '日期': ['2024-01-02', '2024-01-03'],
+            '开盘': [300.0, 302.0],
+            '收盘': [301.0, 303.0],
+            '最高': [305.0, 306.0],
+            '最低': [299.0, 300.5],
+            '成交量': [1000000, 1100000],
+            '成交额': [301000000.0, 333300000.0],
+            '涨跌幅': [0.5, 0.66],
+        })
+
+    # ---- 港股 ----
+
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_fetch_hk_kline_via_akshare(self, mock_hist):
+        mock_hist.return_value = self._akshare_hist_df()
+        df = fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31', 'qfq')
+        self.assertEqual(len(df), 2)
+        kwargs = mock_hist.call_args.kwargs
+        self.assertEqual(kwargs['symbol'], '00700')
+        self.assertEqual(kwargs['start_date'], '20240101')
+        self.assertEqual(kwargs['end_date'], '20240131')
+        self.assertEqual(kwargs['adjust'], 'qfq')
+        for col in ('date', 'open', 'high', 'low', 'close', 'volume', 'amount'):
+            self.assertIn(col, df.columns)
+
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_fetch_hk_short_code_padded_to_five(self, mock_hist):
+        mock_hist.return_value = self._akshare_hist_df()
+        symbol = Symbol.objects.create(code='700', name='腾讯', market='HK', exchange='HKEX')
+        fetch_kline_from_ashare(symbol, '2024-01-01', '2024-01-31')
+        self.assertEqual(mock_hist.call_args.kwargs['symbol'], '00700')
+
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_fetch_hk_empty_result_raises_located_error(self, mock_hist):
+        mock_hist.return_value = pd.DataFrame()
+        with self.assertRaises(ValueError) as ctx:
+            fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
+        self.assertIn('00700', str(ctx.exception))
+
+    # ---- 美股 ----
+
+    @patch('apps.datasources.services.akshare_lib.stock_us_hist')
+    def test_fetch_us_kline_prefix_fallback(self, mock_hist):
+        # 105(NASDAQ) 失败 → 106(NYSE) 命中
+        mock_hist.side_effect = [Exception('not found'), self._akshare_hist_df()]
+        df = fetch_kline_from_ashare(self.symbol_us, '2024-01-01', '2024-01-31', 'qfq')
+        self.assertEqual(len(df), 2)
+        self.assertEqual(mock_hist.call_count, 2)
+        self.assertEqual(mock_hist.call_args_list[0].kwargs['symbol'], '105.AAPL')
+        self.assertEqual(mock_hist.call_args_list[1].kwargs['symbol'], '106.AAPL')
+
+    @patch('apps.datasources.services.akshare_lib.stock_us_hist')
+    def test_fetch_us_explicit_prefix_used_directly(self, mock_hist):
+        mock_hist.return_value = self._akshare_hist_df()
+        symbol = Symbol.objects.create(code='105.TSLA', name='特斯拉', market='US', exchange='NASDAQ')
+        fetch_kline_from_ashare(symbol, '2024-01-01', '2024-01-31')
+        self.assertEqual(mock_hist.call_count, 1)
+        self.assertEqual(mock_hist.call_args.kwargs['symbol'], '105.TSLA')
+
+    @patch('apps.datasources.services.akshare_lib.stock_us_hist')
+    def test_fetch_us_all_prefixes_fail_raises_located_error(self, mock_hist):
+        mock_hist.side_effect = Exception('connection down')
+        with self.assertRaises(ValueError) as ctx:
+            fetch_kline_from_ashare(self.symbol_us, '2024-01-01', '2024-01-31')
+        message = str(ctx.exception)
+        self.assertIn('AAPL', message)
+        self.assertIn('NASDAQ/NYSE/AMEX', message)
+        self.assertIn('connection down', message)
+
+    # ---- 分派防回归：HK/US 不得再走 A 股 ashare 通道 ----
+
+    @patch('apps.datasources.services.akshare_lib.stock_us_hist')
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    @patch('apps.datasources.services.ashare_lib.get_price')
+    def test_hk_us_never_routed_through_ashare(self, mock_get_price, mock_hk, mock_us):
+        mock_hk.return_value = self._akshare_hist_df()
+        mock_us.return_value = self._akshare_hist_df()
+        fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
+        fetch_kline_from_ashare(self.symbol_us, '2024-01-01', '2024-01-31')
+        mock_get_price.assert_not_called()
+
+    # ---- A 股 000xxx 二义段：exchange 标注沪市时显式 sh 前缀 ----
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_a_share_sse_ambiguous_code_gets_sh_prefix(self, mock_hist):
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-02'], '开盘': [3400.0], '收盘': [3410.0],
+            '最高': [3420.0], '最低': [3390.0], '成交量': [100000], '成交额': [3.4e10],
+        })
+        fetch_kline_from_ashare(self.symbol_a_index, '2024-01-01', '2024-01-31')
+        # exchange=SSE 的 000300（沪深300）必须以 sh 前缀传给 ashare，保留沪市指数语义
+        self.assertEqual(mock_hist.call_args.kwargs['symbol'], 'sh000300')
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_a_share_default_ambiguous_code_unchanged(self, mock_hist):
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-02'], '开盘': [10.0], '收盘': [10.2],
+            '最高': [10.5], '最低': [9.8], '成交量': [1000000], '成交额': [1.02e7],
+        })
+        symbol = Symbol.objects.create(code='000001', name='平安银行', market='A', exchange='SZSE')
+        fetch_kline_from_ashare(symbol, '2024-01-01', '2024-01-31')
+        # 缺省保守按深市个股，代码原样传递（ashare 层缺省 sz 前缀）
+        self.assertEqual(mock_hist.call_args.kwargs['symbol'], '000001')
+
+    # ---- 新增港股/美股标的 → 同步入库 端到端 ----
+
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_sync_new_hk_symbol_end_to_end(self, mock_hist):
+        mock_hist.return_value = self._akshare_hist_df()
+        added, skipped, error = sync_kline_for_symbol(
+            self.symbol_hk, 'daily',
+            start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
+        )
+        self.assertIsNone(error)
+        self.assertEqual(added, 2)
+        self.assertEqual(skipped, 0)
+        rows = query_kline_table(self.symbol_hk, date(2024, 1, 1), date(2024, 1, 31))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['extra']['currency'], 'HKD')
+        self.assertEqual(rows[0]['symbol'], '00700')
+
+    @patch('apps.datasources.services.akshare_lib.stock_us_hist')
+    def test_sync_new_us_symbol_end_to_end(self, mock_hist):
+        mock_hist.return_value = self._akshare_hist_df()
+        added, skipped, error = sync_kline_for_symbol(
+            self.symbol_us, 'daily',
+            start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
+        )
+        self.assertIsNone(error)
+        self.assertEqual(added, 2)
+        rows = query_kline_table(self.symbol_us, date(2024, 1, 1), date(2024, 1, 31))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['extra']['split_factor'], 1.0)
+
+    # ---- 同步失败语义：拉取异常透传为可定位 error（不静默） ----
+
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_sync_hk_failure_returns_located_error(self, mock_hist):
+        mock_hist.side_effect = Exception('network unreachable')
+        added, skipped, error = sync_kline_for_symbol(
+            self.symbol_hk, 'daily',
+            start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
+        )
+        self.assertEqual(added, 0)
+        self.assertIn('network unreachable', error or '')

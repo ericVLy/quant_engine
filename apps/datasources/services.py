@@ -1,11 +1,12 @@
 import logging
 import json
+import re
 from datetime import datetime, timedelta
 from decimal import Decimal
 import types
 
 import pandas as pd
-import akshare as ak
+import akshare as akshare_lib
 
 try:
     import ashare as ashare_lib
@@ -14,6 +15,7 @@ except ImportError:  # pragma: no cover
 
 from django.db import transaction, connections
 from apps.watchlists.models import Symbol
+from apps.watchlists.services import normalize_a_share_code, resolve_a_share_exchange
 from .models import (
     KLineSyncLog,
     get_kline_database_alias, get_kline_table_name, ensure_kline_table
@@ -251,17 +253,126 @@ class _CompatAshareModule(types.SimpleNamespace):
 ak = _CompatAshareModule()
 
 
+# 美股东财市场前缀：105=NASDAQ，106=NYSE，107=AMEX
+_US_EXCHANGE_PREFIXES = ('105', '106', '107')
+
+
+def _format_akshare_date(value):
+    """把 date/datetime/str 统一转成 akshare 东财接口要求的 YYYYMMDD 字符串。"""
+    if isinstance(value, str):
+        value = datetime.strptime(value, '%Y-%m-%d').date()
+    return value.strftime('%Y%m%d')
+
+
+def _normalize_hk_symbol_code(code):
+    """港股代码规整为东财接口要求的 5 位（'700' → '00700'，已带前缀的剥掉）。"""
+    value = str(code or '').strip().upper()
+    if value.startswith('HK$') or value.startswith('HK.'):
+        value = value[3:]
+    elif value.startswith('HK'):
+        value = value[2:]
+    digits = re.sub(r'[^0-9]', '', value)
+    return digits.zfill(5) if digits else str(code or '').strip()
+
+
+def fetch_kline_from_akshare_hk(symbol, start_date, end_date, adjust='qfq'):
+    """港股日线：akshare ``stock_hk_hist``（东方财富）。
+
+    返回与 A 股一致的规范化 DataFrame（date/open/high/low/close/volume/amount）。
+    拉取失败抛 ``ValueError``（携带可定位原因），供同步日志与前端提示展示。
+    """
+    hk_code = _normalize_hk_symbol_code(symbol.code)
+    try:
+        df = akshare_lib.stock_hk_hist(
+            symbol=hk_code,
+            period='daily',
+            start_date=_format_akshare_date(start_date),
+            end_date=_format_akshare_date(end_date),
+            adjust=adjust if adjust in ('qfq', 'hfq') else '',
+        )
+    except Exception as exc:
+        raise ValueError(f"港股 {hk_code} 日线拉取失败（akshare stock_hk_hist）：{exc}") from exc
+    if df is None or df.empty:
+        raise ValueError(f"港股 {hk_code} 未查询到 {start_date}~{end_date} 的日线数据，请确认代码是否正确")
+    return _normalize_ashare_kline_dataframe(df, symbol)
+
+
+def fetch_kline_from_akshare_us(symbol, start_date, end_date, adjust='qfq'):
+    """美股日线：akshare ``stock_us_hist``（东方财富，需交易所市场前缀）。
+
+    代码已带前缀（如 ``105.AAPL``）时直接使用；纯代码（如 ``AAPL``）依次尝试
+    NASDAQ/NYSE/AMEX。全部失败抛 ``ValueError``（携带可定位原因）。
+    """
+    us_code = str(symbol.code or '').strip().upper()
+    if re.fullmatch(r'(105|106|107)\.[A-Z0-9.\-]+', us_code):
+        candidates = [us_code]
+    else:
+        candidates = [f'{prefix}.{us_code}' for prefix in _US_EXCHANGE_PREFIXES]
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            df = akshare_lib.stock_us_hist(
+                symbol=candidate,
+                period='daily',
+                start_date=_format_akshare_date(start_date),
+                end_date=_format_akshare_date(end_date),
+                adjust=adjust if adjust in ('qfq', 'hfq') else '',
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(f"美股 {candidate} 日线拉取失败：{exc}")
+            continue
+        if df is not None and not df.empty:
+            return _normalize_ashare_kline_dataframe(df, symbol)
+
+    detail = f"；最后错误：{last_error}" if last_error else "（接口返回空数据）"
+    raise ValueError(
+        f"美股 {us_code} 未查询到 {start_date}~{end_date} 的日线数据"
+        f"（已尝试 NASDAQ/NYSE/AMEX 市场前缀）{detail}"
+    )
+
+
+def _a_share_fetch_code(symbol):
+    """A 股拉取用代码：修正 000xxx 二义段的指数语义。
+
+    库中 exchange 显式标注沪市（SSE/SHSE/SH/XSHG）的 000 开头代码（如
+    000300 沪深300）必须以 ``sh`` 前缀传给 ashare，否则会被保守判为深市
+    个股而拉错数据（见 apps/watchlists.services 统一规则）。
+    """
+    raw = str(symbol.code or '').strip()
+    normalized = normalize_a_share_code(raw)
+    if (
+        normalized.startswith('000')
+        and resolve_a_share_exchange(raw, str(getattr(symbol, 'exchange', '') or '')) == 'SSE'
+    ):
+        return f'sh{normalized}'
+    return symbol.code
+
+
 def fetch_kline_from_ashare(symbol, start_date, end_date, adjust='qfq'):
-    """使用 ashare 模块获取 K 线数据，并保持与旧 AkShare 返回结构一致。"""
+    """按市场分派拉取日线数据，返回统一的规范化 DataFrame。
+
+    - A 股：ashare 适配层（sina 主源 + 腾讯备用）；
+    - 港股：akshare ``stock_hk_hist``（东方财富）；
+    - 美股：akshare ``stock_us_hist``（东方财富）。
+
+    旧函数名保留（历史调用兼容），docstring 以当前实现为准。
+    """
     logger.info(f"Fetching {symbol.market} K线数据 for {symbol.code} from {start_date} to {end_date} via ashare")
     if isinstance(start_date, str):
         start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
     if isinstance(end_date, str):
         end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
 
+    if symbol.market == 'HK':
+        return fetch_kline_from_akshare_hk(symbol, start_date, end_date, adjust)
+    if symbol.market == 'US':
+        return fetch_kline_from_akshare_us(symbol, start_date, end_date, adjust)
+
     if symbol.market == 'A' and hasattr(ak, 'stock_zh_a_hist'):
         df = ak.stock_zh_a_hist(
-            symbol=symbol.code,
+            symbol=_a_share_fetch_code(symbol),
             start_date=start_date,
             end_date=end_date,
             period='daily',
