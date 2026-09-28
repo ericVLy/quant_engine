@@ -1177,6 +1177,31 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - `mcp_server/bootstrap.py` 默认 `DJANGO_SETTINGS_MODULE=quant_engine.settings.dev`（可用环境变量覆盖），并默认关闭分时更新器。
 - 传输配置（`MCP_TRANSPORT`/`MCP_HOST`/`MCP_PORT`/`MCP_AUTH_TOKEN`/`MCP_ALLOWED_HOSTS`/`MCP_ALLOWED_ORIGINS`/`MCP_CORS_ORIGINS`）见模块11「传输、鉴权与运维」；MCP 客户端配置示例见 `README.md`「MCP 服务（AI 助手接入）」。
 
+#### 端到端冒烟测试（`manage.py mcp_smoke_test`，2026-09-24）
+
+对**运行中的 MCP 服务**用真实 MCP 协议（SSE 客户端）跑通一条完整链路，用于 MCP 改动后的回归自检：
+
+```bash
+# 前置：MCP 服务已启动且已开写门禁
+.venv/bin/python manage.py run_dev_stack --allow-mutate --allow-trigger   # 或 run_mcp_server 同样加两个开关
+
+# 全链路（建夹具 → 发布 → 回读校验 → 受控触发 → 删除保护校验 → 清理）
+.venv/bin/python manage.py mcp_smoke_test \
+    --account-id <gm账户ID> --allocated-capital 50000 --trigger
+
+# 只建 draft 不发布 / 保留夹具供人工核对
+.venv/bin/python manage.py mcp_smoke_test --no-publish
+.venv/bin/python manage.py mcp_smoke_test --keep
+```
+
+- 步骤：`prepare_account` → `check_tools` → `create_fixture` → `publish_fixture` → `verify_reads` →（`--trigger`）`trigger_execution` → `check_delete_protection` → `purge_runs` → `delete_fixture`。
+- 覆盖工具：写 `create_case`/`create_suite`/`update_suite_topology`/`create_plan`/`delete_*`、读 `list_plans`/`get_plan`/`list_cases`/`get_case`/`get_suite_topology`/`list_suite_runs`、受控触发 `trigger_plan_execution`（共 17 个）。
+- **发布不在 MCP 范围**（MCP-20 边界：只改 draft）：发布经 `apps.*` 服务层完成，与 REST 视图同一入口。
+- 清理只删**本次调用自建**的夹具与 `SuiteRun`（先 `purge_runs` 解除 Plan 删除保护），不触碰既有数据；默认建完即清，失败时按依赖逆序尽力清理并在 stderr 打印已创建主键。
+- 编排逻辑在 `mcp_server/smoke.py`：**异步方法只做 MCP 协议调用、同步方法只写数据库**，避免在事件循环里访问 Django ORM；`SseMcpSession` 为 `mcp` SDK 适配层，`McpSession` 协议让测试可注入假会话（不连网络）。
+- 冒烟客户端读取 `CallToolResult.is_error`（mcp 2.x 为 snake_case；兼容 `isError`）——此前若误读会让工具失败被静默当作成功。
+
+
 #### 命令行写开关（MCP-18，2026-09-17）
 
 - ✅ 已完成：`--allow-trigger` 支持管理命令与包入口，适用于 SSE 和 stdio；等效于当前进程设置 `MCP_ALLOW_TRIGGER=1`。
@@ -1261,7 +1286,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 | `mcp_server` | ✅ 已完成 | 57 通过 | 100%（**SSE（HTTP）MCP 服务**：24 工具（14 只读/受控触发 + 10 受控配置写 MCP-20） + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18 · **MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，CLI 与 `MCP_*` 配置变量逐个带说明**） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-24）：✔ 461 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（数量演进：2026-09-21 → 453；2026-09-24 → 455（gm 远程终端 `set_serv_addr` +2）→ 458（`run_dev_stack` 一键启动命令 +3）→ **461**（SQLite 多进程并发调优 `db_tuning` +3）；另修复 monitoring 开盘清理在非 +08 系统时区下的 UTC 边界换算 bug）。此前基线：**2026-09-21 ✔ 453 个**（MCP-20 配置写工具 +11）。此前基线：**2026-09-15 ✔ 402 个测试全部通过** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36；**2026-09-17 ✔ 437 个**（mcp_server 41）。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-24）：✔ 501 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（数量演进：2026-09-21 → 453；2026-09-24 → 455（gm 远程终端 `set_serv_addr` +2）→ 458（`run_dev_stack` 一键启动命令 +3）→ 461（SQLite 多进程并发调优 `db_tuning` +3）→ **501**（MCP 端到端冒烟测试 +40：`mcp_server/tests_smoke.py` 29 + `apps/execution/tests_mcp_smoke_command.py` 11）；另修复 monitoring 开盘清理在非 +08 系统时区下的 UTC 边界换算 bug）。此前基线：**2026-09-21 ✔ 453 个**（MCP-20 配置写工具 +11）。此前基线：**2026-09-15 ✔ 402 个测试全部通过** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36；**2026-09-17 ✔ 437 个**（mcp_server 41）。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 
 
 ## 五、待办事项汇总
@@ -1300,6 +1325,8 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | gm SDK 远程终端连接（`GM_SERV_ADDR` 配置 / 环境变量；`GmBrokerAdapter` 在 `set_token` 前调用 gm `set_serv_addr("远端IP:7001")`，空值保持本机终端缺省；`gm_live_link` 支持 `--serv-addr`） | `runner`, `execution`, `monitoring` | ✅ 已完成（2026-09-24；runner gm 适配 +2 专项测试；见模块8 说明） | R-07、EX-18 |
 | 一键启动开发栈（`manage.py run_dev_stack`：单命令启动 Django 服务 + MCP 服务（可选 `--with-scheduler`），`--web-host/port`、`--mcp-host/port/--mcp-auth-token/--allow-trigger/--allow-mutate` 可配；任一子进程退出 fail-fast 终止其余；SIGINT/SIGTERM 一键停止；Django 子进程内置 `RUN_MAIN=true` + `--noreload` 保证分时更新器单进程启动） | `execution`（管理命令） | ✅ 已完成（2026-09-24；`apps/execution/tests_dev_stack.py` 3 个专项测试；端到端实测启动/健康探测/一键停止） | 运维体验增强 |
 | SQLite 多进程并发调优（`quant_engine/db_tuning.py`：`connection_created` 信号为每个 SQLite 连接执行 `PRAGMA journal_mode=WAL` + `busy_timeout`（与 `OPTIONS['timeout']` 一致，默认 5s）；dev/local 两库（主库 + K 线库）配置 `transaction_mode=IMMEDIATE` + `timeout=30`；消除 `run_dev_stack` 下 web/mcp 双进程 updater 并发写引发的 `database is locked`；仅 SQLite 生效，生产 MariaDB 不受影响） | 全局 settings, `execution`（测试） | ✅ 已完成（2026-09-24；`apps/execution/tests_db_tuning.py` 3 个专项测试；dev_stack 端到端复验 0 lock 错误、启动回填无异常） | 运维体验增强（N-02 前置） |
+| MCP 端到端冒烟测试（`manage.py mcp_smoke_test`：用**真实 MCP 协议（SSE 客户端）**跑通「建夹具（Case×2 → Suite → 拓扑 → Plan）→ 发布 → 读侧回读校验 →（可选）受控触发 → 删除保护校验 → 清理」，覆盖 17 个 MCP 工具（写 / 读 / 触发 / 删除）；编排逻辑 `mcp_server/smoke.py`（**异步只走 MCP、同步只写库**，ORM 不进入事件循环；`SseMcpSession` 适配 + `McpSession` 协议便于无网络测试）；默认建完即清、`--keep` 保留、`--no-publish` 只建 draft；`--url/--auth-token/--account-id/--allocated-capital/--symbol/--trigger` 可配；失败打印已完成步骤与已创建主键，并按依赖逆序尽力清理；顺带修正客户端读取 `CallToolResult.is_error`（mcp 2.x 为 snake_case，此前误读 `isError` 会把工具失败静默当成功）） | `execution`（管理命令）, `mcp_server` | ✅ 已完成（2026-09-24；`mcp_server/tests_smoke.py` 29 个 + `apps/execution/tests_mcp_smoke_command.py` 11 个专项测试；实机对运行中的 MCP 服务跑通全链路，夹具 0 残留） | 模块11 验证（MCP-20 收尾） |
+| Case 发布逻辑收敛到服务层（`apps/cases/services.py::publish_case`：参数白名单校验 + 版本 +1 + 固化 `CaseVersion` 快照，事务内完成；`CaseViewSet.publish` 改为调用该服务，业务逻辑不再堆在 `views.py`，REST 与冒烟脚本共用同一入口） | `cases` | ✅ 已完成（行为不变，既有 cases 用例全通过） | C-03、代码组织规范 |
 
 #### 5.1.2 待开发任务
 
@@ -1431,6 +1458,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段4 | 分时监控专项测试 | ✅ 65 个通过（`apps/monitoring/tests.py`：`IntradayPoint` 模型/唯一约束、`session_status` 多市场时段与夏令时、`trading_minutes_local` 交易分钟枚举、spot 规范化与缺失字段降级、`GmSnapshotProvider` tick/逐分钟历史规范化与 SHSE/SZSE 映射、`CompositeSnapshotProvider` 回退与历史转发编排、`sample_intraday` 采样/同分钟覆盖/异常隔离/标列表传递、`backfill_intraday` 启动回填（补缺失/不覆盖/完整性跳过/不支持源跳过/双时段）、`clear_intraday` 清空幂等、API 契约与 realtime 合并、`IntradayUpdater` 内部更新器（run_once 委托/UTC23 清理幂等/单例/启动幂等/**启动清空（全清一次 + 失败重试）**/**开盘清理（交易时段触发、边界为当地零点、同日幂等、收盘不触发）**）、SSE stream 首块快照与 symbol 校验）；前端页面经 `vue-tsc -b` + `vite build` 验证（见模块9 前端实施记录） | gm SDK 真实终端联调已核对（2026-09-14，SZSE.000426）：60s bar 时间在 `bob`/`eob`（ISO 带时区，已兼容）；`history` 按 bar 结束时间过滤 `end_time`（回填 `end` 已加 1 分钟）；60s bar `volume`/`amount` 为分钟值（逐 bar 累加生成累计值）；bar 内 `pre_close=0`（回填用前一日 1d bar close）；tick 为空时快照回退当日 60s bar 聚合。实测回填 120/120 分钟完整。SSE 长连接在 dev runserver 实际推送与断线重连待联调 |
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
 | P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 46 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200）；**MCP-19 变量描述**（`McpToolSchemaTest` 3 个：29 个入参 `inputSchema` 描述非空且长度 ≥ 6、变量名与必填集合与 `tools_impl` 门面签名逐一相等、工具说明与门面 docstring 逐变量覆盖 `Args`/`Returns`；`McpVariablesDocumentationTest` 2 个：两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致、代码读取的每个 `MCP_*` 变量都出现在 `config.py` 模块文档中） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
+| 2026-09-24 | MCP 端到端冒烟测试（`manage.py mcp_smoke_test`） | ✅ 40 个通过。`mcp_server/tests_smoke.py` 29 个：`CallToolResult` 归一（`is_error` / `isError` / 空 content）、工具清单校验与缺失上报、建夹具调用顺序与参数透传（账户 / 资金 / `symbol_scope`）、读侧回读断言（标的与拓扑一致、未建夹具即报错、不一致可检出）、受控触发与门禁关闭、删除保护生效 / 失效探测、清理顺序与守卫（未清运行实例 / 清理残留）、同步 DB 步骤（账户资金配置幂等、发布三件套与幂等、`purge_runs` 只删自建且幂等）。`apps/execution/tests_mcp_smoke_command.py` 11 个：全链路阶段顺序与工具覆盖、参数与开关（`--keep` / `--no-publish` / `--trigger` / `--symbol` / 账户与资金）、失败上报与尽力清理、默认 URL 与 Bearer 鉴权头 | 实机对运行中的 MCP 服务跑通 `--trigger` 全链路与 `--no-publish` 两种模式，夹具 0 残留（另：ORM 不进入事件循环；命令编排测试用内存会话，避免 SQLite shared-cache 测试库与 TestCase 事务互锁） |
 
 #### 测试验收标准
 

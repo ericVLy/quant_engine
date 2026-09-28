@@ -1,11 +1,11 @@
 ﻿from rest_framework import status, viewsets
-from django.db import transaction
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from .models import Case, CaseVersion
-from .serializers import CaseSerializer, CaseVersionSerializer, validate_case_schema
-from .services import CaseError, delete_case
+from .serializers import CaseVersionSerializer
+from .serializers import CaseSerializer
+from .services import CaseError, delete_case, publish_case
 
 
 class CaseViewSet(viewsets.ModelViewSet):
@@ -34,21 +34,9 @@ class CaseViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'])
-    @transaction.atomic
     def publish(self, request, pk=None):
         case = self.get_object()
-        validate_case_schema(case.node_type, case.params or {})
-        case.status = 'published'
-        case.version += 1
-        case.save(update_fields=('status', 'version', 'updated_at'))
-        CaseVersion.objects.create(
-            case=case,
-            version=case.version,
-            name=case.name,
-            node_type=case.node_type,
-            params=case.params,
-            status=case.status,
-        )
+        publish_case(case)
         return Response(self.get_serializer(case).data)
 
     @action(detail=True, methods=['get'])
