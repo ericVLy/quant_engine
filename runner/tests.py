@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 from decimal import Decimal
 import asyncio
 from threading import Event
@@ -36,7 +36,6 @@ class RunnerIntegrationTest(TestCase):
         self.suite = Suite.objects.create(name='Runner Suite', status='published')
         self.plan = Plan.objects.create(
             name='Runner Plan', root_suite=self.suite, status='published',
-            symbol_scope={'type': 'symbols'},
         )
 
     def test_suite_runner_executes_case_and_persists_log_and_order(self):
@@ -160,10 +159,15 @@ class SchedulerTest(TestCase):
     def test_matches_cron_and_enqueues_symbols(self):
         suite = Suite.objects.create(name='Scheduled Suite', status='published')
         Symbol.objects.create(code='000001', name='测试标的', market='A')
+        # 标的由 Case 声明
+        suite.cases.set([Case.objects.create(
+            name='signal', node_type='signal', status='published',
+            params={'trigger': {'event_type': 'SUITE_INIT'},
+                    'symbol_scope': {'type': 'symbols', 'symbol_codes': ['000001']}},
+        )])
         Plan.objects.create(
             name='Scheduled Plan', root_suite=suite, status='published',
             trigger_type='time', cron_expr='30 10 * * *',
-            symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
         )
 
         scheduler = Scheduler()
@@ -175,10 +179,14 @@ class SchedulerTest(TestCase):
     def test_poll_once_deduplicates_same_minute(self):
         suite = Suite.objects.create(name='去重 Suite', status='published')
         Symbol.objects.create(code='000002', name='测试标的2', market='A')
+        suite.cases.set([Case.objects.create(
+            name='signal', node_type='signal', status='published',
+            params={'trigger': {'event_type': 'SUITE_INIT'},
+                    'symbol_scope': {'type': 'symbols', 'symbol_codes': ['000002']}},
+        )])
         Plan.objects.create(
             name='去重 Plan', root_suite=suite, status='published',
             trigger_type='time', cron_expr='30 10 * * *',
-            symbol_scope={'type': 'symbols', 'symbol_codes': ['000002']},
         )
 
         scheduler = Scheduler()
@@ -193,7 +201,6 @@ class SchedulerTest(TestCase):
         plan = Plan.objects.create(
             name='刷新 Plan', root_suite=suite, status='published',
             trigger_type='time', cron_expr='30 10 * * *',
-            symbol_scope={'type': 'symbols', 'symbol_codes': []},
         )
         scheduler = Scheduler()
         scheduler.poll_once(datetime(2026, 8, 26, 10, 30))

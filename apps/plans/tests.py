@@ -1,7 +1,8 @@
-from django.test import TestCase
+﻿from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.cases.models import Case
 from apps.execution.events import EventType
 from apps.execution.models import ExecutionLog, SuiteRun
 from apps.watchlists.models import Group, Symbol
@@ -18,20 +19,29 @@ class PlanAPITest(APITestCase):
 		self.url = '/api/plans/'
 		self.suite = Suite.objects.create(name='策略 Suite')
 		self.published_suite = Suite.objects.create(name='已发布 Suite', status='published')
+		# 标的范围由 Case 声明：给已发布 Suite 挂一个声明 000001 的已发布 Case
+		Symbol.objects.get_or_create(code='000001', defaults={'name': '平安银行', 'market': 'A'})
+		self.signal_case = Case.objects.create(
+			name='信号', node_type='signal', status='published',
+			params={
+				'trigger': {'event_type': 'SUITE_INIT'},
+				'symbol_scope': {'type': 'symbols', 'symbol_codes': ['000001']},
+			},
+		)
+		self.published_suite.cases.set([self.signal_case])
 
 	def plan_data(self, **overrides):
 		data = {
 			'name': '手动计划',
 			'root_suite': self.suite.id,
 			'trigger_type': 'manual',
-			'symbol_scope': {'type': 'symbols', 'symbol_codes': ['000001']},
 		}
 		data.update(overrides)
 		return data
 
 	def create_plan(self, **overrides):
 		data = self.plan_data(**overrides)
-		data['root_suite'] = self.suite
+		data['root_suite'] = overrides.get('root_suite', self.suite)
 		return Plan.objects.create(**data)
 
 	def test_create_update_and_filter_plan(self):
@@ -88,23 +98,28 @@ class PlanAPITest(APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertIn('event_type', response.data)
 
-	def test_validate_symbol_scope(self):
-		response = self.client.post(
-			self.url,
-			self.plan_data(symbol_scope={'type': 'invalid'}),
-			format='json',
-		)
-		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-		self.assertIn('symbol_scope', response.data)
+	def test_plan_ignores_symbol_scope_field(self):
+		"""标的范围已下沉到 Case：Plan 模型不再持有 symbol_scope 字段。
 
-	def test_reject_symbol_scope_with_unknown_fields(self):
+		DRF 对未知输入键是静默忽略（不报错），因此这里断言的是
+		"该字段不会落到 Plan 上"，标的以 Case 声明为准。
+		"""
 		response = self.client.post(
 			self.url,
-			self.plan_data(symbol_scope={'type': 'symbols', 'symbol_codes': ['000001'], 'extra': 'bad'}),
+			self.plan_data(symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']}),
 			format='json',
 		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertNotIn('symbol_scope', response.data)
+		self.assertFalse(hasattr(Plan.objects.get(pk=response.data['id']), 'symbol_scope'))
+
+	def test_publish_requires_a_case_declaring_symbols(self):
+		"""树内没有任何已发布 Case 声明标的时，Plan 不得发布。"""
+		empty_suite = Suite.objects.create(name='空 Suite', status='published')
+		plan = self.create_plan(root_suite=empty_suite)
+		response = self.client.post(f'{self.url}{plan.id}/publish/')
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-		self.assertIn('symbol_scope', response.data)
+		self.assertIn('symbol_scope', str(response.data))
 
 	def test_publish_requires_published_root_suite(self):
 		plan = self.create_plan()
@@ -120,20 +135,26 @@ class PlanAPITest(APITestCase):
 		self.assertEqual(plan.version, 2)
 
 	def test_resolve_symbols_endpoint(self):
-		symbol = Symbol.objects.create(code='000001', name='平安银行', market='A')
-		plan = self.create_plan()
+		# 标的集合 = 编排树内 Case 声明的并集（000001 由 setUp 的 Case 声明）
+		plan = self.create_plan(root_suite=self.published_suite)
 		response = self.client.get(f'{self.url}{plan.id}/symbols/')
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(response.data['count'], 1)
-		self.assertEqual(response.data['results'][0]['id'], symbol.id)
+		self.assertEqual(response.data['results'][0]['code'], '000001')
 
 	def test_resolve_group_symbols_endpoint(self):
 		symbol = Symbol.objects.create(code='000002', name='万科A', market='A')
 		group = Group.objects.create(name='蓝筹')
 		group.symbols.add(symbol)
-		plan = self.create_plan(
-			symbol_scope={'type': 'groups', 'group_ids': [group.id]}
-		)
+		suite = Suite.objects.create(name='分组 Suite', status='published')
+		suite.cases.set([Case.objects.create(
+			name='分组信号', node_type='signal', status='published',
+			params={
+				'trigger': {'event_type': 'SUITE_INIT'},
+				'symbol_scope': {'type': 'groups', 'group_ids': [group.id]},
+			},
+		)])
+		plan = self.create_plan(root_suite=suite)
 		response = self.client.get(f'{self.url}{plan.id}/symbols/')
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertEqual(response.data['count'], 1)
@@ -178,7 +199,7 @@ class PlanAPITest(APITestCase):
 			plan=plan, version=1,
 			snapshot={
 				'name': '历史版本', 'root_suite_id': self.published_suite.id,
-				'trigger_type': 'manual', 'symbol_scope': {'type': 'all'},
+				'trigger_type': 'manual',
 				'exec_mode': 'serial', 'retry_policy': {}, 'status': 'published',
 			},
 		)

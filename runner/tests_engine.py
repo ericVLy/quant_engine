@@ -1,4 +1,4 @@
-"""风控（R-08）、热加载注册中心（R-09）与引擎数据集成测试。"""
+﻿"""风控（R-08）、热加载注册中心（R-09）与引擎数据集成测试。"""
 
 from datetime import date, datetime, time as dtime
 
@@ -116,7 +116,6 @@ class EngineDataRunTest(TestCase):
         suite.cases.add(case)
         plan = Plan.objects.create(
             name='因子 Plan', root_suite=suite, status='published',
-            symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
         )
 
         class StubBuilder(DataContextBuilder):

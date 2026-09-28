@@ -1,4 +1,4 @@
-"""
+﻿"""
 告警功能测试文件
 """
 from django.test import TestCase, override_settings
@@ -57,7 +57,6 @@ class AlertServiceTests(TestCase):
             root_suite=self.suite,
             trigger_type='time',
             cron_expr='0 9 * * 1-5',
-            symbol_scope={'type': 'all'},
             status='published',
             created_by=self.user
         )
@@ -325,7 +324,6 @@ class AlertModelTests(TestCase):
             root_suite=self.suite,
             trigger_type='time',
             cron_expr='0 9 * * 1-5',
-            symbol_scope={'type': 'all'},
             status='published',
             created_by=self.user
         )
@@ -430,7 +428,6 @@ class AlertAPITests(APITestCase):
             root_suite=self.suite,
             trigger_type='time',
             cron_expr='0 9 * * 1-5',
-            symbol_scope={'type': 'all'},
             status='published',
             created_by=self.user
         )
@@ -547,7 +544,6 @@ class AlertIntegrationTests(TestCase):
             root_suite=self.suite,
             trigger_type='time',
             cron_expr='0 9 * * 1-5',
-            symbol_scope={'type': 'all'},
             account_id='test_account',
             allocated_capital=50000.00,
             status='published',

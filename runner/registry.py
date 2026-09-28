@@ -15,7 +15,7 @@ class PlanRegistry:
 
     _executable_keys = (
         'root_suite_id', 'trigger_type', 'cron_expr', 'event_type',
-        'symbol_scope', 'exec_mode', 'retry_policy', 'status', 'version',
+        'exec_mode', 'retry_policy', 'status', 'version',
     )
 
     @classmethod
@@ -24,7 +24,7 @@ class PlanRegistry:
 
         仅比较 ``version`` 是不够的：已发布 Plan 可以不经发布直接编辑
         （REST / MCP 的 update_plan 不改 version），若只按版本判断，
-        改动后的 ``cron_expr`` / ``symbol_scope`` 会被长期缓存，
+        改动后的 ``cron_expr`` 会被长期缓存，
         调度器就会按旧配置触发（队列真正被执行后这是实害）。
         """
         if existing is None:

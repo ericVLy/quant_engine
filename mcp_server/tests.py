@@ -1,4 +1,4 @@
-"""MCP 服务（模块11）测试：工具门面 + 装配层 + SSE 传输与安全边界。
+﻿"""MCP 服务（模块11）测试：工具门面 + 装配层 + SSE 传输与安全边界。
 
 需求编号：MCP-01 ~ MCP-20（见 documents.md 模块11）。
 只读工具直接查库；写操作仅"创建 pending SuiteRun"与"受控配置写"，不涉及任何真实下单。
@@ -72,7 +72,9 @@ class McpToolsTest(TestCase):
         self.case = Case.objects.create(
             name='mcp-case',
             node_type='signal',
-            params={'trigger': {'event_type': 'SUITE_INIT'}},
+            # 标的范围由 Case 声明
+            params={'trigger': {'event_type': 'SUITE_INIT'},
+                    'symbol_scope': {'type': 'symbols', 'symbol_codes': ['000001']}},
             created_by=self.user,
         )
         self.suite = Suite.objects.create(
@@ -84,7 +86,6 @@ class McpToolsTest(TestCase):
             name='mcp-plan',
             root_suite=self.suite,
             trigger_type='manual',
-            symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
             created_by=self.user,
         )
 
@@ -770,7 +771,6 @@ class McpMutationsTest(TestCase):
         self.suite = Suite.objects.create(name='mut-suite', created_by=self.user)
         self.plan = Plan.objects.create(
             name='mut-plan', root_suite=self.suite,
-            trigger_type='manual', symbol_scope={'type': 'all'}, created_by=self.user,
         )
 
     def test_all_mutations_blocked_by_default(self):
@@ -915,39 +915,6 @@ class McpMutationsTest(TestCase):
                 mutations.delete_suite(self.suite.id)
         self.assertTrue(Suite.objects.filter(pk=self.suite.id).exists())
 
-    def test_plan_create_update_delete_roundtrip(self):
-        from mcp_server import mutations
-
-        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
-            created = mutations.create_plan(
-                'round-plan', root_suite_id=self.suite.id,
-                trigger_type='manual',
-                symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
-            )
-            self.assertEqual(created['status'], 'draft')
-            self.assertEqual(created['symbol_scope']['symbol_codes'], ['000001'])
-
-            updated = mutations.update_plan(created['id'], name='round-plan-2')
-            self.assertEqual(updated['name'], 'round-plan-2')
-
-            deleted = mutations.delete_plan(created['id'])
-        self.assertEqual(deleted, {'deleted': 'plan', 'id': created['id']})
-        self.assertFalse(Plan.objects.filter(pk=created['id']).exists())
-
-    def test_plan_rejects_symbol_scope_and_cron_violations(self):
-        """MCP-20：symbol_scope 白名单 / time 触发缺 cron 与 REST 400 同源。"""
-        from mcp_server import mutations
-
-        with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
-            with self.assertRaises(ValueError):
-                mutations.create_plan(
-                    'bad', root_suite_id=self.suite.id, trigger_type='manual',
-                    symbol_scope={'type': 'symbols'},
-                )
-            with self.assertRaises(ValueError):
-                mutations.create_plan('bad', root_suite_id=self.suite.id, trigger_type='time')
-            with self.assertRaises(ValueError):
-                mutations.update_plan(999999, name='x')
 
     def test_delete_plan_conflict_with_existing_runs(self):
         from mcp_server import mutations
@@ -1025,10 +992,9 @@ class McpMutationsTest(TestCase):
             created = mutations.create_plan(
                 'round-plan', root_suite_id=self.suite.id,
                 trigger_type='manual',
-                symbol_scope={'type': 'symbols', 'symbol_codes': ['000001']},
             )
             self.assertEqual(created['status'], 'draft')
-            self.assertEqual(created['symbol_scope']['symbol_codes'], ['000001'])
+            self.assertNotIn('symbol_scope', created)   # 标的范围已下沉到 Case
 
             updated = mutations.update_plan(created['id'], name='round-plan-2')
             self.assertEqual(updated['name'], 'round-plan-2')
@@ -1037,16 +1003,11 @@ class McpMutationsTest(TestCase):
         self.assertEqual(deleted, {'deleted': 'plan', 'id': created['id']})
         self.assertFalse(Plan.objects.filter(pk=created['id']).exists())
 
-    def test_plan_rejects_symbol_scope_and_cron_violations(self):
-        """MCP-20：symbol_scope 白名单 / time 触发缺 cron 与 REST 400 同源。"""
+    def test_plan_rejects_cron_and_missing_update_violations(self):
+        """MCP-20：time 触发缺 cron / 更新不存在的 Plan 与 REST 400 同源。"""
         from mcp_server import mutations
 
         with mock.patch.dict(os.environ, {'MCP_ALLOW_MUTATE': '1'}):
-            with self.assertRaises(ValueError):
-                mutations.create_plan(
-                    'bad', root_suite_id=self.suite.id, trigger_type='manual',
-                    symbol_scope={'type': 'symbols'},
-                )
             with self.assertRaises(ValueError):
                 mutations.create_plan('bad', root_suite_id=self.suite.id, trigger_type='time')
             with self.assertRaises(ValueError):

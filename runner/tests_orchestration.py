@@ -1,4 +1,4 @@
-"""suites 编排增强测试（S-09/S-10/S-11）：
+﻿"""suites 编排增强测试（S-09/S-10/S-11）：
 
 - 子 Suite 递归执行与 NodeRun 轨迹
 - 树形运行时聚合（子 Suite 方向汇总到父节点）
@@ -35,7 +35,6 @@ class OrchestrationTestBase(TestCase):
         self.root = Suite.objects.create(name='根 Suite', status='published')
         self.plan = Plan.objects.create(
             name='编排 Plan', root_suite=self.root, status='published',
-            symbol_scope={'type': 'symbols'},
         )
 
     def add_child(self, name, aggregate_method='weighted_sum', cases=(),

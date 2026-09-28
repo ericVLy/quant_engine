@@ -134,7 +134,7 @@ def create_server() -> MCPServer:
     ) -> dict:
         return tools_impl.list_plans(status=status, limit=limit)
 
-    @server.tool(description='Plan 详情；可选解析 symbol_scope 为标的列表。')
+    @server.tool(description='Plan 详情；可选解析 Case 声明的标的并集为标的列表。')
     def get_plan(
         plan_id: Annotated[
             int,
@@ -142,7 +142,7 @@ def create_server() -> MCPServer:
         ],
         include_symbols: Annotated[
             bool,
-            Field(description='是否将 symbol_scope 解析为标的列表（最多 500 条）并附 symbol_count，默认 True。'),
+            Field(description='是否将 Case 声明的标的并集解析为列表（最多 500 条）并附 symbol_count，默认 True。'),
         ] = True,
     ) -> dict:
         return tools_impl.get_plan(plan_id=plan_id, include_symbols=include_symbols)
@@ -283,7 +283,7 @@ def create_server() -> MCPServer:
         ],
         params: Annotated[
             dict | None,
-            Field(description='参数对象，须满足 Case.params 白名单（trigger/period/order/result 等；trigger.event_type 必须已注册）；留空=空参数草稿。'),
+            Field(description='参数对象，须满足 Case.params 白名单（trigger/period/order/result/symbol_scope 等；trigger.event_type 必须已注册）；symbol_scope 为该 Case 负责的标的范围 {type: all|groups|symbols}；留空=空参数草稿。'),
         ] = None,
     ) -> dict:
         return mutations.create_case(name=name, node_type=node_type, params=params)
@@ -444,7 +444,7 @@ def create_server() -> MCPServer:
     @server.tool(
         description=(
             '创建 Plan（draft，不发布；写操作，默认禁用；需 MCP_ALLOW_MUTATE=1 或 --allow-mutate）。'
-            '复用 REST /api/plans/ 全部校验（cron、事件注册、symbol_scope 白名单、账户资金）。'
+            '复用 REST /api/plans/ 全部校验（cron、事件注册、账户资金）。标的范围由 Case 声明。'
         ),
     )
     def create_plan(
@@ -467,10 +467,6 @@ def create_server() -> MCPServer:
         event_type: Annotated[
             str | None,
             Field(description='触发事件类型；event 触发时必填且必须已注册；未提供保持缺省。'),
-        ] = None,
-        symbol_scope: Annotated[
-            dict | None,
-            Field(description='标的范围，白名单 {type, group_ids, symbol_codes}：all 只含 type；groups 需 group_ids；symbols 需 symbol_codes；缺省 {"type":"all"}。'),
         ] = None,
         exec_mode: Annotated[
             str,
@@ -499,7 +495,6 @@ def create_server() -> MCPServer:
             trigger_type=trigger_type,
             cron_expr=cron_expr,
             event_type=event_type,
-            symbol_scope=symbol_scope,
             exec_mode=exec_mode,
             retry_policy=retry_policy,
             account_id=account_id,
@@ -538,10 +533,6 @@ def create_server() -> MCPServer:
             str | None,
             Field(description='新触发事件类型（须已注册）；未提供保持不变。'),
         ] = None,
-        symbol_scope: Annotated[
-            dict | None,
-            Field(description='新标的范围（白名单同 create_plan）；未提供保持不变。'),
-        ] = None,
         exec_mode: Annotated[
             str | None,
             Field(description='新执行模式：serial / parallel / fail_stop；未提供保持不变。'),
@@ -570,7 +561,6 @@ def create_server() -> MCPServer:
             trigger_type=trigger_type,
             cron_expr=cron_expr,
             event_type=event_type,
-            symbol_scope=symbol_scope,
             exec_mode=exec_mode,
             retry_policy=retry_policy,
             account_id=account_id,

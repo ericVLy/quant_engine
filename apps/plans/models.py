@@ -33,7 +33,9 @@ class Plan(models.Model):
     trigger_type = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default='time')
     cron_expr = models.CharField(max_length=100, blank=True, null=True)
     event_type = models.CharField(max_length=50, blank=True, null=True)
-    symbol_scope = models.JSONField(default=dict)
+    # 标的范围不再由 Plan 声明：改由 Case.params['symbol_scope'] 持有，
+    # Plan 的实际标的集合 = 编排树内所有已发布 Case 声明范围的并集
+    # （见 apps.plans.services.resolve_plan_symbols）。
     exec_mode = models.CharField(max_length=20, choices=EXEC_MODE_CHOICES, default='serial')
     retry_policy = models.JSONField(default=dict, blank=True)
     # 资金占用：Plan 实例是账户资金的唯一占用者，向下按 Suite/Case 分级申请

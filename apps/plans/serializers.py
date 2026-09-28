@@ -100,40 +100,6 @@ class PlanSerializer(serializers.ModelSerializer):
 
         return attrs
 
-    def validate_symbol_scope(self, value):
-        if not isinstance(value, dict):
-            raise serializers.ValidationError('symbol_scope 必须是 JSON 对象')
-
-        allowed_types = {'all', 'groups', 'symbols'}
-        allowed_keys = {'type', 'group_ids', 'symbol_codes'}
-        scope_type = value.get('type')
-
-        if scope_type not in allowed_types:
-            raise serializers.ValidationError('symbol_scope.type 必须是 all、groups 或 symbols')
-
-        unknown = set(value.keys()) - allowed_keys
-        if unknown:
-            raise serializers.ValidationError(f'symbol_scope 不允许的字段: {", ".join(sorted(unknown))}')
-
-        if scope_type == 'all':
-            if value.keys() - {'type'}:
-                raise serializers.ValidationError('all 类型只能包含 type 字段')
-        if scope_type == 'groups':
-            if not isinstance(value.get('group_ids'), list):
-                raise serializers.ValidationError('groups 类型必须提供 group_ids 数组')
-            if any(isinstance(item, bool) or not isinstance(item, int) for item in value['group_ids']):
-                raise serializers.ValidationError('group_ids 必须是整数数组')
-            if set(value.keys()) - {'type', 'group_ids'}:
-                raise serializers.ValidationError('groups 类型只允许 type 和 group_ids 字段')
-        if scope_type == 'symbols':
-            if not isinstance(value.get('symbol_codes'), list):
-                raise serializers.ValidationError('symbols 类型必须提供 symbol_codes 数组')
-            if any(not isinstance(item, str) or not item.strip() for item in value['symbol_codes']):
-                raise serializers.ValidationError('symbol_codes 必须是非空字符串数组')
-            if set(value.keys()) - {'type', 'symbol_codes'}:
-                raise serializers.ValidationError('symbols 类型只允许 type 和 symbol_codes 字段')
-        return value
-
     def validate_retry_policy(self, value):
         try:
             return validate_retry_policy(value)

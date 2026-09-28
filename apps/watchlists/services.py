@@ -178,12 +178,15 @@ logger = logging.getLogger(__name__)
 
 def resolve_symbol_scope(symbol_scope):
     """
-    解析 Plan 的 symbol_scope 配置，返回 Symbol 的 QuerySet
+    解析 symbol_scope 配置，返回 Symbol 的 QuerySet
 
     支持三种格式：
     - {'type': 'all'}  → 返回所有标的
     - {'type': 'groups', 'group_ids': [1,2,3]} → 返回指定分组下的所有标的
     - {'type': 'symbols', 'symbol_codes': ['000001', '600036']} → 返回指定代码的标的
+
+    该配置现在由 **Case** 持有（``Case.params['symbol_scope']``），
+    Plan 不再直接声明标的范围。
     """
     if not symbol_scope:
         return Symbol.objects.none()
@@ -203,6 +206,24 @@ def resolve_symbol_scope(symbol_scope):
         return Symbol.objects.filter(code__in=codes)
     else:
         raise ValueError(f"不支持的 symbol_scope 类型: {scope_type}")
+
+
+def case_symbol_scope(case):
+    """取出一个 Case 声明的 ``symbol_scope``（缺省视为未声明）。
+
+    Args:
+        case: ``cases.models.Case`` 实例。
+
+    Returns:
+        dict | None: ``{'type': 'all'|'groups'|'symbols', ...}``；未声明时返回 ``None``。
+    """
+    scope = (case.params or {}).get('symbol_scope')
+    return scope if isinstance(scope, dict) and scope else None
+
+
+def case_declares_symbols(case) -> bool:
+    """Case 是否声明了标的范围。"""
+    return case_symbol_scope(case) is not None
 
 
 def sync_market_data():

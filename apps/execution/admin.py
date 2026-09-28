@@ -129,8 +129,18 @@ class AlertChannelAdmin(admin.ModelAdmin):
 
 @admin.register(AccountFundConfig)
 class AccountFundConfigAdmin(admin.ModelAdmin):
-    list_display = ('account_id', 'total_capital', 'allocated_capital', 'available_capital')
+    list_display = ('account_id', 'total_capital', 'allocated_capital', 'available_capital',
+                    'available_cash', 'source', 'capital_basis', 'synced_at', 'is_stale')
+    list_filter = ('source', 'capital_basis')
     search_fields = ('account_id',)
+    readonly_fields = ('synced_at', 'allocated_capital', 'available_capital', 'is_stale')
+    fieldsets = (
+        (None, {'fields': ('account_id', 'total_capital', 'source', 'capital_basis')}),
+        ('gm 同步数据（由 sync_account_funds / run_scheduler 写入）',
+         {'fields': ('available_cash', 'market_value', 'frozen_cash', 'synced_at')}),
+        ('本系统内部额度（= 总资金 − Plan 占用之和）',
+         {'fields': ('allocated_capital', 'available_capital', 'is_stale')}),
+    )
 
 
 @admin.register(FundAllocation)

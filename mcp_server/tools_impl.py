@@ -176,22 +176,26 @@ def list_plans(status: str = 'published', limit: int = 50) -> dict[str, Any]:
 def get_plan(plan_id: int, include_symbols: bool = True) -> dict[str, Any]:
     """读取单个 Plan 详情（只读）。
 
+    标的范围由 **Case** 声明（``Case.params['symbol_scope']``），Plan 自身不持有
+    ``symbol_scope``；返回的 ``symbols`` 是编排树内所有 Case 声明范围的**并集**。
+
     Args:
         plan_id: Plan 主键。
-        include_symbols: 是否把 ``symbol_scope`` 解析为标的列表；True 时追加
-            ``symbols``（最多 500 条）与 ``symbol_count``。
+        include_symbols: 是否解析标的集合；True 时追加 ``symbols``（最多 500 条）
+            与 ``symbol_count``。
 
     Returns:
         dict: ``id`` / ``name`` / ``status`` / ``version`` / ``trigger_type`` /
-        ``cron_expr`` / ``event_type`` / ``symbol_scope`` / ``exec_mode`` /
-        ``retry_policy`` / ``run_status``，以及 ``root_suite``
-        （``id`` / ``name`` / ``status``）。
+        ``cron_expr`` / ``event_type`` / ``exec_mode`` / ``retry_policy`` /
+        ``run_status``，``root_suite``（``id`` / ``name`` / ``status``），
+        以及 ``symbol_declarers``（声明标的的 Case 数量）。
 
     Raises:
         ValueError: Plan 不存在。
     """
     from apps.plans.models import Plan
-    from apps.plans.services import resolve_plan_symbols
+    from apps.plans.services import iter_plan_cases, resolve_plan_symbols
+    from apps.watchlists.services import case_symbol_scope
 
     plan = Plan.objects.select_related('root_suite').filter(pk=plan_id).first()
     if plan is None:
@@ -204,10 +208,11 @@ def get_plan(plan_id: int, include_symbols: bool = True) -> dict[str, Any]:
         'trigger_type': plan.trigger_type,
         'cron_expr': plan.cron_expr,
         'event_type': plan.event_type,
-        'symbol_scope': plan.symbol_scope or {},
         'exec_mode': plan.exec_mode,
         'retry_policy': plan.retry_policy or {},
         'run_status': plan.run_status,
+        'symbol_declarers': sum(
+            1 for case in iter_plan_cases(plan) if case_symbol_scope(case)),
         'root_suite': {
             'id': plan.root_suite_id,
             'name': plan.root_suite.name,

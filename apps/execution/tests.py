@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 from django.test import TestCase
 from django.contrib.auth import get_user_model
@@ -197,7 +197,6 @@ class EventOverlayRuntimeTest(TestLoggingMixin, TestCase):
             name='下游 Suite', status='published', parent=self.suite)
         self.plan = Plan.objects.create(
             name='叠加运行时 Plan', root_suite=self.suite, status='published',
-            symbol_scope={'type': 'symbols'},
         )
         self.run = SuiteRun.objects.create(
             plan=self.plan, suite=self.suite, symbol='000001', status='running',
@@ -329,7 +328,6 @@ class SuiteRunAPITest(TestLoggingMixin, APITestCase):
             name='测试 Plan',
             root_suite=self.suite,
             status='published',
-            symbol_scope={'type': 'symbols'},
         )
 
     def test_suite_run_model(self):
@@ -473,7 +471,6 @@ class PaginationContractTest(TestLoggingMixin, APITestCase):
         self.suite = Suite.objects.create(name='分页 Suite')
         self.plan = Plan.objects.create(
             name='分页 Plan', root_suite=self.suite, status='published',
-            symbol_scope={'type': 'symbols'},
         )
 
     def test_execution_list_endpoints_are_paginated(self):

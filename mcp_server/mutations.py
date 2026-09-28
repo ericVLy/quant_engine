@@ -7,7 +7,7 @@
 设计约束（只做门面，不新增 REST 接口、不复制业务逻辑）：
 
 - **创建/编辑**复用 ``apps.*.serializers``：``Case.params`` 白名单与深层语义校验、
-  ``Plan.symbol_scope`` / ``retry_policy`` / cron / 账户资金占用校验、
+  ``Plan.retry_policy`` / cron / 账户资金占用校验、
   ``Suite`` 的 ``case_ids`` 与 ``allocated_capital`` 都在同一处执行；
 - **删除**复用 ``apps.*.services`` 的删除保护（被引用 / 有执行记录 → 409 语义冲突）；
 - **编排边**复用 ``apps.suites.services.update_topology``（含 ``event_condition`` 白名单、
@@ -76,7 +76,7 @@ def _flatten_errors(detail: Any, prefix: str = '') -> str:
 
     Args:
         detail: ``serializer.errors`` 或其中任意一层节点。
-        prefix: 已累积的字段路径（如 ``symbol_scope.type``）。
+        prefix: 已累积的字段路径（如 ``retry_policy.max_retries``）。
 
     Returns:
         str: 可直接展示给客户端的可定位错误说明。
@@ -172,8 +172,10 @@ def create_case(name: str, node_type: str, params: dict | None = None) -> dict:
     Args:
         name: Case 名称，长度 1~100。
         node_type: 节点类型：signal（信号）/ filter（过滤）/ verdict（裁决）/ executor（执行器）。
-        params: 参数对象，须满足 ``Case.params`` 白名单（trigger/period/order/result 等）；
-            trigger.event_type 必须已注册；留空创建空参数草稿。
+        params: 参数对象，须满足 ``Case.params`` 白名单（trigger/period/order/result/
+            symbol_scope 等）；trigger.event_type 必须已注册；
+            ``symbol_scope`` 声明本 Case 负责的标的（``{type: all|groups|symbols}``），
+            Plan 的标的集合 = 编排树内各 Case 声明的并集；留空创建空参数草稿。
 
     Returns:
         dict: 新建 Case 的完整字段（id、name、node_type、params、version=1、status=draft 等）。
@@ -401,7 +403,6 @@ def create_plan(
     trigger_type: str = 'manual',
     cron_expr: str | None = None,
     event_type: str | None = None,
-    symbol_scope: dict | None = None,
     exec_mode: str = 'serial',
     retry_policy: dict | None = None,
     account_id: str = '',
@@ -417,9 +418,6 @@ def create_plan(
             需已注册 event_type）/ manual（手动触发，默认）。
         cron_expr: 5 字段 cron 表达式（如 ``0 9 30 * *``）；time 触发时必填。
         event_type: 触发事件类型；event 触发时必填且必须在 EventRegistry 注册。
-        symbol_scope: 标的范围，白名单 ``{type, group_ids, symbol_codes}``；
-            type=all 只含 type；groups 需 group_ids 整数数组；symbols 需 symbol_codes 字符串数组；
-            缺省 ``{'type': 'all'}``。
         exec_mode: 执行模式：serial（串行，默认）/ parallel（并行）/ fail_stop（失败停止）。
         retry_policy: 重试策略 ``{max_retries: >=0 整数, delay_seconds: >=0 数值}``。
         account_id: 交易账户 ID（64 字符内）；提供 allocated_capital 时建议同时提供。
@@ -431,7 +429,7 @@ def create_plan(
 
     Raises:
         PermissionError: 写开关未开启。
-        ValueError: 任一字段/对象级校验失败（含 cron、事件注册、symbol_scope 白名单、资金校验）。
+        ValueError: 任一字段/对象级校验失败（含 cron、事件注册、资金校验）。
     """
     from apps.plans.models import Plan
     from apps.plans.serializers import PlanSerializer
@@ -443,7 +441,6 @@ def create_plan(
         'trigger_type': trigger_type,
         'exec_mode': exec_mode,
         'suite_start_mode': suite_start_mode,
-        'symbol_scope': symbol_scope if symbol_scope is not None else {'type': 'all'},
         'account_id': account_id or '',
     }
     if cron_expr is not None:
@@ -466,7 +463,6 @@ def update_plan(
     trigger_type: str | None = None,
     cron_expr: str | None = None,
     event_type: str | None = None,
-    symbol_scope: dict | None = None,
     exec_mode: str | None = None,
     retry_policy: dict | None = None,
     account_id: str | None = None,
@@ -482,7 +478,6 @@ def update_plan(
         trigger_type: 新触发方式（time/event/manual）；未提供保持不变。
         cron_expr: 新 5 字段 cron 表达式；未提供保持不变。
         event_type: 新触发事件类型（须已注册）；未提供保持不变。
-        symbol_scope: 新标的范围（白名单同 create_plan）；未提供保持不变。
         exec_mode: 新执行模式（serial/parallel/fail_stop）；未提供保持不变。
         retry_policy: 新重试策略 {max_retries, delay_seconds}；未提供保持不变。
         account_id: 新交易账户 ID；未提供保持不变。
@@ -507,7 +502,6 @@ def update_plan(
         trigger_type=trigger_type,
         cron_expr=cron_expr,
         event_type=event_type,
-        symbol_scope=symbol_scope,
         exec_mode=exec_mode,
         retry_policy=retry_policy,
         account_id=account_id,

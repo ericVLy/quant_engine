@@ -254,6 +254,9 @@ class McpSmokeRunner:
         Raises:
             SmokeError: 任一写工具调用失败（如写门禁未开启、参数校验不通过）。
         """
+        # 标的范围由 Case 声明（symbol_scope）：两个 Case 都声明同一个标的，
+        # Plan 的标的集合 = 编排树内各 Case 声明的并集。
+        symbol_scope = {'type': 'symbols', 'symbol_codes': [self.symbol_code]}
         signal_params = {
             'trigger': {'event_type': SUITE_INIT},
             'indicator': 'rsi',
@@ -261,6 +264,7 @@ class McpSmokeRunner:
             'period': 14,
             'threshold_oversold': 30,
             'threshold_overbought': 70,
+            'symbol_scope': symbol_scope,
         }
         executor_params = {
             'trigger': {'event_type': CASE_COMPLETED},
@@ -270,6 +274,7 @@ class McpSmokeRunner:
                 'payload': {'note': 'MCP 冒烟测试下单'},
                 'order': {'direction': 'buy', 'price': 12.5, 'volume': 100},
             },
+            'symbol_scope': symbol_scope,
         }
         _, signal_case = await self._call(session, 'create_case', {
             'name': f'{NAME_PREFIX} · RSI信号',
@@ -305,7 +310,6 @@ class McpSmokeRunner:
             'suite_start_mode': 'manual',
             'exec_mode': 'serial',
             'retry_policy': {'max_retries': 1, 'delay_seconds': 5},
-            'symbol_scope': {'type': 'symbols', 'symbol_codes': [self.symbol_code]},
         }
         if self.account_id:
             plan_args['account_id'] = self.account_id
@@ -351,7 +355,7 @@ class McpSmokeRunner:
             raise SmokeError(f'get_plan 标的解析异常: symbol_count={plan.get("symbol_count")}')
         symbols = [item.get('code') for item in plan.get('symbols', [])]
         if symbols != [self.symbol_code]:
-            raise SmokeError(f'get_plan 标的与 symbol_scope 不一致: {symbols}')
+            raise SmokeError(f'get_plan 标的与 Case 声明不一致: {symbols}')
         checks['symbol_count'] = plan['symbol_count']
         checks['symbols'] = symbols
 

@@ -1,6 +1,7 @@
-"""``manage.py run_scheduler`` 编排测试（消费端开关与参数透传）。"""
+"""``manage.py run_scheduler`` 编排测试（消费端开关、参数透传、资金同步循环）。"""
+import asyncio
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -32,7 +33,14 @@ class RunSchedulerCommandTest(SimpleTestCase):
         run = None
         patcher = None
         if mock_run:
-            patcher = patch('apps.plans.management.commands.run_scheduler.asyncio.run')
+            def _fake_run(coro):
+                # 只断言"走了异步消费路径"，不真正跑事件循环：关闭协程避免
+                # "coroutine was never awaited" 警告
+                coro.close()
+                return MagicMock()
+
+            patcher = patch('apps.plans.management.commands.run_scheduler.asyncio.run',
+                            side_effect=_fake_run)
             run = patcher.start()
         try:
             call_command(Command(), stdout=stdout, stderr=StringIO(), **defaults)
@@ -82,3 +90,94 @@ class RunSchedulerCommandTest(SimpleTestCase):
             self._call(mock_run=False)
         self.assertEqual(captured['order_broker'], 'none')
         self.assertFalse(captured['no_risk_control'])
+
+    def test_funds_flags_are_forwarded_and_default_to_none(self):
+        captured = {}
+
+        async def fake_consuming(self, scheduler, workers, options):
+            captured.update(options)
+
+        with patch.object(Command, '_run_consuming', fake_consuming):
+            self._call(mock_run=False, funds_source='gm', funds_refresh_interval=15)
+        self.assertEqual(captured['funds_source'], 'gm')
+        self.assertEqual(captured['funds_refresh_interval'], 15)
+
+        defaults = {}
+        with patch.object(Command, '_run_consuming',
+                          lambda self, s, w, o: defaults.update(o) or asyncio.sleep(0)):
+            self._call(mock_run=False)
+        self.assertEqual(defaults['funds_source'], 'none')
+        self.assertEqual(defaults['funds_refresh_interval'], 30)
+
+
+class RunSchedulerFundsLoopTest(SimpleTestCase):
+    """``_funds_loop``：周期性资金同步（失败不拖垮调度器）。"""
+
+    def _run_loop(self, sync, period=0.01, basis='total'):
+        from apps.execution import fund_sync
+
+        out, err = StringIO(), StringIO()
+        command = Command(stdout=out, stderr=err)
+
+        async def scenario():
+            stop = asyncio.Event()
+            task = asyncio.create_task(command._funds_loop('broker', stop, period, basis))
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                if sync.calls:
+                    break
+            stop.set()
+            await asyncio.wait_for(task, timeout=2)
+
+        with patch.object(fund_sync, 'sync_published_plan_accounts', sync):
+            asyncio.run(scenario())
+        return out.getvalue(), err.getvalue()
+
+    def test_loop_syncs_periodically_and_reports(self):
+        class _Sync:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, broker, source='gm', capital_basis='total'):
+                self.calls.append((broker, capital_basis))
+                return [{'account_id': 'efd9…', 'total_assets': '100000',
+                         'total_capital': '100000.00', 'capital_basis': capital_basis,
+                         'computed_capital': '100000.00', 'allocated_capital': '0',
+                         'clamped': False, 'available_cash': '90000',
+                         'market_value': '10000'}]
+
+        sync = _Sync()
+        out, _ = self._run_loop(sync)
+        self.assertTrue(sync.calls)
+        self.assertEqual(sync.calls[0][1], 'total')
+        self.assertIn('额度=100000.00', out)
+        self.assertIn('口径 total', out)
+        self.assertNotIn('efd94fdb', out)      # 账户 ID 不明文输出
+
+    def test_loop_forwards_capital_basis(self):
+        class _Sync:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, broker, source='gm', capital_basis='total'):
+                self.calls.append(capital_basis)
+                return []
+
+        sync = _Sync()
+        self._run_loop(sync, basis='cash')
+        self.assertEqual(sync.calls, ['cash'])
+
+    def test_loop_error_is_logged_and_loop_survives(self):
+        class _Sync:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, broker, source='gm', capital_basis='total'):
+                self.calls.append(broker)
+                raise RuntimeError('terminal down')
+
+        sync = _Sync()
+        out, err = self._run_loop(sync)
+        self.assertTrue(sync.calls)
+        self.assertIn('资金同步异常', err)
+        self.assertEqual(out, '')

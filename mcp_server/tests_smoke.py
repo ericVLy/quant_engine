@@ -1,4 +1,4 @@
-"""``mcp_server.smoke`` 冒烟执行器测试。
+﻿"""``mcp_server.smoke`` 冒烟执行器测试。
 
 覆盖：``_is_error`` / ``_decode`` 归一、工具清单校验、建夹具、读侧回读断言、
 受控触发、删除保护校验、清理顺序与守卫；以及同步 DB 步骤
@@ -138,7 +138,6 @@ class FakeMcpSession:
         self.plans[pid] = {
             'id': pid, 'name': args['name'], 'status': 'draft', 'version': 1,
             'root_suite_id': args['root_suite_id'],
-            'symbol_scope': args.get('symbol_scope') or {'type': 'all'},
         }
         return dict(self.plans[pid])
 
@@ -163,11 +162,23 @@ class FakeMcpSession:
         ]
         return {'count': len(items), 'plans': items}
 
+    def _plan_symbol_codes(self, plan):
+        """复刻真实解析：遍历根 Suite 的 Case，取 ``params.symbol_scope`` 的并集。"""
+        suite = self.suites.get(plan.get('root_suite_id')) or {}
+        codes = []
+        for cid in suite.get('case_ids', []):
+            params = (self.cases.get(cid) or {}).get('params') or {}
+            scope = params.get('symbol_scope') or {}
+            for code in scope.get('symbol_codes') or []:
+                if code not in codes:
+                    codes.append(code)
+        return codes
+
     def _tool_get_plan(self, args):
         plan = self.plans.get(args['plan_id'])
         if plan is None:
             raise _ToolFailure('Plan 不存在')
-        codes = list((plan['symbol_scope'] or {}).get('symbol_codes') or [])
+        codes = self._plan_symbol_codes(plan)
         return {
             **plan, 'symbols': [{'code': code} for code in codes],
             'symbol_count': len(codes),
@@ -322,14 +333,19 @@ class SmokeRunnerStepTest(TestCase):
         self.assertEqual(topology_call['case_ids'], suite_call['case_ids'])
         self.assertEqual(topology_call['edges'], [])
 
-    def test_create_fixture_forwards_account_and_symbol_scope(self):
+    def test_create_fixture_forwards_account_and_declares_symbols_on_cases(self):
         runner = McpSmokeRunner(account_id='acc-1', allocated_capital=5000)
         self._create(runner)
         plan_args = [args for name, args in self.session.calls if name == 'create_plan'][0]
         self.assertEqual(plan_args['account_id'], 'acc-1')
         self.assertEqual(plan_args['allocated_capital'], 5000)
-        self.assertEqual(plan_args['symbol_scope'],
-                         {'type': 'symbols', 'symbol_codes': ['000426']})
+        # 标的范围不再随 Plan 下发，而是声明在 Case.params 上
+        self.assertNotIn('symbol_scope', plan_args)
+        for name, args in self.session.calls:
+            if name == 'create_case':
+                self.assertEqual(
+                    args['params']['symbol_scope'],
+                    {'type': 'symbols', 'symbol_codes': ['000426']})
         self.assertEqual(plan_args['trigger_type'], 'manual')
         self.assertEqual(plan_args['suite_start_mode'], 'manual')
         self.assertEqual(plan_args['exec_mode'], 'serial')
@@ -360,7 +376,11 @@ class SmokeRunnerStepTest(TestCase):
     def test_verify_reads_detects_symbol_mismatch(self):
         ids = self._create()
         self.session.publish_all(ids)
-        self.session.plans[ids['plan_id']]['symbol_scope'] = {'type': 'all'}
+        # 让 Case 不再声明标的 → 解析出 0 个，与期望的 1 个不符
+        for cid in self.session.suites[ids['suite_id']]['case_ids']:
+            params = dict(self.session.cases[cid]['params'])
+            params.pop('symbol_scope', None)
+            self.session.cases[cid]['params'] = params
         with self.assertRaises(SmokeError) as ctx:
             self._verify()
         self.assertIn('symbol_count', str(ctx.exception))
@@ -452,16 +472,21 @@ class SmokeTriggerAndCleanupTest(TestCase):
 class SmokeSyncStepsTest(TestCase):
     """同步 DB 步骤：账户资金配置 / 发布 / 运行实例清理。"""
 
+    #: 标的范围由 Case 声明（否则 Plan 不得发布）
+    SYMBOL_SCOPE = {'type': 'symbols', 'symbol_codes': ['000426']}
+
     SIGNAL_PARAMS = {
         'trigger': {'event_type': 'SUITE_INIT'},
         'indicator': 'rsi', 'direction': 1, 'period': 14,
         'threshold_oversold': 30, 'threshold_overbought': 70,
+        'symbol_scope': SYMBOL_SCOPE,
     }
     ORDER = {'direction': 'buy', 'price': 12.5, 'volume': 100}
     EXECUTOR_PARAMS = {
         'trigger': {'event_type': 'CASE_COMPLETED'},
         'order': ORDER,
         'result': {'direction': 1, 'payload': {}, 'order': ORDER},
+        'symbol_scope': SYMBOL_SCOPE,
     }
 
     def _draft_fixture(self):
@@ -474,7 +499,7 @@ class SmokeSyncStepsTest(TestCase):
         suite.cases.set([signal, executor])
         plan = Plan.objects.create(
             name='smoke plan', root_suite=suite, trigger_type='manual',
-            symbol_scope={'type': 'symbols', 'symbol_codes': ['000426']})
+        )
         runner = McpSmokeRunner(symbol_code='000426')
         runner.ids = {
             'signal_case_id': signal.pk, 'executor_case_id': executor.pk,

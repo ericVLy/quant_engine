@@ -80,6 +80,53 @@ INDICATOR_CATALOG = {
 }
 LEGACY_CALCULATIONS = {'last', 'mean', 'compare'}
 
+#: ``params['symbol_scope']`` 白名单键（与原 Plan.symbol_scope 契约一致）
+SYMBOL_SCOPE_KEYS = {'type', 'group_ids', 'symbol_codes'}
+
+
+def validate_symbol_scope(value):
+    """校验 Case 声明的标的范围（``all`` / ``groups`` / ``symbols``）。
+
+    Args:
+        value: 待校验的 dict。
+
+    Returns:
+        dict: 原样返回，便于链式赋值。
+
+    Raises:
+        rest_framework.serializers.ValidationError: 结构非法、``type`` 未知，
+            或 ``groups`` / ``symbols`` 缺少对应数组。
+    """
+    if not isinstance(value, dict):
+        raise serializers.ValidationError('symbol_scope 必须是 JSON 对象')
+    scope_type = value.get('type')
+    if scope_type not in ('all', 'groups', 'symbols'):
+        raise serializers.ValidationError('symbol_scope.type 必须是 all、groups 或 symbols')
+    unknown = set(value) - SYMBOL_SCOPE_KEYS
+    if unknown:
+        raise serializers.ValidationError(
+            f'symbol_scope 不允许的字段: {", ".join(sorted(unknown))}')
+    if scope_type == 'all':
+        if set(value) - {'type'}:
+            raise serializers.ValidationError('all 类型只能包含 type 字段')
+    elif scope_type == 'groups':
+        group_ids = value.get('group_ids')
+        if not isinstance(group_ids, list):
+            raise serializers.ValidationError('groups 类型必须提供 group_ids 数组')
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in group_ids):
+            raise serializers.ValidationError('group_ids 必须是整数数组')
+        if set(value) - {'type', 'group_ids'}:
+            raise serializers.ValidationError('groups 类型只允许 type 和 group_ids 字段')
+    else:
+        codes = value.get('symbol_codes')
+        if not isinstance(codes, list):
+            raise serializers.ValidationError('symbols 类型必须提供 symbol_codes 数组')
+        if any(not isinstance(item, str) or not item.strip() for item in codes):
+            raise serializers.ValidationError('symbol_codes 必须是非空字符串数组')
+        if set(value) - {'type', 'symbol_codes'}:
+            raise serializers.ValidationError('symbols 类型只允许 type 和 symbol_codes 字段')
+    return value
+
 
 def validate_case_schema(node_type, value):
     def invalid(path, message):
@@ -256,6 +303,8 @@ def validate_case_schema(node_type, value):
         'calculation', 'indicator', 'field', 'high_field', 'low_field',
         'fast', 'slow', 'signal', 'threshold', 'weight', 'filter',
         'verdict', 'node_type',
+        # 标的范围（symbol 由 Case 管理，见 3.2 symbol_scope 白名单）
+        'symbol_scope',
     }
     if not isinstance(value, dict):
         invalid('params', '必须是对象')
@@ -264,6 +313,8 @@ def validate_case_schema(node_type, value):
     if unknown:
         invalid('params', f'不允许的字段: {", ".join(sorted(unknown))}')
 
+    if 'symbol_scope' in value:
+        validate_symbol_scope(value['symbol_scope'])
     if 'trigger' in value:
         trigger = value['trigger']
         if not isinstance(trigger, dict) or not isinstance(trigger.get('event_type'), str) or not trigger['event_type']:

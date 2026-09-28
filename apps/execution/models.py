@@ -139,16 +139,62 @@ class ExecutionLog(models.Model):
 
 
 class AccountFundConfig(models.Model):
-    """交易账户资金配置（单账户单行）：账户总资金是 Plan 占用资金的上限。"""
+    """交易账户资金配置（单账户单行）：账户总资金是 Plan 占用资金的上限。
+
+    ``total_capital`` 是**账户总资产（权益）**，即"Plan 可占用资金"的总额上限：
+
+    - ``source='manual'``：由管理员在后台手工维护；
+    - ``source='gm'``：由 gm 账户查询同步覆盖（见 ``apps.execution.fund_sync``），
+      此时 ``available_cash`` / ``market_value`` / ``frozen_cash`` / ``synced_at``
+      同步记录，供后台与风控参考；``capital_basis`` 记录额度口径。
+
+    **额度口径（``capital_basis``）**：账户可能持有**本项目未管理的持仓**，其市值
+    盘中随行情波动，若把市值计入额度上限，会让"可部署额度"忽高忽低，甚至在持仓
+    下跌时低于已分配额度之和。因此可选择：
+
+    - ``total``（默认）：``balance + market_value``——账户总资产；
+    - ``cash``：只取 ``balance``——忽略持仓市值（**存在外部持仓时推荐**）；
+    - ``available``：只取 gm ``available``——最保守，只算当前真正可买。
+
+    另有一条不变式：同步得到的额度**不会低于该账户已分配额度之和**
+    （见 ``fund_sync.sync_account_funds``），避免盘中波动追溯性地作废既有额度分配。
+
+    注意：``available_capital``（= 总资金 − Plan 占用之和）是**本系统内部额度**，
+    与 gm 的 ``available_cash``（券商侧真实可用资金）是两个概念，二者可能不一致
+    （例如账户在别处也持有仓位）。下单前的真实可用资金校验以 ``available_cash``
+    / 风控的账户快照为准。
+    """
+    SOURCE_CHOICES = [('manual', '手工维护'), ('gm', 'gm 同步')]
+    # 额度口径：账户里可能存在**本项目未管理的持仓**，其市值盘中波动会让
+    # "总资产"忽高忽低。因此额度上限可选按账面资金或券商可用资金计算，
+    # 避免把不受本项目支配的浮动市值算进可部署额度。
+    CAPITAL_BASIS_CHOICES = [
+        ('total', '账户总资产（账面资金 + 持仓市值）'),
+        ('cash', '账面资金（忽略持仓市值）'),
+        ('available', '券商可用资金（最保守）'),
+    ]
+
     account_id = models.CharField(max_length=64, blank=True, verbose_name='交易账户ID', unique=True)
     total_capital = models.DecimalField(max_digits=18, decimal_places=2, verbose_name='账户总资金')
+    source = models.CharField(
+        max_length=10, choices=SOURCE_CHOICES, default='manual', verbose_name='资金来源')
+    capital_basis = models.CharField(
+        max_length=10, choices=CAPITAL_BASIS_CHOICES, default='total', verbose_name='额度口径')
+    available_cash = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True, verbose_name='券商可用资金')
+    market_value = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True, verbose_name='持仓市值')
+    frozen_cash = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True, verbose_name='冻结资金')
+    synced_at = models.DateTimeField(
+        null=True, blank=True, verbose_name='最近同步时间')
 
     class Meta:
         verbose_name = '账户资金配置'
         verbose_name_plural = '账户资金配置'
 
     def __str__(self):
-        return f'{self.account_id or "default"} total={self.total_capital}'
+        return f'{self.account_id or "default"} total={self.total_capital} ({self.source})'
 
     @property
     def allocated_capital(self):
@@ -163,6 +209,12 @@ class AccountFundConfig(models.Model):
     def available_capital(self):
         """空闲资金 = 总资金 - 已占用。"""
         return self.total_capital - self.allocated_capital
+
+    @property
+    def is_stale(self):
+        """是否从未同步过 gm 资金（``source='gm'`` 但无同步时间）。"""
+        return self.source == 'gm' and self.synced_at is None
+
 
 
 class FundAllocation(models.Model):

@@ -31,6 +31,26 @@ class AlertType:
     SYSTEM_ERROR = 'system_error'
 
 
+def _plan_symbol_summary(plan) -> str:
+    """Plan 覆盖标的的可读摘要（标的由 Case 声明）。
+
+    Args:
+        plan: ``plans.models.Plan`` 实例。
+
+    Returns:
+        str: 例如 ``3 个 Case 声明 / 共 5 个标的``；解析失败时返回 ``未知``。
+    """
+    try:
+        from apps.plans.services import iter_plan_cases, resolve_plan_symbols
+        from apps.watchlists.services import case_symbol_scope
+
+        declared = sum(1 for case in iter_plan_cases(plan) if case_symbol_scope(case))
+        total = resolve_plan_symbols(plan).count()
+    except Exception:  # pylint: disable=broad-except
+        return '未知'
+    return f'{declared} 个 Case 声明 / 共 {total} 个标的'
+
+
 class AlertService:
     """告警服务类：统一管理告警创建和发送"""
     
@@ -345,7 +365,7 @@ class AlertService:
         message = f"""
 计划信息:
 - 计划名称: {plan.name}
-- 标的范围: {plan.symbol_scope}
+- 标的范围: 由 Case 声明（{_plan_symbol_summary(plan)}）
 - 执行模式: {plan.get_exec_mode_display()}
 
 违规详情:

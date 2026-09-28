@@ -143,11 +143,16 @@ class McpSmokeTestCommandTest(TestCase):
         plan_args = self._called(session, 'create_plan')[0]
         self.assertEqual(plan_args['allocated_capital'], 5000)
 
-    def test_symbol_flag_flows_into_symbol_scope(self):
+    def test_symbol_flag_flows_into_case_symbol_scope(self):
+        """--symbol 现在下发到 Case.params.symbol_scope（Plan 不再持有该字段）。"""
         session, _, _ = self._run(symbol='000001')
         plan_args = self._called(session, 'create_plan')[0]
-        self.assertEqual(plan_args['symbol_scope'],
-                         {'type': 'symbols', 'symbol_codes': ['000001']})
+        self.assertNotIn('symbol_scope', plan_args)
+        case_args = [args for name, args in session.calls if name == 'create_case']
+        self.assertTrue(case_args)
+        for args in case_args:
+            self.assertEqual(args['params']['symbol_scope'],
+                             {'type': 'symbols', 'symbol_codes': ['000001']})
         self.assertEqual(self._called(session, 'trigger_plan_execution'), [])
 
     def test_trigger_flag_off_skips_trigger_tool(self):

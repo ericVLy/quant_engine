@@ -156,15 +156,21 @@ class GmBrokerAdapter:
         return getter()
 
     def get_positions(self):
-        getter = getattr(self.api, 'get_positions', None)
+        """Return broker positions (normalized to a list of dicts).
+
+        ``gm.api`` 在不同版本里分别暴露 ``get_position``（单数，当前安装版本）
+        与 ``get_positions``（复数），两者都探测；都没有时返回空列表。
+        """
+        getter = (getattr(self.api, 'get_positions', None)
+                  or getattr(self.api, 'get_position', None))
         if getter is None:
             return []
         if self.account_id:
             try:
-                return getter(account_id=self.account_id)
+                return getter(account_id=self.account_id) or []
             except TypeError:
-                return getter()
-        return getter()
+                return getter() or []
+        return getter() or []
 
     def get_unfinished_orders(self):
         """Return currently unfinished (open) orders from the broker."""

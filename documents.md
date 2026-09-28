@@ -126,7 +126,12 @@ users（用户权限）
 - 周期、MACD 参数和权重等数值字段会校验类型、有限性和最小值，并拒绝布尔值伪装成整数；MACD 要求 `fast < slow`。
 - RSI/KDJ 阈值必须处于 `0` 到 `100`，超卖阈值必须小于超买阈值；verdict 组件不允许重复指标，权重总和必须大于 `0`。
 
-### 3.2 Plan.symbol_scope 白名单
+### 3.2 `Case.params.symbol_scope` 白名单（标的范围由 Case 管理）
+
+> **变更（v2.14）**：标的范围已从 `Plan.symbol_scope` 下沉到 **`Case.params.symbol_scope`**。
+> `Plan` 模型不再持有 `symbol_scope` 字段；Plan 覆盖的标的 =
+> 根 Suite 编排树内**所有已发布 Case 声明范围的并集**（见 `apps.plans.services.resolve_plan_symbols`）。
+> `publish_plan` 会校验树内**至少有一个已发布 Case 声明了标的**，否则拒绝发布。
 
 允许字段仅为：
 
@@ -544,6 +549,37 @@ class AlertChannel(models.Model):
     min_severity = models.CharField(max_length=20, default='low')        # 最低告警级别
     alert_types = models.JSONField(default=list, blank=True)            # 类型白名单（空=全部）
     # should_send_alert(alert): 按 is_enabled + min_severity + alert_types 判定是否投递
+
+class AccountFundConfig(models.Model):
+    """交易账户资金配置（单账户单行）：total_capital 是 Plan 占用资金的上限。"""
+    SOURCE_CHOICES = [('manual','手工维护'), ('gm','gm 同步')]
+    CAPITAL_BASIS_CHOICES = [('total','总资产'),('cash','账面资金'),('available','券商可用资金')]
+    account_id = models.CharField(max_length=64, blank=True, unique=True, verbose_name='交易账户ID')
+    total_capital = models.DecimalField(max_digits=18, decimal_places=2, verbose_name='账户总资金')
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default='manual')
+    capital_basis = models.CharField(max_length=10, choices=CAPITAL_BASIS_CHOICES, default='total')  # 额度口径
+    available_cash = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)  # 券商可用资金
+    market_value = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)   # 持仓市值
+    frozen_cash = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)    # 冻结资金
+    synced_at = models.DateTimeField(null=True, blank=True)
+    # allocated_capital  = Σ Plan.allocated_capital（属性，跨表聚合）
+    # total_capital >= allocated_capital（同步不变式，见模块8「额度口径」）
+    # available_capital  = total_capital - allocated_capital（属性，内部额度）
+    # is_stale           = source == 'gm' and synced_at is None（属性）
+    # 由 apps.execution.fund_sync 按 gm get_cash 同步（见模块8「账户资金总量管理」）
+
+class FundAllocation(models.Model):
+    """分级资金申请：Plan 占用账户资金 → Suite 向 Plan 申请 → Case 向 Suite 申请。"""
+    LEVEL_CHOICES = [('plan','Plan 级'),('suite','Suite 级'),('case','Case 级')]
+    STATUS_CHOICES = [('active','生效中'),('released','已释放')]
+    level = models.CharField(max_length=10, choices=LEVEL_CHOICES)
+    plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name='fund_allocations')
+    suite = models.ForeignKey(Suite, on_delete=models.CASCADE, null=True, blank=True, related_name='fund_allocations')
+    case = models.ForeignKey('cases.Case', on_delete=models.CASCADE, null=True, blank=True, related_name='fund_allocations')
+    amount = models.DecimalField(max_digits=16, decimal_places=2, verbose_name='申请额度')
+    used_amount = models.DecimalField(max_digits=16, decimal_places=2, default=0, verbose_name='已占用金额')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
+    # 每层级唯一约束（条件 UniqueConstraint）：plan 级 / (plan,suite) / (plan,suite,case)
 ```
 
 #### 当前执行服务
@@ -709,7 +745,7 @@ class Edge(models.Model):
 |------|------|
 | **状态** | ✅ 已完成 CRUD、触发校验、标的解析、发布、配置刷新、持久化 Cron 调度、重试策略校验和版本回滚 |
 | **优先级** | P0 |
-| **依赖** | `suites.Suite`, `watchlists`（解析 symbol_scope） |
+| **依赖** | `suites.Suite`, `watchlists`（解析 Case 声明的 symbol_scope） |
 
 #### 功能需求
 
@@ -750,7 +786,7 @@ class Plan(models.Model):
     trigger_type = models.CharField(max_length=20, choices=TRIGGER_CHOICES)
     cron_expr = models.CharField(max_length=100, blank=True, null=True)
     event_type = models.CharField(max_length=50, blank=True, null=True)
-    symbol_scope = models.JSONField(default=dict)   # 示例: {"type":"all"} 或 {"type":"groups","group_ids":[1,2]}
+    # 标的范围不再由 Plan 声明：改由 Case.params['symbol_scope'] 持有
     exec_mode = models.CharField(max_length=20, choices=EXEC_MODE_CHOICES, default='serial')
     retry_policy = models.JSONField(default=dict, blank=True)   # {"max_retries": 3, "delay_seconds": 5}
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
@@ -812,7 +848,7 @@ class Plan(models.Model):
 
 **顺带修复的两个既有缺陷**：
 
-1. **`PlanRegistry` 配置变更不自愈**：原实现只在 `version` 变化时刷新缓存。已发布 Plan 可不经发布直接编辑（REST / MCP `update_plan` 不改 `version`），因此 `cron_expr` / `symbol_scope` 会被长期缓存。队列无人消费时无害，现在会直接导致按旧配置触发，改为比较全部可执行字段。
+1. **`PlanRegistry` 配置变更不自愈**：原实现只在 `version` 变化时刷新缓存。已发布 Plan 可不经发布直接编辑（REST / MCP `update_plan` 不改 `version`），因此 `cron_expr` 会被长期缓存。队列无人消费时无害，现在会直接导致按旧配置触发，改为比较全部可执行字段。（标的范围已下沉到 Case，不在注册中心快照内，解析时直接读 Case。）
 2. **分时更新器进程门禁漏 `run_scheduler`**：调度器进程此前会顺带拉起分时更新器 → 与 Web 服务进程重复外部请求与写库。已把 `run_scheduler` / `run_dev_stack` / `gm_live_link` / `clear_intraday` / `purge_execution_logs` 纳入跳过名单（见模块9）。
 
 
@@ -836,7 +872,7 @@ class Plan(models.Model):
 | R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | ✅ 完成；快照驱动编排：子 Suite 递归执行、树形聚合、parallel 分支并发 join、fail_stop 失败传播、NodeRun 轨迹记录 |
 | R-06 | **CaseExecutor**：执行单个 Case 的运算逻辑（因子计算/过滤/裁决） | ✅ 技术指标引擎已接入（MA/EMA/MACD/RSI/KDJ/BOLL/ROC/波动率/涨跌幅 + 过滤 + 综合裁决）；兼容声明式 result |
 | R-07 | **数据夹具（Fixture）**：为 Case 执行提供数据上下文（K线/基本面/实时快照） | ✅ DB 分表 K线 + RealtimeSnapshot 实时快照 + gm SDK 行情回退 + AkShare 基本面基础字段已接入（`DataContextBuilder`） |
-| R-08 | **风控拦截器**：在 Executor 节点输出前校验仓位/资金限制 | ✅ 单向持仓（long_only/short_only/flat）、单笔数量/金额上限、每日累计金额上限、交易时段校验已接入（`RiskController`） |
+| R-08 | **风控拦截器**：在 Executor 节点输出前校验仓位/资金限制 | ✅ 单向持仓（long_only/short_only/flat）、单笔数量/金额上限、每日累计金额上限、交易时段校验已接入（`RiskController`）；**账户级限额（`max_account_value` / `max_position_*`）已接入实时账户快照**（`account_provider` = gm 适配器），配合「账户资金总量管理」的 gm 同步 |
 | R-09 | **热加载**：Plan 发布后自动刷新内存中的 DAG 配置 | ✅ `PlanRegistry` 已固化可执行快照并支持冷启动自愈；Scheduler 经注册中心读取已发布 Plan |
 | R-10 | **执行日志写入**：将执行结果写入 ExecutionLog 表 | ✅ 完成 |
 | R-11 | **委托单生成**：将 Executor 节点的输出转换为 Order 记录 | ✅ 完成 |
@@ -874,7 +910,8 @@ class Plan(models.Model):
 #### 执行流程
 
 ```
-1. Scheduler 唤醒 Plan → 2. 解析 symbol_scope 获取标的列表
+1. Scheduler 唤醒 Plan → 2. 解析标的列表（遍历根 Suite 编排树，取各已发布 Case
+   `params.symbol_scope` 的并集；`resolve_plan_symbols`）
    → 3. 为每个 (Plan, Symbol) 创建任务入队（TaskQueue）
    → 4. Worker 从队列取出任务（`WorkerPool.run_forever`，`--workers` 个并发）
        （执行前按主键重读 Plan，跳过非 published）
@@ -897,6 +934,96 @@ class Plan(models.Model):
    → 9. Suite 完成 → 写入 ExecutionLog（final_direction = 根节点完整聚合）
    → 10. 若为 Executor 节点 → 风控校验 → 生成 Order
 ```
+
+#### 账户资金总量管理（按 gm 账户信息同步，2026-09-28）
+
+**问题**：`AccountFundConfig.total_capital`（Plan 占用资金总额上限）原先只能由管理员在后台**手工填写**，会与券商真实资产漂移（出入金、持仓盈亏、其它终端下单），导致 Plan 额度校验失真。
+
+**方案**：把 gm 的账户查询（`gm.api.get_cash`）结果归一后写回该行，让资金上限跟随真实账户资产。
+
+**gm `Cash` 字段映射**（`GmBrokerAdapter.get_account()` 返回 dict）
+
+| gm 字段 | 含义 | 落库字段 |
+|---------|------|----------|
+| `balance` | 账面资金（现金余额） | 参与 `total_capital` 计算 |
+| `market_value` | 持仓市值 | `market_value` |
+| `available` | 券商真实可用资金 | `available_cash` |
+| `frozen` + `order_frozen` | 冻结 + 委托冻结 | `frozen_cash` |
+| `nav` | 净值（基金类账户总权益） | `balance`/`market_value` 均缺失时的兜底 |
+| `currency` | 币种 | 仅随同步结果返回 |
+
+**总资产口径**：`total_assets = balance + market_value`（股票账户 = 账面资金 + 持仓市值）；两者都缺失而 `nav` 存在时退化为 `nav`。
+
+**额度口径（`capital_basis`）：外部持仓会让"总资产"盘中抖动**
+
+gm 账户里可能存在**本项目未管理的持仓**（别的策略/手工下单/其它终端）。这部分市值随行情
+盘中波动，且它**不是本项目可支配的资本**。若直接把它计入"Plan 可占用额度"的上限，会出现：
+
+1. **额度忽高忽低**——外部持仓的市值波动直接反映到额度上，运营侧无法解释；
+2. **误判超额**——外部持仓下跌使口径值短暂低于该账户**已分配额度之和**，
+   此时编辑任何既有 Plan 都会被 `validate_plan_capital` 拒绝，报"超过账户空闲资金"；
+3. **额度虚高**——按总资产分配出去的额度，实际无钱可投。
+
+因此额度上限可选三种口径（`AccountFundConfig.capital_basis`，落库可查）：
+
+| 口径 | 取值 | 适用场景 |
+|------|------|----------|
+| `total`（默认） | `balance + market_value` | 账户内持仓基本都由本项目管理 |
+| `cash` | `balance`（忽略持仓市值） | **存在外部持仓时推荐**——额度只随出入金变化，不随行情波动 |
+| `available` | gm `available` | 最保守：额度 = 当前真正能买的金额 |
+
+```bash
+# 账户有外部持仓：按账面资金计额度
+.venv/bin/python manage.py run_scheduler --funds-source gm --funds-capital-basis cash
+.venv/bin/python manage.py sync_account_funds --account-id <gm账户ID> --capital-basis cash
+```
+
+**不变式：额度不低于已分配额度之和**
+
+无论用哪种口径，写入的 `total_capital` 都取 `max(口径值, Σ Plan.allocated_capital)`。
+这保证盘中任何波动（尤其是外部持仓下跌）**都不会追溯性地作废已生效的额度分配**——
+否则会凭空出现"额度 0 可用"、所有 Plan 编辑被拒的假故障。被托底时同步结果里
+`clamped=true`，日志与命令输出会明确标注"下限托底"。
+
+> 实测：gm 返回值普遍带小数位（如 `997655.9999847412`），因此"是否托底"必须在**量化到分
+> 之前**判断，否则四舍五入会被误报成托底——已按此实现并有回归测试覆盖。
+
+**两个易混淆的口径**（`AccountFundConfig` 上刻意分开存）：
+
+- `total_capital` / `available_capital`：**本系统内部额度**（`available_capital = total_capital − ΣPlan.allocated_capital`），用于 Plan 分配校验；
+- `available_cash`：**券商侧真实可用资金**，用于下单前的实际可买校验（风控 `max_account_value`）。
+
+二者会不一致（例如账户在别处也持有仓位），不能混用。
+
+**安全约定**
+
+- **失败绝不写 0**：查询异常或返回空 dict 一律抛 `FundSyncError`，保留上一次成功同步的数值——把总资金误归零会让额度校验彻底失效；
+- 写库用 `select_for_update`，与 `state_machine.validate_plan_capital` / `funds.reserve_for_order` 的行级锁口径一致；
+- 同步**不触碰** `FundAllocation`（分级占用由运行时链路维护）；
+- 账户 ID 在日志/命令输出中默认脱敏（`mask_account`，N-05），`--show-account-id` 才显示完整值。
+
+**接入点**
+
+| 环节 | 位置 | 说明 |
+|------|------|------|
+| 同步服务 | `apps/execution/fund_sync.py` | `normalize_cash` / `sync_account_funds` / `ensure_funds_fresh`（TTL）/ `sync_published_plan_accounts`（批量、失败隔离） |
+| 账户绑定 | `fund_sync._bind_account` | gm 要求查询前先 `set_account_id`（否则报 status 1020「无效的ACCOUNT_ID」）；批量同步时逐账户重新绑定 |
+| 执行前刷新 | `runner/service.py::PlanExecutionService._refresh_funds` | 按 `--funds-refresh-interval` TTL 同步，失败只记日志不阻断交易 |
+| 周期刷新 | `run_scheduler --funds-source gm` | 调度器内置 `_funds_loop`，周期同步"已发布 Plan 引用账户"，保持后台展示新鲜 |
+| 人工核对 | `manage.py sync_account_funds [--account-id X]` | 首次配置 / 排查 / 核对；部分失败以非零退出码结束 |
+| 通道装配 | `runner/service.py::build_execution_service` | **下单通道与资金通道独立**、共用同一 gm 适配器：`order_broker=none` + `funds_source=gm` = 只读账户、不下单 |
+| 风控联动 | `RiskController(account_provider=broker)` | 使 `max_account_value` / `max_position_*` 这类账户级限额拿到实时账户快照 |
+
+```bash
+# 调度器：消费队列 + 周期同步资金（不下单）
+.venv/bin/python manage.py run_scheduler --workers 2 --funds-source gm --funds-refresh-interval 30
+
+# 人工同步指定账户
+.venv/bin/python manage.py sync_account_funds --account-id <gm账户ID>
+```
+
+**顺带修复**：`GmBrokerAdapter.get_positions` 原先只探测 `get_positions`（复数），而当前安装的 gm SDK 暴露的是 **`get_position`（单数）** → 持仓相关风控（`max_position_value` / `max_position_volume`）一直静默拿到空列表。已改为两者都探测。
+
 
 ### 模块9：`monitoring`（分时监控）🟡 设计定稿 · 待实施
 
@@ -1037,7 +1164,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 - `session_status` 判定规则（简化，不含节假日历）：周末一律 `closed`；开盘前 `pre_market`；时段内 `trading`；双时段市场两时段之间 `lunch_break`；其余 `closed`。
 - **标的代码字符串处理 · 指数/个股区分（2026-09-14）**：统一规则收敛于 `apps/watchlists/services.py`——`normalize_a_share_code`（剥前后缀、补零到 6 位）、`is_a_share_index`、`resolve_a_share_exchange`。指数专属段（399/880/930/931/932/980/899）纯前缀判定；**000xxx 二义段**（000001 既是平安银行也是上证指数）必须以 `exchange` 显式标注或 `sh` 前缀判为沪指数，缺省保守按深市个股。**原始代码带 `sh/sz/bj` 前缀（如库中 `code='sh000001'`）视为显式市场标记**：交易所解析在剥前缀**之前**依据原始代码判定（`resolve_a_share_exchange`），`gm_symbol_for` 传原始代码——已实测 `sh000001` → `SHSE.000001`（上证指数）而非深市个股。接入点：`monitoring.gm_symbol_for`（SHSE/SZSE/BJSE 前缀，含北交所）、`datasources.ashare._normalize_ashare_code`（sh/sz 前缀保留指数语义）、`watchlists.sync_market_data` 交易所解析、`monitoring.AkshareSpotProvider`（A 市场请求含指数时按需合并 `stock_zh_index_spot_sina` 指数行情，全个股请求不触发指数接口；`_normalize_returned_code` 兼容 sina `sh000300` 前缀）。专项测试：watchlists 3 个 + datasources 4 个 + monitoring 4 个（含 `test_gm_symbol_for_distinguishes_index_and_stock`、指数回退合并/跳过/二义缺省）。
 - 数值渲染：价格/涨跌幅以 Decimal 4 位小数字符串输出（与本项目其他模块 DecimalField 序列化一致）；单位随上游数据源原样存储，不做换算。
-- 采样标的缺省范围：已发布 Plan 的 `symbol_scope` 并集；无已发布 Plan 时回退全部标的（保证独立可用）。
+- 采样标的缺省范围：已发布 Plan 覆盖标的的并集（标的由 Case 声明）；无结果时回退全部标的（保证独立可用）。
 - 采样触发：由 **Django 服务进程内的 `updater.py` 自主管理**（启动清空 → 启动回填 → 每 `MONITORING_UPDATER_INTERVAL` 秒采样 → 开盘清理 → UTC 23:00 兜底清理），**不存在外部 cron / 计划任务调用路径**（`sample_intraday` 命令已移除）。
 
 ##### 前端实施记录（2026-09-12）
@@ -1100,7 +1227,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 #### 步骤3：预览与一键创建
 
-- 只读树形预览（复用 Designer 的节点/边文案）：Case 列表（名称/节点类型/params 摘要）、Suite（聚合方式）、Plan（trigger / symbol_scope / exec_mode）。
+- 只读树形预览（复用 Designer 的节点/边文案）：Case 列表（名称/节点类型/params 摘要）、Suite（聚合方式）、Plan（trigger / exec_mode；标的范围见 Case.params）。
 - 一键执行 `quickCreateStrategy(payload)`（`src/utils/quickStrategy.ts`，顺序调用；任一步失败提示已创建资源清单并提供「重试 / 保留草稿」）：
 
 ```
@@ -1109,7 +1236,8 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
    （dual_direction）创建 2 个子 Suite + POST /api/suites/{root}/topology/
 3. POST /api/cases/{id}/publish/ ×n
 4. POST /api/suites/{id}/publish/ （要求全部 Case 已发布，前端先发布 Case）
-5. POST /api/plans/                 root_suite + trigger + symbol_scope + exec_mode + retry_policy
+5. POST /api/plans/                 root_suite + trigger + exec_mode + retry_policy
+                                     （标的范围由 Case.params.symbol_scope 声明）
 6. POST /api/plans/{id}/publish/   （要求根 Suite 已发布）
 7. （manual 且 suite_start_mode=auto 时可选）POST /api/plans/{id}/start/
 ```
@@ -1173,7 +1301,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `search_symbols` | 代码/名称模糊搜索，`market` 过滤，`limit` 收敛 1~200 | `watchlists.Symbol` |
 | `resolve_symbol_name` | 代码 → 中文名（优先读库，回退 `watchlists.services.resolve_symbol_name`） | `watchlists` |
 | `query_kline` | 分表 K 线（缺省近 90 日，最多 500 根，超出保留最近 N 根） | `datasources.services.query_kline_table` |
-| `list_plans` / `get_plan` | Plan 列表（缺省 `published`）/ 详情（可选解析 `symbol_scope` 为标的列表） | `plans` + `resolve_plan_symbols` |
+| `list_plans` / `get_plan` | Plan 列表（缺省 `published`）/ 详情（可选解析 Case 声明的标的并集，附 `symbol_declarers` 声明方数量） | `plans` + `resolve_plan_symbols` |
 | `list_cases` / `get_case` | Case 列表（`status`/`node_type` 过滤）/ 详情（含 `params`） | `cases.Case` |
 | `get_suite_topology` | Suite 递归拓扑快照 | `suites.services.build_topology_snapshot` |
 | `list_event_types` | 已注册事件类型（系统内置 + `EventTypeRegistry`） | `execution.registry.EventRegistry.list_all` |
@@ -1258,7 +1386,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 - ✅ 已完成：为 MCP 服务的每一类「变量」补齐描述，AI 客户端与运维不必再猜语义（**只补描述，不改契约**）。
   - **工具入参（14 个只读/触发工具 / 29 个变量）**：`mcp_server/server.py` 的 `@server.tool` 函数改用 `Annotated[<类型>, Field(description=...)]`，SDK 转成 `tools/list → inputSchema.properties.<变量>.description`，说明中给出含义、默认值、取值域与收敛规则（如 `limit` 越界收敛、`status` 可选枚举）。
-  - **门面实现**：`mcp_server/tools_impl.py` 14 个函数逐个补 `Args` / `Returns` / `Raises`，逐变量说明入参与输出字段（含 `symbol_scope` 解析上限、`bars` 归一方式、异常类型）；`formatting.to_jsonable` 亦说明归一规则。
+  - **门面实现**：`mcp_server/tools_impl.py` 14 个函数逐个补 `Args` / `Returns` / `Raises`，逐变量说明入参与输出字段（含标的并集解析上限、`bars` 归一方式、异常类型）；`formatting.to_jsonable` 亦说明归一规则。
   - **命令行变量**：`server._build_arg_parser()` 与 `manage.py run_mcp_server` 的 `--transport` / `--host` / `--port` / `--auth-token` / `--allow-trigger` 全部带 `help`（默认值来源 + 取值域 + 安全约束），`--help` 可直接当运维手册。
   - **配置变量**：`mcp_server/config.py` 保留 `MCP_*` 变量表，并为每个 dataclass 字段、`DEFAULT_*` 常量加行内注释（含「非回环绑定必须令牌」「`MCP_ALLOW_TRIGGER` 默认关闭」等边界）。
 - 契约测试（`mcp_server/tests.py` 新增 5 个用例）：① 每个入参 `description` 非空且长度 ≥ 6；② `inputSchema` 变量名与必填集合必须与 `tools_impl` 门面签名逐一相等；③ 工具说明非空且门面 docstring 覆盖每个变量（`Args` / `Returns`）；④ 两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致；⑤ 代码读取的每个 `MCP_*` 变量都必须出现在 `config.py` 模块文档中（防止新增变量漏文档）。
@@ -1276,7 +1404,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `create_suite` / `update_suite` | draft Suite 基本字段（聚合方式/父 Suite/挂载 Case/占用资金） | `suites` serializers + services |
 | `update_suite_topology` | 整体替换 Case 挂载与出边（事务内 DAG + `event_condition` 白名单校验） | `suites.services.update_topology` |
 | `delete_suite` | 删除 Suite | 删除保护（被 Plan 引用拒绝） |
-| `create_plan` / `update_plan` / `delete_plan` | draft Plan 增改删 | `plans` serializers（cron / 事件注册 / `symbol_scope` 白名单 / 账户资金）+ 删除保护 |
+| `create_plan` / `update_plan` / `delete_plan` | draft Plan 增改删（标的范围不在此配置，改由 Case 声明） | `plans` serializers（cron / 事件注册 / 账户资金）+ 删除保护 |
 
 - **门禁独立于执行开关**：默认禁用（`PermissionError`），需 `MCP_ALLOW_MUTATE=1` 或启动参数 `--allow-mutate`；与 `MCP_ALLOW_TRIGGER` / `--allow-trigger` 互不影响。布尔开关，两个入口（`manage.py run_mcp_server`、`python -m mcp_server`）与两种传输（SSE/stdio）均支持；显式传参覆盖环境变量（含 `=0`），配置变更需重启。
 - **边界**：只改 **draft** 配置——不发布、不启动、不下单、不触碰状态机与版本快照；publish / rollback / start / stop 仍走 REST 动作接口。删除冲突抛 `MutationConflictError`（REST 409 语义），校验失败抛可定位 `ValueError`（REST 400 同源信息）。无新增 REST API、数据模型或 JSON 白名单字段；工具数 14 → **24**。
@@ -1309,16 +1437,16 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 22 通过 | 100% |
 | `datasources` | ✅ 已完成 | 42 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步（**含增量优化**）/基本面缓存） |
-| `execution` | 🟢 执行闭环完成 | 143 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
+| `execution` | 🟢 执行闭环完成 | 198 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**账户资金可按 gm 账户信息同步**（2026-09-28，含额度口径与不变式）；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
-| `plans` | ✅ P0 能力完成 | 20 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；**调度器已内置 TaskQueue 消费端（`--workers`，默认 2）**；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
+| `plans` | ✅ P0 能力完成 | 24 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；**调度器已内置 TaskQueue 消费端（`--workers`，默认 2）与账户资金同步（`--funds-source` / `--funds-capital-basis`）**；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
 | `runner` | ✅ P0 能力完成 | 121 通过 | 100%（**TaskQueue 消费端已补齐**：时间驱动 Plan 真实执行；P1：真实交易回报、基本面扩展指标与总仓位风控） |
 | `monitoring` | ✅ 已完成 | 70 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9；进程门禁已覆盖 `run_scheduler` 等非 Web 服务进程） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 | `mcp_server` | ✅ 已完成 | 86 通过 | 100%（**SSE（HTTP）MCP 服务**：24 工具（14 只读/受控触发 + 10 受控配置写 MCP-20） + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18 · **MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，CLI 与 `MCP_*` 配置变量逐个带说明**） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-28）：✔ 561 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（各模块实测：users 5 + watchlists 22 + datasources 42 + execution 143 + cases 22 + suites 30 + plans 20 + runner 121 + monitoring 70 + mcp_server 86 = 561。本轮 TaskQueue 消费端补齐新增 38 个：`runner/tests_queue_consumer.py` 26、`apps/plans/tests_run_scheduler.py` 5、`apps/execution/tests_dev_stack.py` +2、`MonitoringUpdaterProcessGateTest` +5；并移除 `apps/execution/tests_alerts.py` 模块级 `logging.disable(CRITICAL)`（它会静默关闭其后所有用例的日志）。此前基线：**2026-09-24 ✔ 501 个**（MCP 端到端冒烟测试 +40）。此前基线：**2026-09-21 ✔ 453 个**（MCP-20 配置写工具 +11）。此前基线：**2026-09-15 ✔ 402 个测试全部通过** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36；**2026-09-17 ✔ 437 个**（mcp_server 41）。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-28）：✔ 620 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（各模块实测：users 5 + watchlists 22 + datasources 42 + execution 198 + cases 22 + suites 30 + plans 24 + runner 121 + monitoring 70 + mcp_server 86 = 620。本轮「按 gm 账户信息管理资金总量」新增 59 个：`apps/execution/tests_fund_sync.py` 55（gm Cash 字段归一 / 失败绝不写 0 / TTL 守卫 / 批量失败隔离 / 账户绑定 / **额度口径 capital_basis 与"额度不低于已分配额度之和"不变式** / 适配器 `get_position` 兜底 / 执行服务与命令接线 / 账户 ID 脱敏）+ `apps/plans/tests_run_scheduler.py` +4（资金参数透传、同步循环、口径透传）。此前基线：TaskQueue 消费端补齐 → 561；MCP 端到端冒烟 → 501；2026-09-21 → 453；2026-09-15 → 402。
 
 
 ## 五、待办事项汇总
@@ -1359,6 +1487,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | SQLite 多进程并发调优（`quant_engine/db_tuning.py`：`connection_created` 信号为每个 SQLite 连接执行 `PRAGMA journal_mode=WAL` + `busy_timeout`（与 `OPTIONS['timeout']` 一致，默认 5s）；dev/local 两库（主库 + K 线库）配置 `transaction_mode=IMMEDIATE` + `timeout=30`；消除 `run_dev_stack` 下 web/mcp 双进程 updater 并发写引发的 `database is locked`；仅 SQLite 生效，生产 MariaDB 不受影响） | 全局 settings, `execution`（测试） | ✅ 已完成（2026-09-24；`apps/execution/tests_db_tuning.py` 3 个专项测试；dev_stack 端到端复验 0 lock 错误、启动回填无异常） | 运维体验增强（N-02 前置） |
 | MCP 端到端冒烟测试（`manage.py mcp_smoke_test`：用**真实 MCP 协议（SSE 客户端）**跑通「建夹具（Case×2 → Suite → 拓扑 → Plan）→ 发布 → 读侧回读校验 →（可选）受控触发 → 删除保护校验 → 清理」，覆盖 17 个 MCP 工具（写 / 读 / 触发 / 删除）；编排逻辑 `mcp_server/smoke.py`（**异步只走 MCP、同步只写库**，ORM 不进入事件循环；`SseMcpSession` 适配 + `McpSession` 协议便于无网络测试）；默认建完即清、`--keep` 保留、`--no-publish` 只建 draft；`--url/--auth-token/--account-id/--allocated-capital/--symbol/--trigger` 可配；失败打印已完成步骤与已创建主键，并按依赖逆序尽力清理；顺带修正客户端读取 `CallToolResult.is_error`（mcp 2.x 为 snake_case，此前误读 `isError` 会把工具失败静默当成功）） | `execution`（管理命令）, `mcp_server` | ✅ 已完成（2026-09-24；`mcp_server/tests_smoke.py` 29 个 + `apps/execution/tests_mcp_smoke_command.py` 11 个专项测试；实机对运行中的 MCP 服务跑通全链路，夹具 0 残留） | 模块11 验证（MCP-20 收尾） |
 | Case 发布逻辑收敛到服务层（`apps/cases/services.py::publish_case`：参数白名单校验 + 版本 +1 + 固化 `CaseVersion` 快照，事务内完成；`CaseViewSet.publish` 改为调用该服务，业务逻辑不再堆在 `views.py`，REST 与冒烟脚本共用同一入口） | `cases` | ✅ 已完成（行为不变，既有 cases 用例全通过） | C-03、代码组织规范 |
+| 账户资金总量管理（按 gm 账户信息同步）：`AccountFundConfig` 增 `source`/`capital_basis`/`available_cash`/`market_value`/`frozen_cash`/`synced_at`；**额度口径 `capital_basis`（total/cash/available）+ 不变式"额度不低于已分配额度之和"**（应对账户内**本项目未管理的持仓**导致市值盘中抖动、额度虚高与"误判超额"）；新增 `apps/execution/fund_sync.py`（`normalize_cash` 按 `balance + market_value` 推导总资产、`nav` 兜底；`sync_account_funds` upsert 且**失败绝不写 0**；`ensure_funds_fresh` TTL；`sync_published_plan_accounts` 批量失败隔离；`_bind_account` 先 `set_account_id`，否则 gm 报 status 1020「无效的ACCOUNT_ID」）；执行前按 TTL 刷新（`PlanExecutionService._refresh_funds`，失败只记日志不阻断交易）；调度器 `--funds-source gm --funds-refresh-interval` 周期同步；`manage.py sync_account_funds` 人工核对；**下单通道与资金通道独立**（可只读账户、不下单）；风控 `account_provider` 接入实时账户快照；账户 ID 日志/输出默认脱敏（N-05）；**顺带修复 `GmBrokerAdapter.get_positions` 只探测复数函数、而当前 SDK 暴露单数 `get_position`，导致持仓风控长期静默失效** | `execution`, `runner`, `plans` | ✅ 已完成（2026-09-28；`apps/execution/tests_fund_sync.py` 55 + `tests_run_scheduler.py` +4；实机对 gm 账户 `efd9…2aa6` 同步成功：额度 999912.00（total 口径）/ 券商可用 997705.80 / 持仓市值 2256.00 / 冻结 2284.20 / 内部可用 949912.00；`--capital-basis cash` → 额度 997656.00（忽略持仓市值）；失败路径亦实测（未绑定账户 → 报 1020 且保留原值、不写 0）） | R-08 |
 | **TaskQueue 消费端补齐**（时间驱动 Plan 真正执行：`WorkerPool.run_forever` 常驻消费 + `Scheduler.run_forever_async` 异步轮询（DB 走同步线程 / 入队留事件循环线程）+ `runner/service.py::PlanExecutionService` 生产执行端（重读 Plan → SuiteRun → EventLoop → ExecutionLog → Order，失败补发 `suite_failed` 告警）+ `run_scheduler --workers/--order-broker/--no-risk-control`（默认 2 worker、默认不下单）+ `run_dev_stack` 透传；顺带修复 `PlanRegistry` 配置变更不自愈与分时更新器进程门禁漏 `run_scheduler`） | `runner`, `plans`, `execution`, `monitoring` | ✅ 已完成（2026-09-28；`runner/tests_queue_consumer.py` 26 + `apps/plans/tests_run_scheduler.py` 5 + dev_stack +2 + monitoring 门禁 +5；实机端到端：`--interval 5 --workers 2` 跑出 `SuiteRun → NodeRun → ExecutionLog(success, direction=1) → Order(pending)`，风控开启时按预期 `blocked`（非交易时段）；`run` 批处理语义不变） | R-01、R-02、R-03、P-07 |
 
 #### 5.1.2 待开发任务
@@ -1492,6 +1621,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
 | P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 46 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200）；**MCP-19 变量描述**（`McpToolSchemaTest` 3 个：29 个入参 `inputSchema` 描述非空且长度 ≥ 6、变量名与必填集合与 `tools_impl` 门面签名逐一相等、工具说明与门面 docstring 逐变量覆盖 `Args`/`Returns`；`McpVariablesDocumentationTest` 2 个：两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致、代码读取的每个 `MCP_*` 变量都出现在 `config.py` 模块文档中） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
 | 2026-09-24 | MCP 端到端冒烟测试（`manage.py mcp_smoke_test`） | ✅ 40 个通过。`mcp_server/tests_smoke.py` 29 个：`CallToolResult` 归一（`is_error` / `isError` / 空 content）、工具清单校验与缺失上报、建夹具调用顺序与参数透传（账户 / 资金 / `symbol_scope`）、读侧回读断言（标的与拓扑一致、未建夹具即报错、不一致可检出）、受控触发与门禁关闭、删除保护生效 / 失效探测、清理顺序与守卫（未清运行实例 / 清理残留）、同步 DB 步骤（账户资金配置幂等、发布三件套与幂等、`purge_runs` 只删自建且幂等）。`apps/execution/tests_mcp_smoke_command.py` 11 个：全链路阶段顺序与工具覆盖、参数与开关（`--keep` / `--no-publish` / `--trigger` / `--symbol` / 账户与资金）、失败上报与尽力清理、默认 URL 与 Bearer 鉴权头 | 实机对运行中的 MCP 服务跑通 `--trigger` 全链路与 `--no-publish` 两种模式，夹具 0 残留（另：ORM 不进入事件循环；命令编排测试用内存会话，避免 SQLite shared-cache 测试库与 TestCase 事务互锁） |
+| 2026-09-28 | 账户资金总量管理（`manage.py sync_account_funds` / `run_scheduler --funds-source gm`） | ✅ 59 个通过。`apps/execution/tests_fund_sync.py` 55 个：gm `Cash` 字段归一（`balance+market_value` 推导总资产、`nav` 兜底、`cash` 作为 available 兜底、字符串/布尔/非数值忽略、空 dict → 无法推导）、写库与失败语义（首建 / 原地更新 / `manual` → `gm` 覆盖、**空响应与 broker 异常均保留上次值不写 0**、缺参拒绝、内部额度与 gm available 相互独立）、账户绑定（先 `set_account_id`、换账户重绑、同账户不重绑、绑定失败不阻断、无 setter 兼容）、TTL 守卫（期内跳过 / 过期重同步 / 非正 TTL 每次同步 / `manual` 无 `synced_at` 立即同步 / 无账户无 broker 空转）、批量同步（去重每个账户一次、draft 计划不参与、**单账户失败隔离且不写 0**）、账户 ID 脱敏（含同步日志不含明文）、`GmBrokerAdapter.get_positions` 兼容单数 `get_position` / 优先复数 / 都无时返回空、执行服务接线（无 broker 空转 / 执行前同步 / 失败吞掉只记日志 / `funds_source` 装配 / 非法值拒绝 / 默认两通道皆关）、管理命令（默认脱敏、显式账户 + 明文显示、失败非零退出、无已发布账户提示、broker 初始化失败）、**额度口径**（total / cash / available 三种口径取值与回退、非法口径拒绝、**额度不低于已分配额度之和的不变式**（含"不虚增"与托底日志）、gm 小数位量化不被误报为托底、执行服务透传口径）。`apps/plans/tests_run_scheduler.py` +4：资金参数透传与默认值、`_funds_loop` 周期同步与输出脱敏、口径透传、同步异常只记日志不终止循环 | 实机对 gm 账户 `efd9…2aa6`（终端 192.168.190.1:7001）验证：① 未绑定账户 → `status 1020 无效的ACCOUNT_ID`，非零退出且**保留原 total=100000 未被写 0**；② 绑定后同步成功 → `total_capital=999912.00`、`available_cash=997705.80`、`market_value=2256.00`、`frozen_cash=2284.20`、`source=gm`、内部 `available_capital=949912.00`（= 总资产 − Plan 占用 50000）；③ `--capital-basis cash` → 额度 997656.00（忽略 2258 持仓市值），且未误报"下限托底" |
 | 2026-09-28 | TaskQueue 消费端（`runner/tests_queue_consumer.py` 26 + `apps/plans/tests_run_scheduler.py` 5 + `tests_dev_stack` +2 + `MonitoringUpdaterProcessGateTest` +5） | ✅ 38 个通过。消费端：`run_forever` 空队列常驻不退出、失败任务不中断消费、`run` 批处理仍抛首个错误；`collect_due_tasks` 取任务 / 同分钟去重 / 下一个命中分钟重新入队 / 跳过非 published / 去重键按日裁剪；`run_forever_async` 真实端到端（`TransactionTestCase`，跨线程 ORM）：到期 Plan 被 worker 执行并落 `SuiteRun(completed)` + `ExecutionLog` + `Order`，停止事件即时生效、`stop()` 生效；`PlanExecutionService`：重读 Plan、跳过非 published / 不存在、执行落库、失败抛异常且补发 `suite_failed` 告警、告警自身失败不掩盖原始异常；`PlanRegistry`：可执行字段变更（版本未变）也刷新缓存、归档即移除；`build_execution_service`：非法下单通道拒绝 / 默认 none / 可关风控 / gm 通道装配。进程门禁：`run_scheduler` 等非 Web 服务命令不启动分时更新器、`runserver` 子进程仍启动 | 实机 `run_scheduler --interval 5 --workers 2`：风控开启 → `ExecutionLog(blocked, 当前不在交易时段)`；`--no-risk-control` → `ExecutionLog(success, direction=1)` + `Order(pending)`（未提交，符合默认不下单）；另修复未应用迁移 `0018_eventtyperegistry_base_event_type` |
 
 #### 测试验收标准
@@ -1547,6 +1677,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 ```
 
 ---
+| 2026-09-28 | 标的管理下沉 Plan → Case（`symbol_scope`） | ✅ 全量 620 个测试全部通过（OK，退出码 0）。`Plan.symbol_scope` 字段删除（迁移历史已压缩为每 app 一个 initial，数据库重建）；新增 `Case.params.symbol_scope` 白名单校验（`apps/cases/serializers.validate_symbol_scope`，合同与原 Plan 完全一致）；`apps/plans/services.resolve_plan_symbols` / `iter_plan_cases` / `plan_declares_symbols` 遍历编排树取 Case 并集；`publish_plan` / `rollback_plan` 新增「树内必须有已发布 Case 声明标的」校验；`PlanRegistry._executable_keys` 移除 `symbol_scope`（标的解析时直读 Case）；MCP `create_plan` / `update_plan` 移除 `symbol_scope` 参数，`get_plan` 改输 `symbol_declarers`；`mcp_smoke` 与前端快捷策略均下发到 Case；8 处测试套件迁移（plans / runner / execution / mcp_server） | 实机路径验证：无 Case 声明标的时发布被拒；两个 Case 分别声明 `000001` / `600000` → 解析并集 2 个，`Scheduler.enqueue_due_plans` 恰好产出 2 个 `(Plan, Symbol)` 任务；`makemigrations --check` 无差异，`vue-tsc -b` 0 错误，`vite build` 通过 |
 
 **文档状态**：✅ 需求基线已锁定，可作为后续开发参考依据。
 

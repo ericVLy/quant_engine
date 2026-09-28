@@ -52,6 +52,18 @@ class Command(BaseCommand):
                             choices=('none', 'gm'), default='none',
                             help='调度器下单通道：none（默认，委托单只落库不提交）'
                                  '/ gm（经 gm SDK 真实下单）')
+        parser.add_argument('--scheduler-funds-source', dest='scheduler_funds_source',
+                            choices=('none', 'gm'), default='none',
+                            help='调度器账户资金同步来源：none（默认，后台手工维护）'
+                                 '/ gm（按 gm 账户查询同步账户总资金与可用资金）')
+        parser.add_argument('--scheduler-funds-refresh-interval',
+                            dest='scheduler_funds_refresh_interval', type=float, default=30,
+                            help='账户资金同步周期（秒，默认 30）')
+        parser.add_argument('--scheduler-funds-capital-basis',
+                            dest='scheduler_funds_capital_basis',
+                            choices=('total', 'cash', 'available'), default='total',
+                            help='账户额度上限口径：total（默认）/ cash（只看账面资金，'
+                                 '账户存在本项目未管理的持仓时推荐）/ available（最保守）')
 
     def handle(self, *args, **options):
         python = sys.executable
@@ -88,7 +100,11 @@ class Command(BaseCommand):
             procs.append(launch(
                 [python, manage_py, 'run_scheduler', '--interval', '60',
                  '--workers', str(options['scheduler_workers']),
-                 '--order-broker', options['scheduler_order_broker']]))
+                 '--order-broker', options['scheduler_order_broker'],
+                 '--funds-source', options['scheduler_funds_source'],
+                 '--funds-refresh-interval',
+                 str(options['scheduler_funds_refresh_interval']),
+                 '--funds-capital-basis', options['scheduler_funds_capital_basis']]))
 
         def shutdown(signum, frame):
             self.stdout.write(f'[dev-stack] 收到信号 {signum}，正在停止全部子进程…')

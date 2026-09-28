@@ -50,14 +50,14 @@ def resolve_sample_symbols(markets=None, symbols=None):
 
 
 def _published_plan_symbols():
-    """已发布 Plan 标的范围的并集；无 Plan 时返回空 QuerySet。"""
+    """已发布 Plan 覆盖标的的并集（标的由 Case 声明）；无结果时返回空 QuerySet。"""
     from apps.plans.models import Plan
-    from apps.watchlists.services import resolve_symbol_scope
+    from apps.plans.services import resolve_plan_symbols
 
     codes = set()
     for plan in Plan.objects.filter(status='published'):
         try:
-            for symbol in resolve_symbol_scope(plan.symbol_scope).only('code'):
+            for symbol in resolve_plan_symbols(plan).only('code'):
                 codes.add(symbol.code)
         except Exception:  # pylint: disable=broad-except
             logger.warning('解析 Plan %s 标的范围失败，跳过', plan.pk)

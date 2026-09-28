@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """分级资金占用链路测试：Plan 占用 → Suite 申请 → Case 申请 → 下单扣减。"""
 from decimal import Decimal
 
@@ -19,7 +19,6 @@ class FundAllocationServiceTest(TestCase):
         self.suite = Suite.objects.create(name='S', status='published')
         self.plan = Plan.objects.create(
             name='P', root_suite=self.suite, status='published',
-            symbol_scope={'type': 'symbols'},
             account_id='acct-001', allocated_capital=Decimal('10000.00'),
         )
         self.child_suite = Suite.objects.create(
@@ -78,8 +77,7 @@ class FundReserveTest(TestCase):
     def setUp(self):
         self.suite = Suite.objects.create(name='S', status='published')
         self.plan = Plan.objects.create(
-            name='P', root_suite=self.suite, status='published',
-            symbol_scope={'type': 'symbols'}, allocated_capital=Decimal('1000'),
+            name='P', root_suite=self.suite, status='published', allocated_capital=Decimal('10000'),
         )
         self.case = Case.objects.create(
             name='C', node_type='executor', status='published',
@@ -148,8 +146,7 @@ class EngineFundEnforcementTest(TestCase):
     def _suite_plan(self):
         suite = Suite.objects.create(name='S', status='published')
         plan = Plan.objects.create(
-            name='P', root_suite=suite, status='published',
-            symbol_scope={'type': 'symbols'}, allocated_capital=Decimal('10000'),
+            name='P', root_suite=suite, status='published', allocated_capital=Decimal('10000'),
         )
         return suite, plan
 

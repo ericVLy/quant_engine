@@ -6,7 +6,7 @@ from threading import Event
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from apps.watchlists.services import resolve_symbol_scope
+from apps.plans.services import resolve_plan_symbols
 
 from .queue import TaskQueue
 from .registry import PlanRegistry
@@ -108,7 +108,8 @@ class Scheduler:
         PlanRegistry.sync_from_database()
         tasks = []
         for plan in self.due_plans(now):
-            for symbol in resolve_symbol_scope(plan.symbol_scope):
+            # 标的集合来自 Case 声明（编排树内并集），Plan 自身不再持有 symbol_scope
+            for symbol in resolve_plan_symbols(plan):
                 key = (plan.pk, plan.version, symbol.code,
                        now.year, now.month, now.day, now.hour, now.minute)
                 if key in self._enqueued:

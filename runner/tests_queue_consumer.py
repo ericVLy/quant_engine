@@ -1,4 +1,4 @@
-"""TaskQueue 消费端测试（Scheduler 生产 → WorkerPool 消费 → 真实执行链）。
+﻿"""TaskQueue 消费端测试（Scheduler 生产 → WorkerPool 消费 → 真实执行链）。
 
 覆盖本次修复的核心：
 - :meth:`runner.queue.WorkerPool.run_forever`（常驻消费、失败不中断、停止即退）；
@@ -116,12 +116,12 @@ def _make_due_plan(code='000001', status='published', version=1, cron=CRON):
             'trigger': {'event_type': 'SUITE_INIT'},
             'result': {'direction': 1,
                        'order': {'direction': 'buy', 'price': 10, 'volume': 10}},
+            'symbol_scope': {'type': 'symbols', 'symbol_codes': [code]},
         },
     )])
     return Plan.objects.create(
         name=f'Plan {code}', root_suite=suite, status=status, version=version,
         trigger_type='time', cron_expr=cron,
-        symbol_scope={'type': 'symbols', 'symbol_codes': [code]},
         exec_mode='serial',
     )
 
@@ -331,14 +331,23 @@ class PlanRegistryRefreshTest(TestCase):
         PlanRegistry.sync_from_database()
         self.assertEqual(PlanRegistry.get_snapshot(plan.pk)['cron_expr'], '*/5 * * * *')
 
-    def test_sync_refreshes_when_symbol_scope_changes(self):
+    def test_case_symbol_change_is_picked_up_without_version_bump(self):
+        """标的范围已下沉到 Case：改 Case.params 即刻影响 Plan 的标的集合。
+
+        标的范围不再进 PlanRegistry 快照（``_executable_keys`` 已移除该键），
+        解析时直接读 Case，因此"改配置后重新解析"由 Case 侧生效。
+        """
+        from apps.plans.services import resolve_plan_symbols
+
         plan = _make_due_plan()
-        PlanRegistry.sync_from_database()
-        plan.symbol_scope = {'type': 'symbols', 'symbol_codes': ['600000']}
-        plan.save(update_fields=('symbol_scope', 'updated_at'))
-        PlanRegistry.sync_from_database()
-        snapshot = PlanRegistry.get_snapshot(plan.pk)
-        self.assertEqual(snapshot['symbol_scope']['symbol_codes'], ['600000'])
+        Symbol.objects.get_or_create(code='600000', defaults={'name': '浦发银行', 'market': 'A'})
+        self.assertEqual([s.code for s in resolve_plan_symbols(plan)], ['000001'])
+
+        case = plan.root_suite.cases.get()
+        case.params = {**case.params,
+                       'symbol_scope': {'type': 'symbols', 'symbol_codes': ['600000']}}
+        case.save(update_fields=('params', 'updated_at'))
+        self.assertEqual([s.code for s in resolve_plan_symbols(plan)], ['600000'])
 
     def test_sync_drops_archived_plan(self):
         plan = _make_due_plan()
