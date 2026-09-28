@@ -771,19 +771,50 @@ class Plan(models.Model):
 
 当前实现文件：`models.py`、`serializers.py`、`services.py`、`views.py`、`urls.py`、`management/commands/run_scheduler.py`。Plan 只能在发布时要求根 Suite 已发布，创建和编辑阶段允许保存草稿配置。
 
-#### 持久化 Cron 调度与配置刷新
+#### 持久化 Cron 调度、任务消费与配置刷新
 
-- `runner.scheduler.Scheduler.run_forever()` 提供可停止的常驻轮询循环，默认每 60 秒检查一次。
-- `runner.registry.PlanRegistry.sync_from_database()` 每轮从数据库加载已发布 Plan，按 `version` 刷新配置，并移除已归档或取消发布的 Plan。
-- `apps/plans/management/commands/run_scheduler.py` 提供 Django 进程入口：
+- `runner.scheduler.Scheduler.run_forever()` 提供可停止的常驻轮询循环，默认每 60 秒检查一次（**只投递任务**）。
+- `runner.scheduler.Scheduler.run_forever_async()` 为异步常驻轮询：DB 读取（`collect_due_tasks`）经 `sync_to_async` 在同步线程完成，**任务入队留在事件循环线程**（`asyncio.Queue` 跨线程入队会导致唤醒不可靠）。
+- `runner.queue.WorkerPool.run_forever()` 是**消费端**：不等待队列排空，持续取任务执行直到收到停止信号；单任务失败只记日志不中断（守护进程语义）。
+- `runner.service.PlanExecutionService` 提供 `WorkerPool` 所需的生产执行端（`arun` 契约）：按主键重读 Plan（跳过非 `published`）→ `create_suite_run` → `EventLoop.run_to_completion` → `ExecutionLog` → `Order`；执行失败补发 `suite_failed` 告警。
+- `runner.registry.PlanRegistry.sync_from_database()` 每轮从数据库加载已发布 Plan，**按 `version` 或可执行字段变化**刷新配置，并移除已归档或取消发布的 Plan。
+- `apps/plans/management/commands/run_scheduler.py` 提供 Django 进程入口（调度与消费同进程、同事件循环）：
 
 ```bash
-.\venv\Scripts\python.exe .\manage.py run_scheduler --interval 60
+# 默认：2 个 worker 消费队列；委托单只落库，不真实下单
+.venv/bin/python manage.py run_scheduler --interval 60 --workers 2
+
+# 真实下单（务必先确认账户 / 风控 / 模拟环境）
+.venv/bin/python manage.py run_scheduler --order-broker gm
+
+# 退回历史行为：只投递不执行
+.venv/bin/python manage.py run_scheduler --workers 0
 ```
 
-- 同一分钟内同一 `(Plan, Symbol)` 任务只入队一次；进程收到停止信号后退出轮询。
-- 当前能力覆盖自动 Cron 触发、配置热刷新、重试策略校验和历史版本回滚。
+- 同一分钟内同一 `(Plan, Symbol)` 任务只入队一次（`_enqueued` 去重键按日裁剪，长驻进程内存有界）；进程收到 SIGINT/SIGTERM 后优雅退出。
+- 当前能力覆盖自动 Cron 触发、**任务消费与真实执行**、配置热刷新、重试策略校验和历史版本回滚。
 - **单机部署评估（2026-09-10）**：当前部署目标为单机，同一时刻只运行一个 Scheduler 实例，进程内 `_enqueued` 去重已保证“同一分钟同一 `(Plan, Symbol)` 只入队一次”。跨进程分布式去重、租约/领导者选举和任务幂等键仅在多机/多实例场景才必要，因此该治理任务由 P1 降为 **P4**（见 5.1.2）；单机部署阶段无需开发，未来扩展多机部署时再评估。
+
+##### TaskQueue 消费端（2026-09-28 补齐）
+
+**问题**：此前 `run_scheduler` 只把到期任务投递到 `TaskQueue`（**只进不出**），全项目没有任何生产消费端（`WorkerPool` 仅在测试里被使用），导致时间驱动 Plan 永远不会执行。
+
+**修复**：
+
+| 环节 | 位置 | 说明 |
+|------|------|------|
+| 常驻消费 | `runner/queue.py::WorkerPool.run_forever` | 不等排空、收到停止信号即退；单任务失败只记日志（`run` 保持"排空后抛出首个错误"的批处理语义） |
+| 异步轮询 | `runner/scheduler.py::run_forever_async` / `collect_due_tasks` | DB 走同步线程、入队留事件循环线程；`_prune_enqueued` 按日裁剪去重键 |
+| 生产执行端 | `runner/service.py::PlanExecutionService` / `build_execution_service` | 重读 Plan → 真实执行链；失败补发告警；`order_broker` 默认 `none`（只落库不下单） |
+| 进程编排 | `apps/plans/.../run_scheduler.py` | `--workers`（默认 2）/ `--order-broker`（默认 none）/ `--no-risk-control`；SIGINT/SIGTERM 优雅停止 |
+| 开发栈透传 | `apps/execution/.../run_dev_stack.py` | `--scheduler-workers` / `--scheduler-order-broker` |
+| 失败可观测 | `runner/engine.py::SuiteRunner.run(on_run=...)` | 新增可选回调，供消费端拿到 `SuiteRun` 句柄发 `suite_failed` 告警 |
+
+**顺带修复的两个既有缺陷**：
+
+1. **`PlanRegistry` 配置变更不自愈**：原实现只在 `version` 变化时刷新缓存。已发布 Plan 可不经发布直接编辑（REST / MCP `update_plan` 不改 `version`），因此 `cron_expr` / `symbol_scope` 会被长期缓存。队列无人消费时无害，现在会直接导致按旧配置触发，改为比较全部可执行字段。
+2. **分时更新器进程门禁漏 `run_scheduler`**：调度器进程此前会顺带拉起分时更新器 → 与 Web 服务进程重复外部请求与写库。已把 `run_scheduler` / `run_dev_stack` / `gm_live_link` / `clear_intraday` / `purge_execution_logs` 纳入跳过名单（见模块9）。
+
 
 
 ### 模块8：`runner`（独立异步引擎）✅ P0 核心能力已完成
@@ -799,8 +830,8 @@ class Plan(models.Model):
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
 | R-01 | **Scheduler（调度器）**：定时扫描 Plan，按 Cron 表达式触发执行 | ✅ 完成 |
-| R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | ✅ 完成 |
-| R-03 | **Worker Pool**：固定数量协程并发执行任务 | ✅ 完成（并发、重试和失败传播） |
+| R-02 | **Task Queue**：任务入队（每个 `(Plan, Symbol)` 为一个独立任务） | ✅ 完成（2026-09-28 起有生产消费端：入队数据 = `(plan, symbol_code)`，由 `Scheduler.collect_due_tasks` 产出） |
+| R-03 | **Worker Pool**：固定数量协程并发执行任务 | ✅ 完成（并发、重试和失败传播；`run_forever` 为常驻消费，单任务失败只记日志不中断；`--workers` 默认 2） |
 | R-04 | **SuiteRunner**：加载 Suite 拓扑，创建 SuiteRun 实例 | ✅ 完成；优先读取发布快照（SuiteVersion），支持子 Suite 递归执行 |
 | R-05 | **EventLoop**：消费 SuiteRun.event_queue，匹配事件 → 执行 Case → 产出新事件 | ✅ 完成；快照驱动编排：子 Suite 递归执行、树形聚合、parallel 分支并发 join、fail_stop 失败传播、NodeRun 轨迹记录 |
 | R-06 | **CaseExecutor**：执行单个 Case 的运算逻辑（因子计算/过滤/裁决） | ✅ 技术指标引擎已接入（MA/EMA/MACD/RSI/KDJ/BOLL/ROC/波动率/涨跌幅 + 过滤 + 综合裁决）；兼容声明式 result |
@@ -844,8 +875,9 @@ class Plan(models.Model):
 
 ```
 1. Scheduler 唤醒 Plan → 2. 解析 symbol_scope 获取标的列表
-   → 3. 为每个 (Plan, Symbol) 创建任务入队
-   → 4. Worker 从队列取出任务
+   → 3. 为每个 (Plan, Symbol) 创建任务入队（TaskQueue）
+   → 4. Worker 从队列取出任务（`WorkerPool.run_forever`，`--workers` 个并发）
+       （执行前按主键重读 Plan，跳过非 published）
    → 5. 创建 SuiteRun 实例（状态: pending）
    → 6. 加载 Suite 编排树（优先发布快照 SuiteVersion，回退实时构建）
    → 7. 注入 INIT 事件到 event_queue
@@ -934,7 +966,7 @@ class IntradayPoint(models.Model):
 - 每 `MONITORING_UPDATER_INTERVAL` 秒（默认 60，环境变量可覆盖）执行一轮采样；
 - **市场开盘时清理历史数据**（2026-09-15）：每市场每本地日一次——该市场处于交易时段的首轮更新中，删除 `ts` 早于当日当地 00:00 的全部记录（往日历史），当日数据保留；非交易时段/周末不触发（UTC 23:00 收盘清理仍作兜底）；
 - UTC 23:00 自动触发当日 `clear_intraday`（每自然日最多一次，幂等）；
-- `MONITORING_UPDATER_ENABLED=0` 可整体关闭；test/migrate/shell 等管理命令进程不启动；
+- `MONITORING_UPDATER_ENABLED=0` 可整体关闭；**非 Web 服务进程一律不启动**——test/migrate/shell 等管理命令、以及 `run_scheduler` / `run_dev_stack` / `run_mcp_server` / `gm_live_link` / `clear_intraday` / `purge_execution_logs` 等长驻或运维命令（2026-09-28 补齐：策略调度器此前会顺带拉起更新器，导致与 Web 服务进程重复外部请求与写库）；仅 `runserver` 的 `RUN_MAIN=true` 子进程与 Gunicorn/WSGI 服务进程启动；
 - `manage.py clear_intraday` 保留为清理兜底（清理非更新，不写入数据）。
 
 #### 清理任务
@@ -1276,17 +1308,17 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 |------|------|------------|--------|
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 22 通过 | 100% |
-| `datasources` | ✅ 已完成 | 30 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步（**含增量优化**）/基本面缓存） |
-| `execution` | 🟢 执行闭环完成 | 84 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
+| `datasources` | ✅ 已完成 | 42 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步（**含增量优化**）/基本面缓存） |
+| `execution` | 🟢 执行闭环完成 | 143 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
-| `plans` | ✅ P0 能力完成 | 15 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
-| `runner` | ✅ P0 能力完成 | 93 通过 | 100%（P1：真实交易回报、基本面扩展指标与总仓位风控） |
-| `monitoring` | ✅ 已完成 | 65 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9） |
+| `plans` | ✅ P0 能力完成 | 20 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；**调度器已内置 TaskQueue 消费端（`--workers`，默认 2）**；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
+| `runner` | ✅ P0 能力完成 | 121 通过 | 100%（**TaskQueue 消费端已补齐**：时间驱动 Plan 真实执行；P1：真实交易回报、基本面扩展指标与总仓位风控） |
+| `monitoring` | ✅ 已完成 | 70 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9；进程门禁已覆盖 `run_scheduler` 等非 Web 服务进程） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
-| `mcp_server` | ✅ 已完成 | 57 通过 | 100%（**SSE（HTTP）MCP 服务**：24 工具（14 只读/受控触发 + 10 受控配置写 MCP-20） + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18 · **MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，CLI 与 `MCP_*` 配置变量逐个带说明**） |
+| `mcp_server` | ✅ 已完成 | 86 通过 | 100%（**SSE（HTTP）MCP 服务**：24 工具（14 只读/受控触发 + 10 受控配置写 MCP-20） + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18 · **MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，CLI 与 `MCP_*` 配置变量逐个带说明**） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-24）：✔ 501 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（数量演进：2026-09-21 → 453；2026-09-24 → 455（gm 远程终端 `set_serv_addr` +2）→ 458（`run_dev_stack` 一键启动命令 +3）→ 461（SQLite 多进程并发调优 `db_tuning` +3）→ **501**（MCP 端到端冒烟测试 +40：`mcp_server/tests_smoke.py` 29 + `apps/execution/tests_mcp_smoke_command.py` 11）；另修复 monitoring 开盘清理在非 +08 系统时区下的 UTC 边界换算 bug）。此前基线：**2026-09-21 ✔ 453 个**（MCP-20 配置写工具 +11）。此前基线：**2026-09-15 ✔ 402 个测试全部通过** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36；**2026-09-17 ✔ 437 个**（mcp_server 41）。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-28）：✔ 561 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（各模块实测：users 5 + watchlists 22 + datasources 42 + execution 143 + cases 22 + suites 30 + plans 20 + runner 121 + monitoring 70 + mcp_server 86 = 561。本轮 TaskQueue 消费端补齐新增 38 个：`runner/tests_queue_consumer.py` 26、`apps/plans/tests_run_scheduler.py` 5、`apps/execution/tests_dev_stack.py` +2、`MonitoringUpdaterProcessGateTest` +5；并移除 `apps/execution/tests_alerts.py` 模块级 `logging.disable(CRITICAL)`（它会静默关闭其后所有用例的日志）。此前基线：**2026-09-24 ✔ 501 个**（MCP 端到端冒烟测试 +40）。此前基线：**2026-09-21 ✔ 453 个**（MCP-20 配置写工具 +11）。此前基线：**2026-09-15 ✔ 402 个测试全部通过** = users 5 + watchlists 22 + datasources 30 + execution 84 + cases 22 + suites 30 + plans 15 + runner 93 + monitoring 65 + mcp_server 36；**2026-09-17 ✔ 437 个**（mcp_server 41）。根因定位：早期 20 failures + 1 error 均非业务缺陷——① `arcis.django.ArcisMiddleware` 默认按 IP 限流（100 次/60 秒），测试进程内所有请求共享 127.0.0.1，watchlists/datasources 套件超阈值后返回 429（含 `test_search_symbol` 的 `JsonResponse` 无 `.data`，同源）；② `monitoring` gm 昨收用例为时间炸弹（硬编码日期相对"今日"），已固定 `timezone.now`；③ `datasources` 两处 Decimal 字符串断言依赖 MySQL 精度展示（SQLite 返回 `'10.6'`），已改为 Decimal 数值断言。测试环境隔离：新增 `quant_engine/settings/test.py`（`ARCIS_CONFIG={'rate_limit': False}`），`manage.py` 检测 `test` 子命令自动切换；开发/生产限流保持不变。
 
 
 ## 五、待办事项汇总
@@ -1327,13 +1359,14 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | SQLite 多进程并发调优（`quant_engine/db_tuning.py`：`connection_created` 信号为每个 SQLite 连接执行 `PRAGMA journal_mode=WAL` + `busy_timeout`（与 `OPTIONS['timeout']` 一致，默认 5s）；dev/local 两库（主库 + K 线库）配置 `transaction_mode=IMMEDIATE` + `timeout=30`；消除 `run_dev_stack` 下 web/mcp 双进程 updater 并发写引发的 `database is locked`；仅 SQLite 生效，生产 MariaDB 不受影响） | 全局 settings, `execution`（测试） | ✅ 已完成（2026-09-24；`apps/execution/tests_db_tuning.py` 3 个专项测试；dev_stack 端到端复验 0 lock 错误、启动回填无异常） | 运维体验增强（N-02 前置） |
 | MCP 端到端冒烟测试（`manage.py mcp_smoke_test`：用**真实 MCP 协议（SSE 客户端）**跑通「建夹具（Case×2 → Suite → 拓扑 → Plan）→ 发布 → 读侧回读校验 →（可选）受控触发 → 删除保护校验 → 清理」，覆盖 17 个 MCP 工具（写 / 读 / 触发 / 删除）；编排逻辑 `mcp_server/smoke.py`（**异步只走 MCP、同步只写库**，ORM 不进入事件循环；`SseMcpSession` 适配 + `McpSession` 协议便于无网络测试）；默认建完即清、`--keep` 保留、`--no-publish` 只建 draft；`--url/--auth-token/--account-id/--allocated-capital/--symbol/--trigger` 可配；失败打印已完成步骤与已创建主键，并按依赖逆序尽力清理；顺带修正客户端读取 `CallToolResult.is_error`（mcp 2.x 为 snake_case，此前误读 `isError` 会把工具失败静默当成功）） | `execution`（管理命令）, `mcp_server` | ✅ 已完成（2026-09-24；`mcp_server/tests_smoke.py` 29 个 + `apps/execution/tests_mcp_smoke_command.py` 11 个专项测试；实机对运行中的 MCP 服务跑通全链路，夹具 0 残留） | 模块11 验证（MCP-20 收尾） |
 | Case 发布逻辑收敛到服务层（`apps/cases/services.py::publish_case`：参数白名单校验 + 版本 +1 + 固化 `CaseVersion` 快照，事务内完成；`CaseViewSet.publish` 改为调用该服务，业务逻辑不再堆在 `views.py`，REST 与冒烟脚本共用同一入口） | `cases` | ✅ 已完成（行为不变，既有 cases 用例全通过） | C-03、代码组织规范 |
+| **TaskQueue 消费端补齐**（时间驱动 Plan 真正执行：`WorkerPool.run_forever` 常驻消费 + `Scheduler.run_forever_async` 异步轮询（DB 走同步线程 / 入队留事件循环线程）+ `runner/service.py::PlanExecutionService` 生产执行端（重读 Plan → SuiteRun → EventLoop → ExecutionLog → Order，失败补发 `suite_failed` 告警）+ `run_scheduler --workers/--order-broker/--no-risk-control`（默认 2 worker、默认不下单）+ `run_dev_stack` 透传；顺带修复 `PlanRegistry` 配置变更不自愈与分时更新器进程门禁漏 `run_scheduler`） | `runner`, `plans`, `execution`, `monitoring` | ✅ 已完成（2026-09-28；`runner/tests_queue_consumer.py` 26 + `apps/plans/tests_run_scheduler.py` 5 + dev_stack +2 + monitoring 门禁 +5；实机端到端：`--interval 5 --workers 2` 跑出 `SuiteRun → NodeRun → ExecutionLog(success, direction=1) → Order(pending)`，风控开启时按预期 `blocked`（非交易时段）；`run` 批处理语义不变） | R-01、R-02、R-03、P-07 |
 
 #### 5.1.2 待开发任务
 
 | 优先级 | 开发任务 | 影响模块 | 依赖/关联需求 |
 |--------|----------|----------|--------------|
 | P1 | ~~API 分页与敏感配置保护~~ → 已拆分：**API 统一分页 ✅ 已完成（N-01，见 5.1.1）**；**敏感配置保护范围收敛**（2026-09-15）：`DataSource.auth_info` 已随 D-01 模块移除而取消，剩余为 PII 与日志卫生（见下方「敏感配置保护设计」）待办 | `execution` / `users`（PII 与日志面） | N-05（分页对应 N-01 已完成） |
-| P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次；多实例治理仅在多机/多实例场景必要，故由 P1 降为 P4（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
+| P4 | 多实例 Scheduler 治理（分布式任务去重、租约/领导者选举、任务幂等键）——**降级原因：当前部署目标为单机**，单一 Scheduler 实例 + 进程内 `_enqueued` 去重已覆盖同分钟同 `(Plan, Symbol)` 只入队一次，且**消费端已在单进程内闭环**（2026-09-28：`run_scheduler` 默认 2 个 worker 消费 `TaskQueue` 并真实执行）；多实例治理仅在多机/多实例场景必要，故由 P1 降为 **P4**（未来多机扩展时再评估） | `plans`, `runner` | N-03 增强 |
 | P2 | ~~画布可视化编排前端对接（拖拽节点/连线、执行轨迹回放视图）~~ → ✅ **已完成（2026-09-10，见 5.1.1）**：基于 `@vue-flow/core` 的策略设计器（`/designer`）已落地——拖拽节点/连线编排、编排边条件配置（含操作符）、拓扑读写、发布、NodeRun 执行轨迹回放；后端配套 `GET /api/execution/run/{run_id}/node-runs/` | `quant-frontend`, `execution` | S-09、EX-15（详见 5.1.4 任务 11） |
 | P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地；2026-09-14 分时数据源替换为 **gm SDK**（A 股主源 + akshare 回退 HK/US） | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
 | P1 | ~~策略快速创建向导~~ → ✅ **全部完成（2026-09-14，见模块10）**：3 步向导 `/quick-strategy`，模板化生成 Case/Suite/Plan 并一键「创建→发布→（可选）启动」；**全链路由前端编排既有 API（后端零新增接口）** | `quant-frontend`（`cases`/`suites`/`plans` API 复用） | 关联新模块（见模块10 设计文档） |
@@ -1459,6 +1492,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | P1 阶段5 | 策略快速创建向导 | ✅ 前端实施完成（2026-09-14，见模块10 前端实施记录）：`vue-tsc -b` 0 错误 + `vite build` 通过；三模板（signal_only / signal_executor / dual_direction）一键链路 + 失败「重试/保留草稿」+ `cleanupCreated` 逆序清理 | 覆盖：`quickStrategy.ts` params 生成与后端 `validate_case_schema` 等值的**运行时端到端验证**（真实后端一键创建三模板各一例并核对入库结构与 Plan symbols 解析）待做；后端零改动（既有回归口径不受影响） |
 | P1 阶段6 | MCP 服务（模块11）专项测试 | ✅ 46 个通过（`mcp_server/tests.py`：工具门面（标的分市场搜索与 limit 收敛、命名解析库内命中与回退、分表 K 线窗口/尾段截断/`to_jsonable` 归一、Plan 详情与标的解析、Case 过滤与拓扑快照、事件类型、告警列表与统计、SuiteRun 过滤、分时序列字段契约）、错误契约（未入库标的/空代码/反向日期窗口/资源不存在）、写开关（默认 `PermissionError`；开启后仅创建 `pending` SuiteRun 且 `Order` 计数为 0；空标的列表与未发布 Plan 仍拒绝）、装配层（14 工具 + 1 资源注册、`bootstrap` 默认关闭分时更新器、概览文本声明边界）、**SSE 传输与安全**（传输配置默认值/覆盖/非法值拒绝、非回环绑定必须令牌、`/sse` `/messages` `/health` 路由、健康检查开/关令牌下的 200/401、DNS rebinding 保护拒绝非法 `Host`）、**进程门禁**（`run_mcp_server` 不启动分时更新器，`runserver` 子进程仍启动））；另实测 `manage.py run_mcp_server` 的 SSE 端到端握手（14 工具 + 资源 + 工具调用）与令牌鉴权（401/200）；**MCP-19 变量描述**（`McpToolSchemaTest` 3 个：29 个入参 `inputSchema` 描述非空且长度 ≥ 6、变量名与必填集合与 `tools_impl` 门面签名逐一相等、工具说明与门面 docstring 逐变量覆盖 `Args`/`Returns`；`McpVariablesDocumentationTest` 2 个：两个 CLI 入口的 MCP 自有选项 `help` 非空且集合一致、代码读取的每个 `MCP_*` 变量都出现在 `config.py` 模块文档中） | OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计（P2，见模块11 已知边界） |
 | 2026-09-24 | MCP 端到端冒烟测试（`manage.py mcp_smoke_test`） | ✅ 40 个通过。`mcp_server/tests_smoke.py` 29 个：`CallToolResult` 归一（`is_error` / `isError` / 空 content）、工具清单校验与缺失上报、建夹具调用顺序与参数透传（账户 / 资金 / `symbol_scope`）、读侧回读断言（标的与拓扑一致、未建夹具即报错、不一致可检出）、受控触发与门禁关闭、删除保护生效 / 失效探测、清理顺序与守卫（未清运行实例 / 清理残留）、同步 DB 步骤（账户资金配置幂等、发布三件套与幂等、`purge_runs` 只删自建且幂等）。`apps/execution/tests_mcp_smoke_command.py` 11 个：全链路阶段顺序与工具覆盖、参数与开关（`--keep` / `--no-publish` / `--trigger` / `--symbol` / 账户与资金）、失败上报与尽力清理、默认 URL 与 Bearer 鉴权头 | 实机对运行中的 MCP 服务跑通 `--trigger` 全链路与 `--no-publish` 两种模式，夹具 0 残留（另：ORM 不进入事件循环；命令编排测试用内存会话，避免 SQLite shared-cache 测试库与 TestCase 事务互锁） |
+| 2026-09-28 | TaskQueue 消费端（`runner/tests_queue_consumer.py` 26 + `apps/plans/tests_run_scheduler.py` 5 + `tests_dev_stack` +2 + `MonitoringUpdaterProcessGateTest` +5） | ✅ 38 个通过。消费端：`run_forever` 空队列常驻不退出、失败任务不中断消费、`run` 批处理仍抛首个错误；`collect_due_tasks` 取任务 / 同分钟去重 / 下一个命中分钟重新入队 / 跳过非 published / 去重键按日裁剪；`run_forever_async` 真实端到端（`TransactionTestCase`，跨线程 ORM）：到期 Plan 被 worker 执行并落 `SuiteRun(completed)` + `ExecutionLog` + `Order`，停止事件即时生效、`stop()` 生效；`PlanExecutionService`：重读 Plan、跳过非 published / 不存在、执行落库、失败抛异常且补发 `suite_failed` 告警、告警自身失败不掩盖原始异常；`PlanRegistry`：可执行字段变更（版本未变）也刷新缓存、归档即移除；`build_execution_service`：非法下单通道拒绝 / 默认 none / 可关风控 / gm 通道装配。进程门禁：`run_scheduler` 等非 Web 服务命令不启动分时更新器、`runserver` 子进程仍启动 | 实机 `run_scheduler --interval 5 --workers 2`：风控开启 → `ExecutionLog(blocked, 当前不在交易时段)`；`--no-risk-control` → `ExecutionLog(success, direction=1)` + `Order(pending)`（未提交，符合默认不下单）；另修复未应用迁移 `0018_eventtyperegistry_base_event_type` |
 
 #### 测试验收标准
 

@@ -8,7 +8,8 @@ from .gm_adapter import GmBrokerAdapter
 from .queue import TaskQueue, WorkerPool
 from .risk import RiskController
 from .scheduler import Scheduler
+from .service import PlanExecutionService, build_execution_service
 
 __all__ = ['AkshareFundamentalsProvider', 'DataContextBuilder', 'EventLoop', 'GmBrokerAdapter', 'RiskController',
-           'Scheduler', 'SuiteRunner', 'TaskQueue', 'WorkerPool', 'build_data_context',
-           'calculate']
+           'PlanExecutionService', 'Scheduler', 'SuiteRunner', 'TaskQueue', 'WorkerPool', 'build_data_context',
+           'build_execution_service', 'calculate']

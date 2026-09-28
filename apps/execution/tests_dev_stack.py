@@ -79,3 +79,20 @@ class RunDevStackCommandTest(SimpleTestCase):
         self.assertIn('127.0.0.1:8000', ' '.join(procs[0].args))
         self.assertIn('--port', ' '.join(procs[1].args))
         self.assertIn('8765', ' '.join(procs[1].args))
+
+    def test_scheduler_worker_and_broker_are_forwarded(self):
+        """调度器消费参数透传：worker 数与下单通道。"""
+        procs = self._run({
+            'with_scheduler': True, 'scheduler_workers': 4,
+            'scheduler_order_broker': 'gm',
+        })
+        sched = ' '.join(procs[2].args)
+        self.assertIn('run_scheduler', sched)
+        self.assertIn('--workers 4', sched)
+        self.assertIn('--order-broker gm', sched)
+
+    def test_scheduler_defaults_are_record_only(self):
+        """默认不真实下单（order_broker=none）。"""
+        procs = self._run({'with_scheduler': True})
+        self.assertIn('--order-broker none', ' '.join(procs[2].args))
+        self.assertIn('--workers 2', ' '.join(procs[2].args))

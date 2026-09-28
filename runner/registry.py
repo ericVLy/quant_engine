@@ -19,12 +19,27 @@ class PlanRegistry:
     )
 
     @classmethod
+    def _needs_refresh(cls, plan, existing):
+        """缓存是否过期：首次、版本变化，或任一可执行字段被改动。
+
+        仅比较 ``version`` 是不够的：已发布 Plan 可以不经发布直接编辑
+        （REST / MCP 的 update_plan 不改 version），若只按版本判断，
+        改动后的 ``cron_expr`` / ``symbol_scope`` 会被长期缓存，
+        调度器就会按旧配置触发（队列真正被执行后这是实害）。
+        """
+        if existing is None:
+            return True
+        if existing.get('version') != plan.version:
+            return True
+        snapshot = {key: getattr(plan, key, None) for key in cls._executable_keys}
+        return existing.get('snapshot') != snapshot
+
+    @classmethod
     def refresh(cls, plan, force=False):
-        """缓存（或在版本变化时刷新）一个已发布 Plan 及其可执行快照。"""
-        if not force:
-            existing = cls._plans.get(plan.pk)
-            if existing and existing.get('version') == plan.version:
-                return plan
+        """缓存（或在版本/可执行配置变化时刷新）一个已发布 Plan 及其可执行快照。"""
+        existing = cls._plans.get(plan.pk)
+        if not force and not cls._needs_refresh(plan, existing):
+            return plan
         snapshot = {key: getattr(plan, key, None) for key in cls._executable_keys}
         cls._plans[plan.pk] = {'version': plan.version, 'plan': plan, 'snapshot': snapshot}
         return plan
@@ -57,8 +72,7 @@ class PlanRegistry:
         for plan_id in set(cls._plans) - published_ids:
             cls.remove(plan_id)
         for plan in published:
-            existing = cls._plans.get(plan.pk)
-            if existing is None or existing.get('version') != plan.version:
+            if cls._needs_refresh(plan, cls._plans.get(plan.pk)):
                 cls.refresh(plan, force=True)
         return len(published)
 

@@ -1,7 +1,6 @@
 """
 告警功能测试文件
 """
-import logging
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
@@ -625,7 +624,3 @@ class AlertIntegrationTests(TestCase):
         
         # 验证应用内通知已发送
         self.assertTrue(alert.in_app_notified)
-
-
-# 禁用日志输出，避免测试时日志干扰
-logging.disable(logging.CRITICAL)

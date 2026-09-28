@@ -44,6 +44,14 @@ class Command(BaseCommand):
         parser.add_argument('--with-scheduler', dest='with_scheduler',
                             action='store_true', default=False,
                             help='同时启动策略调度器（run_scheduler --interval 60）')
+        parser.add_argument('--scheduler-workers', dest='scheduler_workers',
+                            type=int, default=2,
+                            help='调度器消费 TaskQueue 的 worker 数（默认 2；'
+                                 '0 = 只投递任务不执行策略）')
+        parser.add_argument('--scheduler-order-broker', dest='scheduler_order_broker',
+                            choices=('none', 'gm'), default='none',
+                            help='调度器下单通道：none（默认，委托单只落库不提交）'
+                                 '/ gm（经 gm SDK 真实下单）')
 
     def handle(self, *args, **options):
         python = sys.executable
@@ -78,7 +86,9 @@ class Command(BaseCommand):
         # 3) 可选 Scheduler
         if options.get('with_scheduler'):
             procs.append(launch(
-                [python, manage_py, 'run_scheduler', '--interval', '60']))
+                [python, manage_py, 'run_scheduler', '--interval', '60',
+                 '--workers', str(options['scheduler_workers']),
+                 '--order-broker', options['scheduler_order_broker']]))
 
         def shutdown(signum, frame):
             self.stdout.write(f'[dev-stack] 收到信号 {signum}，正在停止全部子进程…')

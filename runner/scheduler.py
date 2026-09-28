@@ -1,7 +1,9 @@
+import asyncio
 import logging
 from datetime import datetime
 from threading import Event
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 
 from apps.watchlists.services import resolve_symbol_scope
@@ -10,6 +12,9 @@ from .queue import TaskQueue
 from .registry import PlanRegistry
 
 logger = logging.getLogger(__name__)
+
+#: 去重键上限：超过后只保留"当天"的键，避免长驻进程内存无限增长。
+ENQUEUED_KEY_LIMIT = 2000
 
 
 class Scheduler:
@@ -23,6 +28,7 @@ class Scheduler:
         self._enqueued = set()
         self._stop_event = Event()
         self._last_purge_date = None
+        self._enqueued_limit = ENQUEUED_KEY_LIMIT
 
     def due_plans(self, now):
         """从注册中心（热加载）读取已发布的时间驱动 Plan，命中 Cron 者返回。"""
@@ -75,21 +81,50 @@ class Scheduler:
                 return False
         return False
 
-    def enqueue_due_plans(self, now):
-        enqueued = 0
+    def _prune_enqueued(self, now):
+        """限制去重键规模：超限后只保留"当天"的键，避免长驻进程内存无限增长。"""
+        if len(self._enqueued) <= self._enqueued_limit:
+            return
+        today = (now.year, now.month, now.day)
+        self._enqueued = {
+            key for key in self._enqueued
+            if (key[3], key[4], key[5]) == today
+        }
+
+    def collect_due_tasks(self, now):
+        """同步：刷新注册中心并返回本轮到期任务 ``[(plan, symbol_code)]``（不入队）。
+
+        单独抽出来的原因：``asyncio.Queue`` 跨线程 ``put`` / ``put_nowait`` 不安全
+        （唤醒逻辑必须回到事件循环线程），所以异步调度器把 **DB 读取放在同步线程**、
+        **入队留在事件循环线程**；本方法即前者。
+
+        Args:
+            now: 当前时间（用于 cron 匹配与去重键）。
+
+        Returns:
+            list[tuple]: 本轮新增的 ``(Plan 实例, 标的代码)``；同一
+            ``(Plan, version, 标的, 年, 月, 日, 时, 分)`` 只出现一次。
+        """
+        PlanRegistry.sync_from_database()
+        tasks = []
         for plan in self.due_plans(now):
             for symbol in resolve_symbol_scope(plan.symbol_scope):
-                key = (plan.pk, plan.version, symbol.code, now.year, now.month, now.day, now.hour, now.minute)
+                key = (plan.pk, plan.version, symbol.code,
+                       now.year, now.month, now.day, now.hour, now.minute)
                 if key in self._enqueued:
                     continue
-                self.task_queue.put_nowait(plan, symbol.code)
                 self._enqueued.add(key)
-                enqueued += 1
+                tasks.append((plan, symbol.code))
+        self._prune_enqueued(now)
+        return tasks
+
+    def enqueue_due_plans(self, now):
+        for plan, symbol in self.collect_due_tasks(now):
+            self.task_queue.put_nowait(plan, symbol)
         return self.task_queue
 
     def poll_once(self, now=None):
         """Poll published time plans once; repeated polls in one minute are idempotent."""
-        PlanRegistry.sync_from_database()
         return self.enqueue_due_plans(now or datetime.now())
 
     def stop(self):
@@ -101,6 +136,9 @@ class Scheduler:
 
         同时在每轮执行一次「执行日志生命周期清理」门禁（每日至多一次，见 N-04），
         清理失败只记日志、不影响调度。
+
+        注意：仅投递任务到 ``TaskQueue``，**不消费**；需配合
+        :meth:`run_forever_async` + :class:`~runner.queue.WorkerPool` 才有执行端。
         """
         event = stop_event or self._stop_event
         while not event.is_set():
@@ -108,6 +146,37 @@ class Scheduler:
             self.poll_once(now)
             self._maybe_purge_logs(now)
             event.wait(self.poll_interval)
+
+    async def run_forever_async(self, stop_event=None, clock=datetime.now):
+        """异步常驻轮询：DB 读取走同步线程，任务入队留在事件循环线程。
+
+        与 :meth:`run_forever` 的分工：本方法负责**生产**任务（投递到
+        ``self.task_queue``），消费由 ``WorkerPool.run_forever`` 在同一事件循环内完成。
+
+        - ``collect_due_tasks``（含 ORM / PlanRegistry）经 ``sync_to_async``
+          在同步线程执行，避免在事件循环里访问 Django ORM；
+        - ``await self.task_queue.put(...)`` 在事件循环线程执行，
+          因为 ``asyncio.Queue`` 跨线程入队会导致等待方唤醒不可靠；
+        - 停止条件：``stop_event``（``asyncio.Event``）置位或 :meth:`stop` 被调用；
+          等待用 ``asyncio.wait_for`` 以便停止可立即生效（不等满一个轮询周期）。
+
+        Args:
+            stop_event: ``asyncio.Event``；缺省时只响应 :meth:`stop`。
+            clock: 取当前时间的可调用对象（默认 ``datetime.now``）。
+        """
+        stop = stop_event or asyncio.Event()
+        while not stop.is_set() and not self._stop_event.is_set():
+            now = clock()
+            tasks = await sync_to_async(self.collect_due_tasks, thread_sensitive=True)(now)
+            for plan, symbol in tasks:
+                await self.task_queue.put(plan, symbol)
+            await sync_to_async(self._maybe_purge_logs, thread_sensitive=True)(now)
+            if stop.is_set() or self._stop_event.is_set():
+                break
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.poll_interval)
+            except asyncio.TimeoutError:
+                continue
 
     def _maybe_purge_logs(self, now):
         """每日一次清理过期执行痕迹（N-04）；受 settings 开关控制。"""

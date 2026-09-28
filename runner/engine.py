@@ -339,8 +339,22 @@ class SuiteRunner:
         self.data_context_builder = data_context_builder
         self.use_threads = use_threads
 
-    def run(self, plan, symbol, payload=None):
+    def run(self, plan, symbol, payload=None, on_run=None):
+        """创建 SuiteRun 并跑完事件循环。
+
+        Args:
+            plan: 计划实例。
+            symbol: 标的代码。
+            payload: 触发载荷（作为初始事件上下文）。
+            on_run: 可选回调 ``callable(run)``，在 SuiteRun 创建后、执行前调用一次。
+                供调用方（如 TaskQueue 消费端）在执行失败时拿到 run 句柄以发告警。
+
+        Returns:
+            Any: ``EventLoop.run_to_completion`` 的返回值（``ExecutionLog`` 或 ``None``）。
+        """
         run = create_suite_run(plan, symbol, payload)
+        if on_run is not None:
+            on_run(run)
         return EventLoop(
             run, self.case_executor, payload, self.broker, self.risk_controller,
             context_builder=self.data_context_builder, use_threads=self.use_threads,

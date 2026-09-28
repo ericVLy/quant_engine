@@ -8,6 +8,7 @@
 - ``clear_intraday``：默认当日 00:00 UTC 边界 / 幂等
 - API：/api/monitoring/intraday/ 响应契约 + realtime 合并 RealtimeSnapshot
 """
+import os
 import zoneinfo
 from datetime import datetime, time, timedelta
 from decimal import Decimal
@@ -1080,3 +1081,47 @@ class AkshareIndexFallbackTest(TestCase):
         out = provider.fetch_market('A', [stock])
         self.assertIn('000426', out)
         self.assertEqual(out['000426']['price'], 10.0)
+
+
+class MonitoringUpdaterProcessGateTest(TestCase):
+    """分时更新器进程门禁：只有 Django 服务进程才采样分时数据。
+
+    策略调度器（``run_scheduler``）等非 Web 服务进程此前不在跳过名单里，
+    会顺带拉起分时更新器 → 与 Web 服务进程重复外部请求与写库。
+    """
+
+    def _ready(self, argv, enabled=True, run_main=None):
+        from django.apps import apps as django_apps
+        from django.conf import settings as django_settings
+
+        app_config = django_apps.get_app_config('monitoring')
+        env = {} if run_main is None else {'RUN_MAIN': run_main}
+        with patch.object(django_settings, 'MONITORING_UPDATER_ENABLED', enabled), \
+                patch('sys.argv', argv), \
+                patch.dict(os.environ, env, clear=False), \
+                patch('apps.monitoring.updater.get_updater') as get_updater:
+            app_config.ready()
+        return get_updater
+
+    def test_non_web_service_commands_skip_updater(self):
+        for command in ('run_scheduler', 'run_dev_stack', 'run_mcp_server',
+                        'gm_live_link', 'clear_intraday', 'purge_execution_logs'):
+            with self.subTest(command=command):
+                self._ready(['manage.py', command]).assert_not_called()
+
+    def test_scheduler_with_options_still_skips_updater(self):
+        self._ready(['manage.py', 'run_scheduler', '--interval', '60',
+                     '--workers', '2']).assert_not_called()
+
+    def test_runserver_child_starts_updater(self):
+        get_updater = self._ready(['manage.py', 'runserver'], run_main='true')
+        get_updater.assert_called_once()
+        get_updater.return_value.start.assert_called_once()   # ready() 调用的是 get_updater().start()
+
+    def test_runserver_reloader_parent_skips_updater(self):
+        self._ready(['manage.py', 'runserver']).assert_not_called()
+
+    def test_disabled_setting_skips_updater(self):
+        self._ready(['manage.py', 'runserver'], enabled=False,
+                    run_main='true').assert_not_called()
+
