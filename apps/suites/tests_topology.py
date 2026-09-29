@@ -50,6 +50,26 @@ class EventConditionOperatorMatchTest(TestCase):
         self.assertTrue(event_condition_matches({'event_type': 'X'}, {'event_type': 'X'}))
         self.assertFalse(event_condition_matches({'event_type': 'X'}, {'event_type': 'Y'}))
 
+    def test_next_event_is_routing_metadata_not_match_key(self):
+        """next_event 只是路由元数据，不应参与条件比对（否则该边永不命中）。"""
+        cond = {'event_type': 'CASE_COMPLETED', 'next_event': 'CASE_START'}
+        self.assertTrue(event_condition_matches(cond, {'event_type': 'CASE_COMPLETED'}))
+        self.assertFalse(event_condition_matches(cond, {'event_type': 'CASE_START'}))
+
+    def test_event_type_falls_back_to_base_event_type(self):
+        """叠加事件：事件自身类型或叠加基事件命中条件即视为匹配（与 REST 路径同契约）。"""
+        cond = {'event_type': 'CASE_COMPLETED'}
+        self.assertTrue(event_condition_matches(
+            cond, {'event_type': 'MY_PLUGIN_EVENT', 'base_event_type': 'CASE_COMPLETED'}))
+        self.assertFalse(event_condition_matches(
+            cond, {'event_type': 'MY_PLUGIN_EVENT', 'base_event_type': 'CASE_START'}))
+
+    def test_operator_contract_ignores_extra_payload_metadata(self):
+        """操作符契约下，payload 多带的元数据键不影响判定。"""
+        cond = {'event_type': 'CASE_COMPLETED', 'op': 'gt', 'field': 'price', 'threshold': 10}
+        self.assertTrue(event_condition_matches(
+            cond, {'event_type': 'CASE_COMPLETED', 'price': 11, 'next_event': 'CASE_START'}))
+
     def test_non_numeric_field_for_compare_ops_returns_false(self):
         self.assertFalse(event_condition_matches(
             {'field': 'name', 'op': 'gt', 'threshold': 10}, {'name': 'abc'}))

@@ -1,10 +1,12 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from threading import Event
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.utils import timezone
 
 from apps.plans.services import resolve_plan_symbols
 
@@ -15,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 #: 去重键上限：超过后只保留"当天"的键，避免长驻进程内存无限增长。
 ENQUEUED_KEY_LIMIT = 2000
+
+
+def _as_aware(moment):
+    """把 naive 的本地墙钟时间换算为**同一绝对时刻**的 aware 时间。
+
+    ``run_forever`` 的默认 ``clock`` 是 ``datetime.now``（naive 本地时间），而
+    ``purge_execution_history`` 需要 aware 时间与库内 aware 字段比较。直接
+    ``make_aware`` 会按 ``settings.TIME_ZONE`` 解释墙钟，服务器本地时区与
+    ``TIME_ZONE`` 不一致时（如本地 +08 / ``TIME_ZONE='UTC'``）会整体偏移一个
+    时区差；这里改用系统本地 UTC 偏移换算绝对时刻。aware 入参原样返回。
+    """
+    if timezone.is_aware(moment):
+        return moment
+    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+    return (moment - offset).replace(tzinfo=dt_timezone.utc)
 
 
 class Scheduler:
@@ -180,7 +197,15 @@ class Scheduler:
                 continue
 
     def _maybe_purge_logs(self, now):
-        """每日一次清理过期执行痕迹（N-04）；受 settings 开关控制。"""
+        """每日一次清理过期执行痕迹（N-04）；受 settings 开关控制。
+
+        ``now`` 通常是 ``run_forever`` 的 ``clock()``（默认 ``datetime.now``，
+        **naive 本地墙钟**）：cron 匹配与「每日一次」判定需要墙钟语义，但
+        ``purge_execution_history`` 会拿它与 aware 字段比较，naive 值会触发
+        Django 告警并按当前时区误解释，使 30 天保留边界整体漂移
+        （``TIME_ZONE='UTC'`` + 本地 +08 时偏移 8 小时）。故这里先把 naive
+        墙钟换算成**同一绝对时刻**的 aware 时间再下传。
+        """
         if not getattr(settings, 'EXECUTION_LOG_RETENTION_ENABLED', True):
             return None
         today = now.date()
@@ -189,7 +214,7 @@ class Scheduler:
         from apps.execution.retention import purge_execution_history
 
         try:
-            stats = purge_execution_history(now=now)
+            stats = purge_execution_history(now=_as_aware(now))
         except Exception:  # pylint: disable=broad-except
             logger.exception('执行日志清理失败，下一轮重试')
             return None

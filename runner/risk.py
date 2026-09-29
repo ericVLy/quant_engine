@@ -11,11 +11,53 @@
 """
 
 from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo
 
 from django.db.models import Sum
 from django.utils import timezone
 
 from apps.execution.models import Order
+
+#: 各市场交易时段的判定时区（与 monitoring 模块的 zoneinfo 口径一致）。
+MARKET_TIMEZONES = {
+    'A': 'Asia/Shanghai',
+    'HK': 'Asia/Hong_Kong',
+    'US': 'America/New_York',
+}
+
+#: 缺省市场时区：默认窗口（9:30-11:30 / 13:00-15:00）是 A 股口径。
+DEFAULT_TRADE_TIMEZONE = MARKET_TIMEZONES['A']
+
+
+def resolve_market_timezone(symbol=None, market=None):
+    """解析交易时段判定时区（库内 ``Symbol.market`` 优先，回退前缀推断）。
+
+    Args:
+        symbol: 标的代码（如 ``000001`` / ``600000``）。
+        market: 显式市场（``A`` / ``HK`` / ``US``），优先于 ``symbol``。
+
+    Returns:
+        str: IANA 时区名；无法识别时回退 :data:`DEFAULT_TRADE_TIMEZONE`。
+
+    风控不得因时区解析失败而中断，故任何异常（如库内无该标的）都回退默认值。
+    """
+    name = market
+    if not name and symbol:
+        code = str(symbol).strip()
+        try:
+            from apps.watchlists.models import Symbol
+
+            name = Symbol.objects.filter(code=code).values_list('market', flat=True).first()
+        except Exception:  # pylint: disable=broad-except
+            name = None
+        if not name:
+            try:
+                from apps.watchlists.services import infer_market_from_code
+
+                name = infer_market_from_code(code)
+            except Exception:  # pylint: disable=broad-except
+                name = None
+    return MARKET_TIMEZONES.get(name or '', DEFAULT_TRADE_TIMEZONE)
 
 
 class RiskDecision:
@@ -25,9 +67,15 @@ class RiskDecision:
 
 
 class TradeTimeWindow:
-    """可配置的交易时段窗口（默认 A股 9:30-11:30 / 13:00-15:00）。"""
+    """可配置的交易时段窗口（默认 A股 9:30-11:30 / 13:00-15:00）。
 
-    def __init__(self, sessions=None):
+    时段按**市场时区**判定（默认 ``Asia/Shanghai``，见 :data:`MARKET_TIMEZONES`）。
+    历史实现直接用 ``timezone.localtime(timezone.now())``，而 ``TIME_ZONE='UTC'``
+    时它给出的是 UTC 墙钟，使默认窗口实际生效为「北京时间 17:30-19:30」——
+    **A 股盘中下单被拦、A 股休市反而放行**（v2.14 修复）。
+    """
+
+    def __init__(self, sessions=None, timezone_name=None):
         # 接受两种写法：
         #   [(9, 30, 11, 30), (13, 0, 15, 0)]  扁平 (start_hh,start_mm,end_hh,end_mm)
         #   [((9, 30), (11, 30)), ((13, 0), (15, 0))]  嵌套 (start, end)
@@ -40,9 +88,24 @@ class TradeTimeWindow:
                 self.sessions.append((tuple(session[0]), tuple(session[1])))
             else:
                 raise ValueError(f'非法交易时段配置: {session}')
+        self.timezone_name = timezone_name or DEFAULT_TRADE_TIMEZONE
 
-    def allows(self, when=None):
-        when = when or timezone.localtime(timezone.now())
+    def allows(self, when=None, timezone_name=None):
+        """判断给定时点是否在允许时段内。
+
+        Args:
+            when: 判定时点；``None`` 取当前时间。aware 时间先换算到
+                ``timezone_name`` 所在时区；naive 时间视为该时区的本地墙钟
+                （保持既有调用契约，便于测试注入）。
+            timezone_name: 覆盖实例时区（按标的所属市场传入）。
+
+        Returns:
+            bool: 是否允许交易；周六 / 周日一律不允许。
+        """
+        zone = ZoneInfo(timezone_name or self.timezone_name)
+        when = when if when is not None else timezone.localtime(timezone.now())
+        if timezone.is_aware(when):
+            when = when.astimezone(zone)
         if hasattr(when, 'weekday') and when.weekday() >= 5:
             return False
         current = when.time()
@@ -119,13 +182,17 @@ class RiskController:
     def __init__(self, max_volume=None, max_value=None, position_mode='both',
                  allowed_sessions=None, max_daily_value=None,
                  max_account_value=None, max_position_value=None,
-                 max_position_volume=None, account_provider=None):
+                 max_position_volume=None, account_provider=None,
+                 trade_timezone=None):
         self.position_policy = PositionPolicy(
             mode=position_mode, max_volume=max_volume, max_value=max_value,
         )
+        # 显式指定时全局生效；缺省按每笔订单的 symbol 所属市场动态判定
+        self.trade_timezone = trade_timezone
         self.trade_window = TradeTimeWindow(
             sessions=allowed_sessions if allowed_sessions is not None
-            else [(9, 30, 11, 30), (13, 0, 15, 0)]
+            else [(9, 30, 11, 30), (13, 0, 15, 0)],
+            timezone_name=trade_timezone,
         )
         self.daily_limit = DailyLimitPolicy(max_daily_value=max_daily_value)
         self.max_account_value = max_account_value
@@ -140,8 +207,14 @@ class RiskController:
         positions = self.account_provider.get_positions() or []
         return account, positions
 
+    def _trade_timezone(self, order_data):
+        """本笔订单的时段判定时区：显式配置优先，否则按 symbol 所属市场判定。"""
+        if self.trade_timezone:
+            return self.trade_timezone
+        return resolve_market_timezone(symbol=order_data.get('symbol'))
+
     def check(self, order_data):
-        if not self.trade_window.allows():
+        if not self.trade_window.allows(timezone_name=self._trade_timezone(order_data)):
             return RiskDecision(False, '当前不在交易时段')
         decision = self.position_policy.check(order_data)
         if not decision.allowed:

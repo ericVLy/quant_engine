@@ -79,6 +79,15 @@ def event_condition_matches(condition, payload):
     支持两种匹配模式：
     1. 简单键值相等：键直接与 payload 比对；
     2. 操作符契约：{field, op, threshold} 对 payload[field] 做数值比较。
+
+    ``next_event`` 是**路由元数据**（决定边命中后下发什么事件，见
+    ``runner.engine.EventLoop._route_edges``），不参与条件比对，必须跳过。
+    否则 payload 中不存在该键，``None == 'CASE_START'`` 恒为假，带
+    ``next_event`` 的边将永不命中。
+
+    ``event_type`` 条件支持叠加事件回落匹配：命中事件自身类型或其叠加基事件
+    （``payload['base_event_type']``，由 ``enqueue_event`` 注入）即视为匹配，
+    与 ``apps.execution.services._event_condition_matches`` 使用同一契约。
     """
     if not condition:
         return True
@@ -87,8 +96,17 @@ def event_condition_matches(condition, payload):
     if op:
         return _apply_operator(condition, payload)
 
-    # 兼容旧契约：键值相等
-    return all(payload.get(key) == value for key, value in condition.items())
+    # 兼容旧契约：键值相等（next_event 属路由元数据，跳过比对）
+    for key, value in condition.items():
+        if key == 'next_event':
+            continue
+        if key == 'event_type':
+            if payload.get('event_type') == value or payload.get('base_event_type') == value:
+                continue
+            return False
+        if payload.get(key) != value:
+            return False
+    return True
 
 
 def _apply_operator(condition, payload):

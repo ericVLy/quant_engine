@@ -1,5 +1,7 @@
 """执行日志生命周期管理（N-04）测试：清理范围、订单保护、幂等、dry-run 与调度门禁。"""
-from datetime import timedelta
+import warnings
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
@@ -183,3 +185,36 @@ class SchedulerRetentionGateTest(TestCase):
         ):
             self.assertIsNone(self.scheduler._maybe_purge_logs(self.now))
         self.assertIsNone(self.scheduler._last_purge_date)
+
+    def test_naive_clock_is_normalized_to_aware(self):
+        """``run_forever`` 默认 clock 是 naive 墙钟：下传前必须换算成 aware。"""
+        naive = datetime(2026, 9, 29, 16, 0)
+        with mock.patch(
+            'apps.execution.retention.purge_execution_history',
+            return_value={'events': 0},
+        ) as purge:
+            self.assertIsNotNone(self.scheduler._maybe_purge_logs(naive))
+
+        passed = purge.call_args.kwargs['now']
+        self.assertTrue(timezone.is_aware(passed))
+        # 同一绝对时刻：按系统本地 UTC 偏移换算，而不是按 TIME_ZONE 解释墙钟
+        offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+        self.assertEqual(passed, (naive - offset).replace(tzinfo=dt_timezone.utc))
+
+    def test_aware_clock_passes_through(self):
+        with mock.patch(
+            'apps.execution.retention.purge_execution_history',
+            return_value={'events': 0},
+        ) as purge:
+            self.scheduler._maybe_purge_logs(self.now)
+
+        self.assertEqual(purge.call_args.kwargs['now'], self.now)
+
+    def test_naive_clock_triggers_no_naive_datetime_warning(self):
+        """真实清理路径：naive 墙钟不得触发 Django 的 naive datetime 告警。"""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            self.scheduler._maybe_purge_logs(datetime(2026, 9, 29, 16, 0))
+
+        messages = [str(item.message) for item in caught]
+        self.assertFalse([text for text in messages if 'naive datetime' in text])

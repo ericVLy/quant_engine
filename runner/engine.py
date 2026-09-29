@@ -260,7 +260,8 @@ class EventLoop:
             for item in order_data:
                 order = self._create_order(log, item)
                 if self.risk_controller:
-                    decision = self.risk_controller.check(item)
+                    # 交易时段按标的市场时区判定；symbol 仅供风控，不改动下发券商的 payload
+                    decision = self.risk_controller.check({**item, 'symbol': self.run.symbol})
                     if not decision.allowed:
                         log.status = 'blocked'
                         log.error_msg = decision.reason

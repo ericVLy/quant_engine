@@ -1,6 +1,8 @@
 ﻿"""风控（R-08）、热加载注册中心（R-09）与引擎数据集成测试。"""
 
 from datetime import date, datetime, time as dtime
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.test import TestCase
 
@@ -13,7 +15,10 @@ from apps.watchlists.models import Symbol
 from .engine import SuiteRunner
 from .fixture import DataContextBuilder
 from .registry import PlanRegistry
-from .risk import DailyLimitPolicy, PositionPolicy, RiskDecision, TradeTimeWindow
+from .risk import (
+    DailyLimitPolicy, PositionPolicy, RiskDecision, RiskController,
+    TradeTimeWindow, resolve_market_timezone,
+)
 
 
 class PositionPolicyTest(TestCase):
@@ -45,6 +50,50 @@ class TradeTimeWindowTest(TestCase):
     def test_rejects_weekend(self):
         window = TradeTimeWindow()
         self.assertFalse(window.allows(datetime(2026, 9, 5, 10, 0)))  # 周六
+
+    # ---- v2.14：时段按市场时区判定（修复 UTC 墙钟错位 8 小时） ----
+    def test_session_is_judged_in_market_timezone(self):
+        window = TradeTimeWindow(sessions=[(9, 30, 11, 30), (13, 0, 15, 0)],
+                                 timezone_name='Asia/Shanghai')
+        # 北京 周二 09:40（A 股盘中）= UTC 01:40 → 允许
+        self.assertTrue(window.allows(datetime(2026, 9, 29, 1, 40, tzinfo=ZoneInfo('UTC'))))
+        # 北京 周二 17:40（A 股已收盘）= UTC 09:40 → 拒绝（旧实现会误放行）
+        self.assertFalse(window.allows(datetime(2026, 9, 29, 9, 40, tzinfo=ZoneInfo('UTC'))))
+
+    def test_timezone_override_judges_us_session(self):
+        window = TradeTimeWindow(sessions=[(9, 30, 11, 30)],
+                                 timezone_name='America/New_York')
+        # 纽约 周二 10:00（EDT=UTC-4）= UTC 14:00 → 允许
+        self.assertTrue(window.allows(datetime(2026, 9, 29, 14, 0, tzinfo=ZoneInfo('UTC'))))
+
+    def test_risk_controller_window_follows_symbol_market(self):
+        Symbol.objects.create(code='000001', name='平安银行', market='A')
+        Symbol.objects.create(code='AAPL', name='苹果', market='US')
+        controller = RiskController()  # 仅时段限制（无数量/金额上限）
+
+        # UTC 周二 02:00 = 北京 10:00（A 股盘中）/ 纽约 周一 22:00（休市）
+        with patch('runner.risk.timezone.localtime',
+                   return_value=datetime(2026, 9, 29, 2, 0, tzinfo=ZoneInfo('UTC'))):
+            cn = controller.check({'direction': 'buy', 'price': 1, 'volume': 1,
+                                   'symbol': '000001'})
+            us = controller.check({'direction': 'buy', 'price': 1, 'volume': 1,
+                                   'symbol': 'AAPL'})
+
+        self.assertTrue(cn.allowed)
+        self.assertFalse(us.allowed)
+        self.assertIn('交易时段', us.reason)
+
+    def test_resolve_market_timezone(self):
+        Symbol.objects.create(code='000001', name='平安银行', market='A')
+        Symbol.objects.create(code='00700', name='腾讯控股', market='HK')
+        Symbol.objects.create(code='AAPL', name='苹果', market='US')
+
+        self.assertEqual(resolve_market_timezone(symbol='000001'), 'Asia/Shanghai')
+        self.assertEqual(resolve_market_timezone(symbol='00700'), 'Asia/Hong_Kong')
+        self.assertEqual(resolve_market_timezone(symbol='AAPL'), 'America/New_York')
+        self.assertEqual(resolve_market_timezone(market='US'), 'America/New_York')
+        self.assertEqual(resolve_market_timezone(market='unknown'), 'Asia/Shanghai')
+        self.assertEqual(resolve_market_timezone(), 'Asia/Shanghai')
 
 
 class DailyLimitPolicyTest(TestCase):

@@ -165,6 +165,17 @@ users（用户权限）
 - `case_id` 若提供，必须为整数
 - `next_event` 若提供，必须为非空字符串
 
+**运行时匹配契约（v2.14 修复）**：`event_condition_matches`
+（`apps/suites/services.py`，供 `runner.engine.EventLoop._route_edges` 使用）必须与
+REST 路径 `apps.execution.services._event_condition_matches` 使用同一契约：
+
+- `next_event` 是**路由元数据**（决定边命中后下发什么事件），**不参与条件比对**。
+  修复前它被当作 payload 键比对，`payload.get('next_event')` 恒为 `None`，
+  导致**任何带 `next_event` 的边永不命中**（长链路在根节点后即中断）。
+- `event_type` 支持**叠加事件回落匹配**：事件自身类型或叠加基事件
+  （`payload['base_event_type']`，由 `enqueue_event` 注入）命中即视为匹配。
+- 其余键保持旧契约的键值相等语义；配置 `op` 时走操作符契约。
+
 > 这些规则已写入后端序列化器，并同步纳入前端表单校验逻辑，避免“字段随意扩展”造成运行时错误。
 
 
@@ -1437,16 +1448,16 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 22 通过 | 100% |
 | `datasources` | ✅ 已完成 | 42 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步（**含增量优化**）/基本面缓存） |
-| `execution` | 🟢 执行闭环完成 | 198 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**账户资金可按 gm 账户信息同步**（2026-09-28，含额度口径与不变式）；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
+| `execution` | 🟢 执行闭环完成 | 213 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**账户资金可按 gm 账户信息同步**（2026-09-28，含额度口径与不变式）；**重启恢复已补（P0，2026-09-29）**；**日志生命周期清理（N-04）与 PII/日志卫生（N-05 剩余）待做**） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
 | `plans` | ✅ P0 能力完成 | 24 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；**调度器已内置 TaskQueue 消费端（`--workers`，默认 2）与账户资金同步（`--funds-source` / `--funds-capital-basis`）**；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
-| `runner` | ✅ P0 能力完成 | 121 通过 | 100%（**TaskQueue 消费端已补齐**：时间驱动 Plan 真实执行；P1：真实交易回报、基本面扩展指标与总仓位风控） |
+| `runner` | ✅ P0 能力完成 | 125 通过 | 100%（**TaskQueue 消费端已补齐**：时间驱动 Plan 真实执行；**调度器启动期收口遗留未完成运行**（2026-09-29）；P1：真实交易回报、基本面扩展指标、总仓位风控、`pending` 运行消费者与在途任务持久化） |
 | `monitoring` | ✅ 已完成 | 70 通过 | 100%（后端模型/内部更新器（**启动清空 + 启动回填 + 开盘清理历史 + UTC23 兜底**）/SSE 推送/API + 前端 ECharts 分时监控页均已落地，见模块9；进程门禁已覆盖 `run_scheduler` 等非 Web 服务进程） |
 | `quick-strategy` | ✅ 已完成 | —（前端） | 100%（3 步向导 + 一键链路 + 失败清理已落地，见模块10 前端实施记录；后端零改动） |
 | `mcp_server` | ✅ 已完成 | 86 通过 | 100%（**SSE（HTTP）MCP 服务**：24 工具（14 只读/受控触发 + 10 受控配置写 MCP-20） + 1 概览资源 + `/health` · 令牌鉴权 / DNS rebinding 保护 / 非回环绑定 fail-fast · 默认只读，写操作通过 `MCP_ALLOW_TRIGGER=1` 或启动参数 `--allow-trigger` 开启，且只创建 `pending` SuiteRun，见模块11 MCP-18 · **MCP-19 变量描述：14 工具 / 29 入参逐个带 `inputSchema` 描述，CLI 与 `MCP_*` 配置变量逐个带说明**） |
 
-> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-28）：✔ 620 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（各模块实测：users 5 + watchlists 22 + datasources 42 + execution 198 + cases 22 + suites 30 + plans 24 + runner 121 + monitoring 70 + mcp_server 86 = 620。本轮「按 gm 账户信息管理资金总量」新增 59 个：`apps/execution/tests_fund_sync.py` 55（gm Cash 字段归一 / 失败绝不写 0 / TTL 守卫 / 批量失败隔离 / 账户绑定 / **额度口径 capital_basis 与"额度不低于已分配额度之和"不变式** / 适配器 `get_position` 兜底 / 执行服务与命令接线 / 账户 ID 脱敏）+ `apps/plans/tests_run_scheduler.py` +4（资金参数透传、同步循环、口径透传）。此前基线：TaskQueue 消费端补齐 → 561；MCP 端到端冒烟 → 501；2026-09-21 → 453；2026-09-15 → 402。
+> 测试用例数按 `manage.py test <模块>` 当前实际输出为准；全项目总数以 `manage.py test`（无标签，含 runner）同一次完整回归的实际输出为准。**最近一次完整回归（2026-09-29）：✔ 642 个测试全部通过（OK，`manage.py test --noinput -v 0` 退出码 0）**（各模块实测：users 5 + watchlists 22 + datasources 42 + execution 213 + cases 22 + suites 33 + plans 24 + runner 125 + monitoring 70 + mcp_server 86 = 642。本轮「runner 重启恢复 + 交易时段按市场时区」新增 19 个：`apps/execution/tests_recovery.py` 12（收口状态与 `ended_at` / 在途事件回退 `pending` / 未收口 `NodeRun` 置 `failed` / 日志 `ORPHANED_BY_RESTART` 与告警 / 幂等 / pending 不收口只上报 / dry-run 不写库 / `run_ids` 范围 / 已存在日志的轨迹字段不覆盖 / 终态不动 / `notify=False`；另含 `run_scheduler` 启动接线、开关关闭、失败不阻断、无遗留提示）+ `runner/tests_engine.py` +4（市场时区判定、时区覆盖判美股、按 `symbol` 市场动态判定、`resolve_market_timezone`）+ `apps/execution/tests_retention.py` +3（naive 墙钟归一为同刻 aware、aware 透传、真实清理路径无 `naive datetime` 告警）。此前基线：623（2026-09-29，`next_event` 匹配契约修复 +3）→ 620（2026-09-28，gm 账户资金管理 +59）→ 561 → 501 → 453 → 402。
 
 
 ## 五、待办事项汇总
@@ -1476,7 +1487,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 并发资金原子扣减（Plan 创建对 AccountFundConfig 行加 `select_for_update`，校验 + 占用原子完成；Suite 加入对 Plan 级 FundAllocation 行加 `select_for_update`，校验 + 分配原子完成；下单扣减已有行级锁） | `plans`, `suites`, `execution` | ✅ 已完成（三层均使用行级锁 + 事务，消除 check-then-act race condition） | R-08 |
 | 基本面财务数据扩展（Provider 抽象基类 + AkShare 实现，财务指标/资产负债表/利润表/现金流量表 60+ 英文契约字段；子报表独立降级） | `runner`, `datasources` | ✅ 已完成（`FundamentalsProvider` + `AkshareFundamentalsProvider`；21 个专项测试） | R-07 |
 | 基本面缓存与历史时点（`FundamentalSnapshot`/`FundamentalCacheMeta` 持久化快照 + `CachedFundamentalsProvider` 装饰器；asof 历史点读、TTL 有效期、回源回填、回源失败降级旧缓存） | `runner`, `datasources` | ✅ 已完成（历史时点不读取未来数据；命中即有效不判 TTL；7 个专项测试） | R-07 |
-| Suite 边条件操作符（event_condition 扩展 `op: eq/neq/gt/gte/lt/lte/between` + `field/threshold`，后端校验 + 运行时匹配同一契约，兼容旧键值相等契约） | `suites`, 前端 | ✅ 已完成（`event_condition_matches` + 双重校验；13 个专项测试） | S-09 |
+| Suite 边条件操作符（event_condition 扩展 `op: eq/neq/gt/gte/lt/lte/between` + `field/threshold`，后端校验 + 运行时匹配同一契约，兼容旧键值相等契约；**v2.14 修复：`next_event` 作为路由元数据跳过比对、`event_type` 按 `base_event_type` 回落匹配，runner 与 REST 路径对齐**） | `suites`, `runner`, 前端 | ✅ 已完成（`apps/suites/services.event_condition_matches` + 双重校验；16 个专项测试） | S-09 |
 | Suite 拓扑完整性校验（跨树入边、重复边、非法权重、孤立节点、不可达节点；发布前串联 validate_dag + validate_topology） | `suites` | ✅ 已完成（5 个专项测试） | S-09 |
 | 告警管理（Alert 模型 + AlertChannel 渠道配置 + `alert_service` 通知服务；应用内 / 邮件多渠道，按最低级别与类型白名单分发；`/api/execution/alerts/`、`/api/execution/alert-channels/` 及操作/统计/重发接口；前端告警管理页 + 告警渠道配置页） | `execution`, `runner`, `plans`, `quant-frontend` | ✅ 已完成（21 个专项测试；EX-20 ~ EX-26） | EX-20、EX-21、EX-22、EX-23、EX-24、EX-25、EX-26 |
 | API 统一分页（列表接口统一 `{count, next, previous, page, total_pages, results}` 分页结构；`page` / `page_size` / `limit` 兼容别名；全局 `REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS` + 自定义列表动作分页；前端 axios 拦截器解包 `results` 保持旧字段兼容，列表调用默认 `page_size: 500`） | 全部 API, `quant-frontend` | ✅ 已完成（`quant_engine/pagination.py`，N-01；9 个专项测试：cases+1、suites+1、plans+1、watchlists+2、datasources+1、execution+3，另含既有用例的页内/limit 兼容断言） | N-01 |
@@ -1678,6 +1689,8 @@ Suite 边条件操作符 → 拓扑完整性校验
 
 ---
 | 2026-09-28 | 标的管理下沉 Plan → Case（`symbol_scope`） | ✅ 全量 620 个测试全部通过（OK，退出码 0）。`Plan.symbol_scope` 字段删除（迁移历史已压缩为每 app 一个 initial，数据库重建）；新增 `Case.params.symbol_scope` 白名单校验（`apps/cases/serializers.validate_symbol_scope`，合同与原 Plan 完全一致）；`apps/plans/services.resolve_plan_symbols` / `iter_plan_cases` / `plan_declares_symbols` 遍历编排树取 Case 并集；`publish_plan` / `rollback_plan` 新增「树内必须有已发布 Case 声明标的」校验；`PlanRegistry._executable_keys` 移除 `symbol_scope`（标的解析时直读 Case）；MCP `create_plan` / `update_plan` 移除 `symbol_scope` 参数，`get_plan` 改输 `symbol_declarers`；`mcp_smoke` 与前端快捷策略均下发到 Case；8 处测试套件迁移（plans / runner / execution / mcp_server） | 实机路径验证：无 Case 声明标的时发布被拒；两个 Case 分别声明 `000001` / `600000` → 解析并集 2 个，`Scheduler.enqueue_due_plans` 恰好产出 2 个 `(Plan, Symbol)` 任务；`makemigrations --check` 无差异，`vue-tsc -b` 0 错误，`vite build` 通过 |
+| 2026-09-29 | **修复 runner 无重启恢复能力（P0）+ 交易时段按市场时区判定（P0）** | ✅ 已修复。新增 `apps/execution/recovery.py::recover_orphaned_runs`：调度器启动期**幂等**收口上次进程遗留的 `running` 运行——在途 `Event(processing)→pending`、未收口 `NodeRun(running)→failed`、`SuiteRun→failed`+`ended_at`、补 `ExecutionLog(error_code=ORPHANED_BY_RESTART)` 与 `suite_failed` 告警（此前崩溃**完全静默**，既不告警也不会被 retention 清理）；行锁 + 事务 + 状态复检保证幂等，支持 `run_ids` / `dry_run` / `notify`；`pending` 运行不默认收口（MCP 执行意向）仅统计上报。`run_scheduler` 启动段接入 `_recover_orphans()`（开关 `EXECUTION_ORPHAN_RECOVERY_ENABLED`，收口失败不阻断调度）。`runner/risk.py`：`TradeTimeWindow` 改为按**市场时区**判定，新增 `MARKET_TIMEZONES` / `resolve_market_timezone`（库内 `Symbol.market` 优先，回退 `infer_market_from_code`），`RiskController` 按订单 `symbol` 解析时区并支持 `trade_timezone` 覆盖，`EventLoop` 下单前把 `symbol` 附给风控。附带修复 N-04 时间戳缺陷：`runner.scheduler._as_aware` 把 naive 墙钟换算为同一绝对时刻的 aware 时间后再下传 `purge_execution_history`。新增 19 个测试 | 实机验证：造遗留 `running` 运行后启动 `run_scheduler`，输出 `[recovery] 已收口 1 个遗留未完成运行：[7]（事件回退 0，节点收口 0，告警 1）`；库内该 run 由 `running`→`failed`+`ended_at`、事件回退 `pending`、`NodeRun`→`failed`、日志 `ORPHANED_BY_RESTART`、告警 1 条；`pending` 运行保持不动并提示「当前无消费者，未收口」。时区判决性对照：修复前 UTC 01:40（北京 09:40，A 股盘中）**被拦**、UTC 09:40（北京 17:40，已收盘）**放行**；修复后反之。naive 时间戳对照：修复前下传 naive 触发 **3 条** `naive datetime` 告警，修复后 **0 条** |
+| 2026-09-28 | **修复 Edge 条件运行时匹配契约缺陷（`next_event` 被误当作 payload 键比对）** | ✅ 已修复。`apps/suites/services.py` 的 `event_condition_matches`（runner 路径，供 `runner.engine.EventLoop._route_edges` 使用）由「全键值相等」`all(payload.get(k) == v ...)` 改为与 REST 路径 `apps.execution.services._event_condition_matches` **同一契约**：① `next_event` 属路由元数据（决定边命中后下发的事件），**跳过比对**；② `event_type` 支持叠加事件按 `payload['base_event_type']` 回落匹配。修复前 `payload.get('next_event')` 恒为 `None`，`None == 'CASE_START'` 为假，**任何带 `next_event` 的边永不命中**（`next_event` 本属后端白名单字段，故合法配置反而静默失效）。`apps/suites/tests_topology.py` +3 用例（33 个全通过），`runner` / `apps.plans` / `apps.execution` / `mcp_server` 回归 429 个全通过 | 实机 MCP 长链路验证：`000426` 五级**嵌套**链（信号门控 → 主买-30 → 小买试仓 → 小卖试仓 → 主卖-60，Case 声明标的、边带 `next_event`）。修复前仅 root 的 Case 执行后链路中断；修复后 5 个 Suite / 5 个 Case 全穿透（方向 1/1/0/-1/-1），落 4 笔订单 `buy 30×1000` / `buy 30.5×100` / `sell 45×100` / `sell 60×1000`；风控开启时非交易时段被 `RISK_BLOCKED`（`当前不在交易时段`）正确拦截；MCP 触发的 `pending` SuiteRun 未被 runner 改动，未产生任何真实委托 |
 
 **文档状态**：✅ 需求基线已锁定，可作为后续开发参考依据。
 

@@ -106,6 +106,10 @@ MONITORING_UPDATER_INTERVAL = int(os.getenv('MONITORING_UPDATER_INTERVAL', '60')
 EXECUTION_LOG_RETENTION_ENABLED = os.getenv('EXECUTION_LOG_RETENTION_ENABLED', '1').lower() in {'1', 'true', 'yes'}
 EXECUTION_LOG_RETENTION_DAYS = int(os.getenv('EXECUTION_LOG_RETENTION_DAYS', '30'))
 
+# P0 重启恢复：调度器启动时收口上次进程遗留的非终态运行（幂等；置 0 关闭）
+EXECUTION_ORPHAN_RECOVERY_ENABLED = os.getenv(
+    'EXECUTION_ORPHAN_RECOVERY_ENABLED', '1').lower() in {'1', 'true', 'yes'}
+
 # DRF 全局配置
 REST_FRAMEWORK = {
     # N-01：所有列表接口统一分页

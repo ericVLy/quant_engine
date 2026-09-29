@@ -71,6 +71,7 @@ class Command(BaseCommand):
         self.stdout.write(
             f'Plan Cron scheduler started (interval={interval}s, workers={workers})'
         )
+        self._recover_orphans()
         if workers == 0:
             self.stdout.write('[scheduler] workers=0：仅投递任务到 TaskQueue，不执行策略')
             try:
@@ -80,6 +81,43 @@ class Command(BaseCommand):
             self.stdout.write('Plan Cron scheduler stopped')
             return
         asyncio.run(self._run_consuming(scheduler, workers, options))
+
+    def _recover_orphans(self):
+        """启动期收口上次进程遗留的未完成运行（P0 重启恢复）。
+
+        崩溃（kill -9 / OOM / 断电）会在库里留下永久 ``running`` 的 ``SuiteRun``：
+        既不告警，也不会被 ``apps/execution/retention.py`` 清理（它只处理终态）。
+        这里在调度开始前收口一次（幂等），把「上次没跑完」显式变为一条失败记录
+        + 一条 ``suite_failed`` 告警，避免静默失败。
+
+        可用 ``EXECUTION_ORPHAN_RECOVERY_ENABLED=0`` 关闭；收口失败不阻断调度。
+        """
+        from django.conf import settings
+
+        if not getattr(settings, 'EXECUTION_ORPHAN_RECOVERY_ENABLED', True):
+            self.stdout.write(
+                '[recovery] 已关闭（EXECUTION_ORPHAN_RECOVERY_ENABLED=0），跳过遗留运行收口')
+            return None
+        from apps.execution.recovery import recover_orphaned_runs
+
+        try:
+            stats = recover_orphaned_runs()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.stderr.write(f'[recovery] 遗留运行收口失败（不阻断调度）：{exc}')
+            return None
+        if stats['runs']:
+            self.stdout.write(
+                f'[recovery] 已收口 {stats["runs"]} 个遗留未完成运行'
+                f'（事件回退 {stats["events_reset"]}，节点收口 {stats["node_runs_failed"]}，'
+                f'告警 {stats["alerts"]}）：{stats["run_ids"]}'
+            )
+        else:
+            self.stdout.write('[recovery] 无遗留未完成运行')
+        if stats['pending_runs']:
+            self.stdout.write(
+                f'[recovery] 提示：存在 {stats["pending_runs"]} 个 pending 运行'
+                '（当前无消费者，未收口）')
+        return stats
 
     async def _run_consuming(self, scheduler, workers, options):
         """调度（生产任务）与消费（执行任务）在同一事件循环内并发运行。"""

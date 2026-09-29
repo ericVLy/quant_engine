@@ -154,7 +154,8 @@ class PlanExecutionService:
 
 def build_execution_service(order_broker='none', use_threads=True, enable_risk=True,
                             funds_source='none', funds_refresh_interval=30,
-                            account_provider=True, funds_capital_basis='total'):
+                            account_provider=True, funds_capital_basis='total',
+                            trade_timezone=None):
     """按名称构造生产执行服务（供管理命令使用）。
 
     下单通道与资金同步通道**独立**且共用同一个 gm 适配器实例：
@@ -171,6 +172,8 @@ def build_execution_service(order_broker='none', use_threads=True, enable_risk=T
         funds_refresh_interval: 资金数据有效期（秒）；``<= 0`` 表示每次执行都同步。
         account_provider: 是否把 gm 账户快照接入风控（使 ``max_account_value`` /
             ``max_position_*`` 这类账户级限额有实时数据）。
+        trade_timezone: 交易时段判定时区（IANA 名，如 ``Asia/Shanghai``）；
+            缺省按每笔订单 ``symbol`` 所属市场判定（A/HK/US），无法识别时回退 A 股。
 
     Returns:
         PlanExecutionService: 已装配数据上下文、（可选）下单通道与资金同步通道的执行服务。
@@ -201,6 +204,7 @@ def build_execution_service(order_broker='none', use_threads=True, enable_risk=T
     if enable_risk:
         risk_controller = RiskController(
             account_provider=broker if (account_provider and broker) else None,
+            trade_timezone=trade_timezone,
         )
     return PlanExecutionService(
         broker=broker if order_broker == 'gm' else None,
