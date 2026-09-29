@@ -1,13 +1,18 @@
 """P0 重启恢复测试：非正常终止遗留运行的收口、幂等、dry-run 与告警。"""
 from datetime import timedelta
+from decimal import Decimal
 from io import StringIO
 from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.execution.models import Alert, Event, ExecutionLog, NodeRun, SuiteRun
-from apps.execution.recovery import ORPHAN_ERROR_CODE, recover_orphaned_runs
+from apps.execution.models import (
+    Alert, Event, ExecutionLog, NodeRun, Order, SuiteRun,
+)
+from apps.execution.recovery import (
+    ORPHAN_ERROR_CODE, PENDING_EXPIRED_CODE, recover_orphaned_runs,
+)
 from apps.plans.models import Plan
 from apps.suites.models import Suite
 from apps.users.models import User
@@ -164,6 +169,91 @@ class OrphanRecoveryTest(TestCase):
         self.assertEqual(run.status, 'failed')
         self.assertFalse(Alert.objects.filter(suite_run=run).exists())
 
+    # ---- P1：pending 执行意向的时效 ----
+    def test_expired_pending_intent_is_closed_with_pending_expired(self):
+        run = self._make_run(status='pending')
+        SuiteRun.objects.filter(pk=run.pk).update(
+            created_at=self.now - timedelta(seconds=600))
+
+        stats = recover_orphaned_runs(now=self.now, pending_max_age=300)
+
+        run.refresh_from_db()
+        log = ExecutionLog.objects.get(task_id=f'suite-run-{run.pk}')
+        self.assertEqual(stats['pending_expired'], 1)
+        self.assertEqual(stats['pending_expired_ids'], [run.pk])
+        self.assertEqual(stats['runs'], 0)
+        self.assertEqual(stats['pending_runs'], 0)
+        self.assertEqual(run.status, 'failed')
+        self.assertEqual(run.ended_at, self.now)
+        self.assertEqual(log.status, 'failed')
+        self.assertEqual(log.error_code, PENDING_EXPIRED_CODE)
+        self.assertEqual(stats['alerts'], 1)
+
+    def test_fresh_pending_intent_is_kept_for_dispatch(self):
+        run = self._make_run(status='pending')          # created_at = now
+
+        stats = recover_orphaned_runs(now=self.now, pending_max_age=300)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'pending')
+        self.assertEqual(stats['pending_expired'], 0)
+        self.assertEqual(stats['pending_runs'], 1)
+
+    def test_pending_untouched_when_ttl_not_given(self):
+        run = self._make_run(status='pending')
+        SuiteRun.objects.filter(pk=run.pk).update(
+            created_at=self.now - timedelta(days=3))
+
+        stats = recover_orphaned_runs(now=self.now)     # 缺省不触碰 pending
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'pending')
+        self.assertEqual(stats['pending_expired'], 0)
+
+    def test_expired_pending_respects_run_ids_scope(self):
+        keep = self._make_run(status='pending')
+        target = self._make_run(status='pending')
+        SuiteRun.objects.filter(pk__in=[keep.pk, target.pk]).update(
+            created_at=self.now - timedelta(seconds=600))
+
+        stats = recover_orphaned_runs(now=self.now, run_ids=[target.pk],
+                                      pending_max_age=300)
+
+        keep.refresh_from_db()
+        target.refresh_from_db()
+        self.assertEqual(stats['pending_expired_ids'], [target.pk])
+        self.assertEqual(keep.status, 'pending')
+        self.assertEqual(target.status, 'failed')
+
+    # ---- P1-3 边界：已提交券商但未回写的委托单只统计上报 ----
+    def test_stale_unconfirmed_order_is_reported_not_mutated(self):
+        """无幂等键时本地无法判定是否已下单：只统计，绝不臆断重投。"""
+        run = self._make_run(status='completed')
+        log = ExecutionLog.objects.create(
+            plan=self.plan, symbol='000001', task_id=f'suite-run-{run.pk}',
+            final_direction=1)
+
+        def _order(**kwargs):
+            base = dict(log=log, symbol='000001', direction='buy',
+                        price=Decimal('10'), volume=100, status='pending')
+            base.update(kwargs)
+            return Order.objects.create(**base)
+
+        stale = _order()
+        Order.objects.filter(pk=stale.pk).update(
+            created_at=self.now - timedelta(seconds=3600))
+        fresh = _order()
+        sent = _order(status='sent', external_order_id='EXT-RECONCILE-1')
+        Order.objects.filter(pk=sent.pk).update(
+            created_at=self.now - timedelta(seconds=3600))
+
+        stats = recover_orphaned_runs(now=self.now, notify=False)
+
+        self.assertEqual(stats['unconfirmed_orders'], 1)
+        self.assertEqual(stats['unconfirmed_order_ids'], [stale.pk])
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, 'pending')      # 未被修改，等待对账
+
 
 class SchedulerStartupRecoveryTest(TestCase):
     """P0：``run_scheduler`` 启动期收口的接线、开关与失败兜底。"""
@@ -220,3 +310,36 @@ class SchedulerStartupRecoveryTest(TestCase):
 
         self.assertEqual(stats['runs'], 0)
         self.assertIn('无遗留未完成运行', self.stdout.getvalue())
+
+    def test_startup_expires_stale_pending_intent(self):
+        """启动期按 ``EXECUTION_PENDING_MAX_AGE_SECONDS`` 收口过期执行意向。"""
+        stale = SuiteRun.objects.create(
+            plan=self.plan, suite=self.suite, symbol='000002', status='pending',
+            event_queue=[])
+        SuiteRun.objects.filter(pk=stale.pk).update(
+            created_at=timezone.now() - timedelta(seconds=600))
+        self.run.status = 'completed'
+        self.run.save(update_fields=['status'])
+
+        stats = self._command()._recover_orphans()
+
+        stale.refresh_from_db()
+        self.assertEqual(stats['pending_expired'], 1)
+        self.assertEqual(stale.status, 'failed')
+        self.assertIn('过期的 pending 执行意向', self.stdout.getvalue())
+
+    def test_startup_warns_about_unconfirmed_orders(self):
+        self.run.status = 'completed'
+        self.run.save(update_fields=['status'])
+        log = ExecutionLog.objects.create(
+            plan=self.plan, symbol='000001', task_id='suite-run-orphan-order',
+            final_direction=1)
+        order = Order.objects.create(
+            log=log, symbol='000001', direction='buy', price=Decimal('10'),
+            volume=100, status='pending')
+        Order.objects.filter(pk=order.pk).update(
+            created_at=timezone.now() - timedelta(seconds=3600))
+
+        self._command()._recover_orphans()
+
+        self.assertIn('需与券商对账', self.stderr.getvalue())

@@ -109,6 +109,11 @@ EXECUTION_LOG_RETENTION_DAYS = int(os.getenv('EXECUTION_LOG_RETENTION_DAYS', '30
 # P0 重启恢复：调度器启动时收口上次进程遗留的非终态运行（幂等；置 0 关闭）
 EXECUTION_ORPHAN_RECOVERY_ENABLED = os.getenv(
     'EXECUTION_ORPHAN_RECOVERY_ENABLED', '1').lower() in {'1', 'true', 'yes'}
+# 执行意向（pending 运行）有效期（秒）：超出后不再投递、由恢复器收口为 PENDING_EXPIRED
+EXECUTION_PENDING_MAX_AGE_SECONDS = int(os.getenv('EXECUTION_PENDING_MAX_AGE_SECONDS', '300'))
+# 补投 pending 意向的最小滞留时长（秒）：避免与同轮即时投递重复
+EXECUTION_PENDING_SWEEP_MIN_AGE_SECONDS = int(
+    os.getenv('EXECUTION_PENDING_SWEEP_MIN_AGE_SECONDS', '5'))
 
 # DRF 全局配置
 REST_FRAMEWORK = {

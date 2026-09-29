@@ -44,6 +44,45 @@ def start_suite_run(run):
     return run
 
 
+def claim_suite_run(run):
+    """原子认领一个 ``pending`` 运行（CAS），返回是否由本次调用获得执行权。
+
+    用条件 ``UPDATE``（``filter(status='pending').update(...)``）而不是
+    ``select_for_update``：认领必须原子完成，且不必把行锁跨越整个执行过程。
+    并发或重复投递时只有一次 ``rowcount == 1``，其余返回 ``False``——因此
+    「同一条 pending 运行」不可能被两个 worker / 两个进程同时执行，进程重启后的
+    重复投递也只会生效一次（幂等键落在数据行状态上）。
+
+    Args:
+        run: ``SuiteRun`` 实例（仅用主键定位）。
+
+    Returns:
+        bool: ``True`` 表示认领成功（已置 ``running``、写 ``started_at`` 并追加
+        ``SUITE_START``）；``False`` 表示该运行已不是 ``pending``。
+    """
+    claimed = SuiteRun.objects.filter(pk=run.pk, status='pending').update(
+        status='running', started_at=timezone.now(),
+    )
+    if not claimed:
+        return False
+    run.refresh_from_db()
+    enqueue_event(run, EventType.SUITE_START, source='runner')
+    run.refresh_from_db()
+    return True
+
+
+def find_active_run(plan, symbol):
+    """返回该 ``(Plan, 标的)`` 尚未结束的运行（``pending`` / ``running``），无则 ``None``。
+
+    用于调度侧去重：同 ``(Plan, 标的)`` 已有未结束运行时不再新建运行，使
+    「内存去重集合重启后失效」不再导致重复执行。
+    """
+    plan_id = getattr(plan, 'pk', plan)
+    return (SuiteRun.objects.filter(plan_id=plan_id, symbol=symbol,
+                                    status__in=('pending', 'running'))
+            .order_by('-created_at', '-pk').first())
+
+
 def stop_suite_run(run):
     """Stop a run unless it has already reached a terminal state."""
     if run.status in ('completed', 'failed', 'stopped'):

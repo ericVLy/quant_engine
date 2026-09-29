@@ -36,6 +36,19 @@ ORDER_BROKERS = ('none', 'gm')
 __all__ = ['ORDER_BROKERS', 'PlanExecutionService', 'build_execution_service']
 
 
+def _reconcile_plan_state(plan) -> None:
+    """按执行事实归一 ``Plan.run_status``；失败只记日志，不影响执行结果。
+
+    状态归一属于「事后对账」性质，绝不能因为它出问题而让策略执行失败。
+    """
+    try:
+        from apps.execution.state_sync import reconcile_plan_run_status
+
+        reconcile_plan_run_status(plan)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning('Plan 运行状态归一失败（不影响执行结果）：%s', exc)
+
+
 class PlanExecutionService:
     """``WorkerPool`` 的生产执行端：``(plan, symbol)`` → SuiteRun / 日志 / 委托单。
 
@@ -91,10 +104,13 @@ class PlanExecutionService:
         Args:
             plan: ``Plan`` 实例或主键（队列里通常是实例）。
             symbol: 标的代码。
-            payload: 触发载荷。
+            payload: 触发载荷。若含 ``suite_run_id``，则按**持久化执行意向**
+                执行已存在的 ``pending`` 运行（先原子认领，认领失败即跳过），
+                而不是新建运行——这是重启后不重复执行的关键（见
+                ``apps.execution.services.claim_suite_run``）。
 
         Returns:
-            Any: ``ExecutionLog`` 实例；Plan 被跳过时返回 ``None``。
+            Any: ``ExecutionLog`` 实例；Plan 被跳过、意向已被认领或运行不存在时返回 ``None``。
 
         Raises:
             Exception: 执行失败时原样抛出（``SuiteRun`` / ``ExecutionLog`` 已落库），
@@ -103,16 +119,62 @@ class PlanExecutionService:
         resolved = self._resolve_plan(plan)
         if resolved is None:
             return None
-        self._refresh_funds(resolved)
+        try:
+            run_id = (payload or {}).get('suite_run_id')
+            if run_id:
+                return self._run_claimed(run_id, resolved)
+            return self._run_fresh(resolved, symbol, payload)
+        finally:
+            # 成功 / 失败都归一：Plan.run_status 必须反映执行事实，不能停在 running
+            _reconcile_plan_state(resolved)
+
+    def _run_fresh(self, plan, symbol, payload=None):
+        """新建运行并执行（无持久化意向的兼容路径，如 REST 手动触发）。"""
+        self._refresh_funds(plan)
         captured: dict[str, Any] = {}
 
         def _capture(run):
             captured['run'] = run
 
         try:
-            return self._suite_runner.run(resolved, symbol, payload, on_run=_capture)
+            return self._suite_runner.run(plan, symbol, payload, on_run=_capture)
         except Exception as exc:
             self._alert_failure(captured.get('run'), exc)
+            raise
+
+    def _run_claimed(self, run_id, plan):
+        """认领并执行已持久化的运行（重启 / 重复投递安全）。
+
+        认领是**原子 CAS**：若该运行已被本进程其他 worker、其他进程认领，
+        或已结束，则直接跳过（返回 ``None``）——这正是「重启后重复投递同一
+        执行意向也不会重复执行」的保证。
+
+        Args:
+            run_id: ``SuiteRun`` 主键（来自队列载荷 ``suite_run_id``）。
+            plan: 已重读的 ``Plan`` 实例。
+
+        Returns:
+            Any: ``ExecutionLog``；未认领成功时 ``None``。
+
+        Raises:
+            Exception: 执行失败时原样抛出，并补发 ``suite_failed`` 告警。
+        """
+        from apps.execution.models import SuiteRun
+        from apps.execution.services import claim_suite_run
+
+        run = SuiteRun.objects.filter(pk=run_id, plan=plan).first()
+        if run is None:
+            logger.warning('执行意向对应的运行不存在或不属于该 Plan，跳过：run=%s', run_id)
+            return None
+        if not claim_suite_run(run):
+            logger.info('运行已被认领或已结束，跳过重复投递：run=%s', run_id)
+            return None
+
+        self._refresh_funds(plan)
+        try:
+            return self._suite_runner.run_existing(run)
+        except Exception as exc:
+            self._alert_failure(run, exc)
             raise
 
     def _refresh_funds(self, plan) -> None:

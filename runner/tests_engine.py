@@ -107,6 +107,22 @@ class DailyLimitPolicyTest(TestCase):
         self.assertFalse(decision.allowed)
         self.assertIn('每日累计金额', decision.reason)
 
+    def test_daily_limit_counts_amount_not_unit_price(self):
+        """v2.14 修复：聚合必须是「单价 × 数量」，不是单价之和（量纲错误会让限额失效）。"""
+        from decimal import Decimal
+
+        from apps.execution.models import ExecutionLog, Order
+
+        log = ExecutionLog.objects.create(symbol='000001', final_direction=1)
+        Order.objects.create(log=log, symbol='000001', direction='buy',
+                             price=Decimal('10'), volume=100, status='sent')
+        incoming = {'direction': 'buy', 'price': 10, 'volume': 10}   # 已用 10×100=1000，本笔 100
+
+        # 旧实现把已用金额算成 10（单价之和），上限 500 也会放行 → 必须是 1100 口径
+        self.assertFalse(DailyLimitPolicy(max_daily_value=500).check(incoming).allowed)
+        self.assertFalse(DailyLimitPolicy(max_daily_value=1050).check(incoming).allowed)
+        self.assertTrue(DailyLimitPolicy(max_daily_value=1100).check(incoming).allowed)
+
     def test_blocks_zero_volume_in_position_policy(self):
         policy = PositionPolicy(mode='both')
         self.assertFalse(policy.check({'direction': 'buy', 'price': 1, 'volume': 0}).allowed)

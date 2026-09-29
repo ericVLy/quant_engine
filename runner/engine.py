@@ -363,3 +363,16 @@ class SuiteRunner:
 
     async def arun(self, plan, symbol, payload=None):
         return await sync_to_async(self.run, thread_sensitive=True)(plan, symbol, payload)
+
+    def run_existing(self, run):
+        """执行**已存在**的运行实例（持久化执行意向 / 认领路径使用）。
+
+        与 :meth:`run` 的区别：不新建 ``SuiteRun``，直接驱动其事件队列。
+        因此「重启后重复投递同一执行意向」不会产生第二条运行；配合
+        ``apps.execution.services.claim_suite_run`` 的原子认领，
+        同一条运行只可能被真正执行一次。
+        """
+        return EventLoop(
+            run, self.case_executor, None, self.broker, self.risk_controller,
+            context_builder=self.data_context_builder, use_threads=self.use_threads,
+        ).run_to_completion()

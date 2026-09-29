@@ -41,13 +41,68 @@
 
 ## 常用命令
 
-- 运行测试：`python manage.py test`
-- 全项目回归：`python manage.py test`（无标签，含 runner）
+> 全部命令在 Linux 下以 `.venv/bin/python` 执行（项目**禁止** `.\.venv\Scripts\python.exe` 等 Windows 风格写法）。
+
+- 运行测试：`.venv/bin/python manage.py test`
+- 全项目回归：`.venv/bin/python manage.py test --noinput -v 0`
+- 模块专项：`.venv/bin/python manage.py test runner --noinput`
 - 分时采样：随 Django 服务进程内自动执行（`MONITORING_UPDATER_ENABLED`，无单独命令）
-- 收盘清理兜底（一般无需手动）：`python manage.py clear_intraday`
-- Plan Cron 调度器：`python manage.py run_scheduler --interval 60`
-- MCP 服务（SSE，Web 接入）：`.\.venv\Scripts\python.exe .\manage.py run_mcp_server --port 8765`
-- MCP 专项测试：`.\.venv\Scripts\python.exe .\manage.py test mcp_server`
+- 收盘清理兜底（一般无需手动）：`.venv/bin/python manage.py clear_intraday`
+- 策略调度器（生产入口，会消费 TaskQueue 执行策略）：`.venv/bin/python manage.py run_scheduler --interval 60 --workers 2`
+  - 启动时先收口上次进程遗留的未完成运行 + 过期执行意向（幂等，可用 `EXECUTION_ORPHAN_RECOVERY_ENABLED=0` 关闭）
+  - 真实下单务必先确认账户/风控与模拟环境：`.venv/bin/python manage.py run_scheduler --order-broker gm`
+- MCP 服务（SSE，Web 接入）：`.venv/bin/python manage.py run_mcp_server --port 8765`
+- MCP 专项测试：`.venv/bin/python manage.py test mcp_server`
+
+## 已知边界与限制（务必阅读）
+
+以下为**有意为之的设计取舍**或**当前尚未闭环**的部分，改动相关代码前请先确认约束。
+
+### 执行与重启恢复
+
+- **崩溃后只收口、不自动续跑**：进程被 kill -9 / OOM / 断电后，调度器启动时
+  （`apps/execution/recovery.recover_orphaned_runs`）把遗留的 `running` 运行标记为
+  `failed`（`error_code=ORPHANED_BY_RESTART`）并补 `suite_failed` 告警，**不会**自动重跑。
+  原因：续跑需要节点级幂等（`EventLoop._fired_edges` 等状态仅在内存中），
+  重放会重复命中边 → 重复下单。需人工核对事件/节点轨迹后重新触发。
+- **执行意向（pending SuiteRun）有有效期**：`EXECUTION_PENDING_MAX_AGE_SECONDS`（默认 300 秒）。
+  超期未被调度器消费即收口为 `PENDING_EXPIRED` 并告警——陈旧交易意图**不会**被补投执行。
+- **进程内内存态重启即失**：`TaskQueue`（唤醒提示）、`Scheduler._enqueued`（同分钟去重快路径）、
+  `EventLoop._fired_edges`。跨重启的唯一保证是数据表：`pending` `SuiteRun` 作为持久化执行意向 +
+  `claim_suite_run` 的**原子 CAS 认领**（同一运行不可能被两个 worker / 两个进程执行）。
+- **优雅关停不 drain 在途任务**：`run_scheduler` 收到 SIGINT/SIGTERM 后只停止取新任务，
+  在途运行被直接取消（`WorkerPool.run_forever` 的 `finally` 只 `cancel` 不 `join` 排空），
+  因此会留下与崩溃等价的痕迹——由下次启动的恢复器收口。
+- **「已提交券商、未回写」的委托单本地无法闭环**：gm 下单接口无 `cl_ord_id` 幂等键，
+  崩在该窗口的 `Order(status='pending', external_order_id 空)` 只能由恢复器统计
+  （`unconfirmed_orders`）并**提示人工对账**，禁止本地臆断重投。
+
+### 状态与风控
+
+- **`run_status` 与执行事实是两套状态源**：`SuiteRun` / `NodeRun` / `ExecutionLog` 是执行真相；
+  `Plan/Suite/Case.run_status`（`new/running/done/interrupt/failed`）是**每个实体单槽**的
+  「编排会话」状态，**执行引擎不驱动** `Case.run_status`（多标的并发执行下单槽无法表达）。
+  `Plan.run_status` 会在每次执行结束后按 `SuiteRun` 事实归一（见 `state_sync`）；
+  `Suite` / `Case.run_status` 只由 REST 手动 `/start` `/stop` 动作流转（执行引擎不驱动）。
+  `start_plan` 已放开重启（`new`/`done`/`interrupt` 可再次启动，仅拒绝 `running`）。
+- **Plan 可重复驱动**：`start_plan` 接受 `new` / `done` / `interrupt`（仅拒绝 `running`，
+  避免并发执行），跑完后可再次 `/api/plans/{id}/start/`。`Plan.run_status` 在**每次执行结束后**
+  按 `SuiteRun` 事实自动归一（`apps/execution/state_sync.py`：有活跃运行 → `running`、
+  全部成功 → `done`、含失败/停止 → `interrupt`；无运行记录则不动，避免臆断），
+  并在调度器启动期批量修复历史遗留的分叉状态。
+- **交易时段按市场时区判定**：`TradeTimeWindow` 使用 `Asia/Shanghai` / `Asia/Hong_Kong` /
+  `America/New_York`（按订单 `symbol` 解析，`Symbol.market` 优先）。**禁止**用
+  `timezone.localtime(timezone.now())` 当墙钟——`TIME_ZONE='UTC'` 时那是 UTC 时间，
+  会把 A 股窗口错成 8 小时前的时刻。默认窗口本身仍是 A 股时段，多市场需自行配置。
+- **每日累计金额口径**：`DailyLimitPolicy` 按库内 `Order` 聚合，`build_execution_service`
+  默认**不启用**（`max_daily_value=None`）。
+- **单机部署**：只允许运行一个 Scheduler 实例。多实例分布式去重、租约、领导者选举为 P4。
+
+### 环境
+
+- **部署需安装 tzdata**：`zoneinfo` 依赖系统 tzdata，否则 `America/New_York` 等时区解析失败。
+- **secret / token 只经环境变量或 systemd `EnvironmentFile` 注入**，不落仓库、不入日志。
+
 
 ## MCP 服务（AI 助手接入 · 模块11）
 

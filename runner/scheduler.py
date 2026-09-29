@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 #: 去重键上限：超过后只保留"当天"的键，避免长驻进程内存无限增长。
 ENQUEUED_KEY_LIMIT = 2000
 
+#: 持久化执行意向（pending 运行）的默认有效期（秒）：超时不再投递，由恢复器收口。
+DEFAULT_PENDING_MAX_AGE = 300
+
+#: 补投 pending 意向的最小滞留时长（秒）：避免与同轮「即时投递」重复竞争。
+DEFAULT_PENDING_SWEEP_MIN_AGE = 5
+
+
+def _setting(name, default):
+    """读取 settings 覆盖值（缺失或为 ``None`` 时用默认）。"""
+    value = getattr(settings, name, None)
+    return default if value is None else value
+
 
 def _as_aware(moment):
     """把 naive 的本地墙钟时间换算为**同一绝对时刻**的 aware 时间。
@@ -37,7 +49,8 @@ def _as_aware(moment):
 class Scheduler:
     """Polling scheduler for published time-triggered plans."""
 
-    def __init__(self, task_queue=None, poll_interval=60):
+    def __init__(self, task_queue=None, poll_interval=60,
+                 pending_max_age=None, pending_sweep_min_age=None):
         self.task_queue = task_queue or TaskQueue()
         if poll_interval <= 0:
             raise ValueError('poll_interval 必须大于 0')
@@ -46,6 +59,13 @@ class Scheduler:
         self._stop_event = Event()
         self._last_purge_date = None
         self._enqueued_limit = ENQUEUED_KEY_LIMIT
+        # 执行意向的时效与补投门槛（见 materialize_due_tasks / collect_pending_tasks）
+        self.pending_max_age = (
+            _setting('EXECUTION_PENDING_MAX_AGE_SECONDS', DEFAULT_PENDING_MAX_AGE)
+            if pending_max_age is None else pending_max_age)
+        self.pending_sweep_min_age = (
+            _setting('EXECUTION_PENDING_SWEEP_MIN_AGE_SECONDS', DEFAULT_PENDING_SWEEP_MIN_AGE)
+            if pending_sweep_min_age is None else pending_sweep_min_age)
 
     def due_plans(self, now):
         """从注册中心（热加载）读取已发布的时间驱动 Plan，命中 Cron 者返回。"""
@@ -136,9 +156,91 @@ class Scheduler:
         self._prune_enqueued(now)
         return tasks
 
-    def enqueue_due_plans(self, now):
+    def materialize_due_tasks(self, now):
+        """同步：把本轮到期任务**落库**为持久化执行意向，返回待投递任务。
+
+        数据表链路：每个 ``(Plan, 标的)`` 任务落成一条 ``pending`` ``SuiteRun``
+        （含 ``SUITE_INIT`` 事件）。进程重启后意向仍在库里，不会像内存队列那样
+        直接消失；DB 层再按「同 ``(Plan, 标的)`` 是否已有未结束运行」去重，因此
+        **重启后同一分钟重复轮询也不会产生第二条运行**（内存 ``_enqueued`` 只
+        在同进程内有效）。
+
+        Args:
+            now: 当前时间（cron 匹配与去重键）。
+
+        Returns:
+            list[tuple]: ``[(plan, symbol_code, {'suite_run_id': pk})]``。
+            已有未结束运行时不新建，直接复用其主键；重复投递由
+            :func:`apps.execution.services.claim_suite_run` 的原子认领兜底。
+        """
+        from apps.execution.services import create_suite_run, find_active_run
+
+        tasks = []
         for plan, symbol in self.collect_due_tasks(now):
-            self.task_queue.put_nowait(plan, symbol)
+            existing = find_active_run(plan, symbol)
+            if existing is not None:
+                if existing.status == 'pending' and not self._is_fresh(existing, now):
+                    logger.info(
+                        '同 (Plan, 标的) 已有过期 pending 意向，不再投递：run=%s', existing.pk)
+                    continue
+                tasks.append((plan, symbol, {'suite_run_id': existing.pk}))
+                continue
+            run = create_suite_run(plan, symbol)
+            tasks.append((plan, symbol, {'suite_run_id': run.pk}))
+        return tasks
+
+    def collect_pending_tasks(self, now):
+        """同步：补投「已落库但尚未被认领」的 pending 意向。
+
+        覆盖两类来源：① MCP ``trigger_plan_execution`` 创建的执行意向；
+        ② 上次进程退出时已投递、但随内存队列丢失的意向。只投递**新鲜**且已滞留
+        超过 ``pending_sweep_min_age`` 秒的意向（避免与同轮即时投递重复竞争）；
+        过期意向不再投递，由 :func:`apps.execution.recovery.recover_orphaned_runs`
+        收口为 ``PENDING_EXPIRED``。
+
+        Args:
+            now: 当前时间（naive 墙钟会自动换算为 aware 再查库）。
+
+        Returns:
+            list[tuple]: ``[(plan, symbol_code, {'suite_run_id': pk})]``，
+            同 ``(Plan, 标的)`` 只保留最早一条。
+        """
+        from apps.execution.models import SuiteRun
+
+        aware_now = _as_aware(now)
+        threshold = aware_now - timedelta(seconds=self.pending_max_age)
+        settled = aware_now - timedelta(seconds=self.pending_sweep_min_age)
+        runs = (SuiteRun.objects
+                .filter(status='pending', created_at__gte=threshold, created_at__lte=settled)
+                .select_related('plan').order_by('created_at', 'pk'))
+        tasks, seen = [], set()
+        for run in runs:
+            if run.plan is None or run.plan.status != 'published':
+                continue
+            key = (run.plan_id, run.symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+            tasks.append((run.plan, run.symbol, {'suite_run_id': run.pk}))
+        return tasks
+
+    def due_tasks(self, now):
+        """同步：本轮全部待投递任务（到期落库意向 + 遗留 pending 补投，按运行去重）。"""
+        tasks = self.materialize_due_tasks(now)
+        known = {payload['suite_run_id'] for _, _, payload in tasks}
+        for item in self.collect_pending_tasks(now):
+            if item[2]['suite_run_id'] not in known:
+                tasks.append(item)
+        return tasks
+
+    def _is_fresh(self, run, now):
+        """``run`` 是否仍在 ``pending_max_age`` 有效期内。"""
+        return run.created_at >= _as_aware(now) - timedelta(seconds=self.pending_max_age)
+
+    def enqueue_due_plans(self, now):
+        """把本轮任务（含遗留 pending 意向补投）投递到 ``TaskQueue``。"""
+        for plan, symbol, payload in self.due_tasks(now):
+            self.task_queue.put_nowait(plan, symbol, payload)
         return self.task_queue
 
     def poll_once(self, now=None):
@@ -185,9 +287,9 @@ class Scheduler:
         stop = stop_event or asyncio.Event()
         while not stop.is_set() and not self._stop_event.is_set():
             now = clock()
-            tasks = await sync_to_async(self.collect_due_tasks, thread_sensitive=True)(now)
-            for plan, symbol in tasks:
-                await self.task_queue.put(plan, symbol)
+            tasks = await sync_to_async(self.due_tasks, thread_sensitive=True)(now)
+            for plan, symbol, payload in tasks:
+                await self.task_queue.put(plan, symbol, payload)
             await sync_to_async(self._maybe_purge_logs, thread_sensitive=True)(now)
             if stop.is_set() or self._stop_event.is_set():
                 break

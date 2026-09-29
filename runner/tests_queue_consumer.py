@@ -18,14 +18,15 @@ from unittest.mock import patch
 from django.test import TestCase, TransactionTestCase
 
 from apps.cases.models import Case
-from apps.execution.models import Alert, ExecutionLog, Order, SuiteRun
+from apps.execution.models import Alert, Event, ExecutionLog, Order, SuiteRun
+from apps.execution.services import claim_suite_run, create_suite_run
 from apps.plans.models import Plan
 from apps.suites.models import Suite
 from apps.watchlists.models import Symbol
 from runner.executor import CaseExecutionError
 from runner.queue import TaskQueue, WorkerPool
 from runner.registry import PlanRegistry
-from runner.scheduler import Scheduler
+from runner.scheduler import Scheduler, _as_aware
 from runner.service import PlanExecutionService, build_execution_service
 
 NOW = datetime(2026, 8, 26, 10, 30)
@@ -381,5 +382,242 @@ class BuildExecutionServiceTest(TestCase):
             service = build_execution_service(order_broker='gm')
         ctor.assert_called_once_with()
         self.assertIs(service.broker, sentinel)
+
+
+class ClaimSuiteRunTest(TestCase):
+    """P1：``pending`` 运行的原子认领（CAS）——重复投递只生效一次。"""
+
+    def test_claim_moves_pending_to_running_and_enqueues_start(self):
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+
+        self.assertTrue(claim_suite_run(run))
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'running')
+        self.assertIsNotNone(run.started_at)
+        self.assertEqual(
+            list(Event.objects.filter(run=run).order_by('pk')
+                 .values_list('event_type', flat=True)),
+            ['SUITE_INIT', 'SUITE_START'],
+        )
+
+    def test_second_claim_fails(self):
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+        claim_suite_run(run)
+
+        self.assertFalse(claim_suite_run(run))
+
+    def test_claim_fails_for_terminal_run(self):
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+        SuiteRun.objects.filter(pk=run.pk).update(status='completed')
+
+        self.assertFalse(claim_suite_run(run))
+
+    def test_find_active_run_prefers_unfinished_run(self):
+        from apps.execution.services import find_active_run
+
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+        self.assertEqual(find_active_run(plan, '000001').pk, run.pk)
+
+        SuiteRun.objects.filter(pk=run.pk).update(status='completed')
+        self.assertIsNone(find_active_run(plan, '000001'))
+
+
+class PendingDispatchTest(TestCase):
+    """P1：把到期任务落库为持久化执行意向，并补投遗留 pending（不丢、不重复）。"""
+
+    def _pending(self, code, seconds_ago=0):
+        plan = _make_due_plan(code=code)
+        run = create_suite_run(plan, code)
+        SuiteRun.objects.filter(pk=run.pk).update(
+            created_at=_as_aware(NOW) - timedelta(seconds=seconds_ago))
+        run.refresh_from_db()
+        return plan, run
+
+    def test_materialize_creates_pending_intent_with_run_id(self):
+        plan = _make_due_plan()
+
+        tasks = Scheduler().materialize_due_tasks(NOW)
+
+        self.assertEqual(len(tasks), 1)
+        got_plan, symbol, payload = tasks[0]
+        self.assertEqual((got_plan.pk, symbol), (plan.pk, '000001'))
+        run = SuiteRun.objects.get(pk=payload['suite_run_id'])
+        self.assertEqual((run.status, run.plan_id, run.symbol),
+                         ('pending', plan.pk, '000001'))
+
+    def test_materialize_reuses_active_run_without_creating_second(self):
+        """重启后同一分钟重复轮询：DB 层去重，不产生第二条运行。"""
+        plan = _make_due_plan()
+        Scheduler().materialize_due_tasks(NOW)
+
+        second = Scheduler().materialize_due_tasks(NOW)   # 全新实例 = 内存去重/队列皆空
+
+        self.assertEqual(SuiteRun.objects.filter(plan=plan).count(), 1)
+        self.assertEqual(second[0][2]['suite_run_id'],
+                         SuiteRun.objects.get(plan=plan).pk)
+
+    def test_materialize_skips_expired_pending(self):
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+        SuiteRun.objects.filter(pk=run.pk).update(
+            created_at=_as_aware(NOW) - timedelta(seconds=600))   # 超过 300s 有效期
+
+        self.assertEqual(Scheduler().materialize_due_tasks(NOW), [])
+
+    def test_collect_pending_sweeps_settled_intent(self):
+        _plan, run = self._pending('000003', seconds_ago=30)
+
+        tasks = Scheduler(pending_sweep_min_age=5).collect_pending_tasks(NOW)
+
+        self.assertEqual([item[2]['suite_run_id'] for item in tasks], [run.pk])
+        self.assertEqual(tasks[0][1], '000003')
+
+    def test_collect_pending_excludes_too_fresh_and_expired(self):
+        self._pending('000004', seconds_ago=1)      # 太新（可能与即时投递竞争）
+        self._pending('000005', seconds_ago=600)    # 已过期
+
+        tasks = Scheduler(pending_sweep_min_age=5).collect_pending_tasks(NOW)
+
+        self.assertEqual(tasks, [])
+
+    def test_collect_pending_skips_unpublished_plan(self):
+        plan, _run = self._pending('000006', seconds_ago=30)
+        Plan.objects.filter(pk=plan.pk).update(status='archived')
+
+        self.assertEqual(
+            Scheduler(pending_sweep_min_age=5).collect_pending_tasks(NOW), [])
+
+    def test_due_tasks_deduplicates_by_run(self):
+        _plan, run = self._pending('000007', seconds_ago=30)
+
+        tasks = Scheduler(pending_sweep_min_age=5).due_tasks(NOW)
+
+        self.assertEqual([item[2]['suite_run_id'] for item in tasks], [run.pk])
+
+    def test_enqueue_due_plans_carries_run_id_in_payload(self):
+        plan = _make_due_plan()
+
+        queue = Scheduler().enqueue_due_plans(NOW)
+
+        got_plan, symbol, payload = queue._queue.get_nowait()
+        self.assertEqual((got_plan.pk, symbol), (plan.pk, '000001'))
+        self.assertEqual(payload['suite_run_id'],
+                         SuiteRun.objects.get(plan=plan).pk)
+
+    def test_sweep_recovers_intent_when_cron_no_longer_matches(self):
+        """内存队列丢失 + cron 已不命中：仅靠 pending 补投也能执行。"""
+        plan = _make_due_plan(cron='0 3 * * *')          # 与 NOW 不命中
+        run = create_suite_run(plan, '000001')
+        SuiteRun.objects.filter(pk=run.pk).update(
+            created_at=_as_aware(NOW) - timedelta(seconds=30))
+
+        tasks = Scheduler(pending_sweep_min_age=0).due_tasks(NOW)
+
+        self.assertEqual([item[2]['suite_run_id'] for item in tasks], [run.pk])
+        service = PlanExecutionService(risk_controller=None, data_context_builder=None)
+        log = service.run(tasks[0][0], tasks[0][1], tasks[0][2])
+        run.refresh_from_db()
+        self.assertIsNotNone(log)
+        self.assertEqual(run.status, 'completed')
+        self.assertEqual(SuiteRun.objects.filter(plan=plan).count(), 1)
+
+
+class PlanExecutionServiceClaimTest(TestCase):
+    """P1：执行端按持久化意向执行（认领 + 幂等，不重复下单）。"""
+
+    def test_run_claimed_executes_existing_run(self):
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+        service = PlanExecutionService(risk_controller=None, data_context_builder=None)
+
+        log = service.run(plan, '000001', {'suite_run_id': run.pk})
+
+        run.refresh_from_db()
+        self.assertIsNotNone(log)
+        self.assertEqual(run.status, 'completed')
+        self.assertEqual(ExecutionLog.objects.filter(plan=plan).count(), 1)
+        self.assertEqual(Order.objects.filter(symbol='000001').count(), 1)
+
+    def test_run_claimed_is_idempotent_and_does_not_duplicate_orders(self):
+        plan = _make_due_plan()
+        run = create_suite_run(plan, '000001')
+        service = PlanExecutionService(risk_controller=None, data_context_builder=None)
+
+        first = service.run(plan, '000001', {'suite_run_id': run.pk})
+        second = service.run(plan, '000001', {'suite_run_id': run.pk})
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)                     # 已终态 → 认领失败 → 跳过
+        self.assertEqual(SuiteRun.objects.filter(plan=plan).count(), 1)
+        self.assertEqual(ExecutionLog.objects.filter(plan=plan).count(), 1)
+        self.assertEqual(Order.objects.filter(symbol='000001').count(), 1)
+
+    def test_run_claimed_skips_unknown_run(self):
+        plan = _make_due_plan()
+        service = PlanExecutionService(risk_controller=None, data_context_builder=None)
+
+        self.assertIsNone(service.run(plan, '000001', {'suite_run_id': 999999}))
+        self.assertEqual(SuiteRun.objects.count(), 0)
+
+    def test_legacy_payload_still_creates_a_new_run(self):
+        """兼容路径不变：无 ``suite_run_id`` 时按老语义新建运行。"""
+        plan = _make_due_plan()
+        service = PlanExecutionService(risk_controller=None, data_context_builder=None)
+
+        log = service.run(plan, '000001')
+
+        self.assertIsNotNone(log)
+        self.assertEqual(SuiteRun.objects.filter(plan=plan).count(), 1)
+        self.assertEqual(SuiteRun.objects.get(plan=plan).status, 'completed')
+
+
+class RestartDurabilityTest(TransactionTestCase):
+    """P1：进程重启不丢执行意向、不重复执行（跨线程，故用 TransactionTestCase）。"""
+
+    def test_pending_intent_survives_restart_and_runs_exactly_once(self):
+        plan = _make_due_plan()
+        Scheduler().enqueue_due_plans(NOW)               # 第一个进程：落库意向 + 投递
+        run = SuiteRun.objects.get(plan=plan, symbol='000001')
+        SuiteRun.objects.filter(pk=run.pk).update(
+            created_at=_as_aware(NOW) - timedelta(seconds=30))
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'pending')
+
+        executed = []
+
+        class RecordingService(PlanExecutionService):
+            def run(self, plan_obj, symbol, payload=None):
+                result = super().run(plan_obj, symbol, payload)
+                executed.append((plan_obj.pk, symbol))
+                return result
+
+        # 模拟重启：全新 Scheduler（内存去重/队列皆空）+ 新执行服务
+        scheduler = Scheduler(poll_interval=0.01, pending_sweep_min_age=0)
+        service = RecordingService(risk_controller=None, data_context_builder=None)
+        pool = WorkerPool(service, worker_count=1)
+
+        async def scenario():
+            stop = asyncio.Event()
+            sched = asyncio.create_task(
+                scheduler.run_forever_async(stop, clock=lambda: NOW))
+            consume = asyncio.create_task(pool.run_forever(scheduler.task_queue, stop))
+            for _ in range(200):
+                await asyncio.sleep(0.02)
+                if executed:
+                    break
+            stop.set()
+            await asyncio.wait_for(asyncio.gather(sched, consume), timeout=5)
+
+        asyncio.run(scenario())
+
+        runs = SuiteRun.objects.filter(plan=plan, symbol='000001')
+        self.assertEqual(runs.count(), 1)                # 未产生第二条运行
+        self.assertEqual(executed, [(plan.pk, '000001')])
+        self.assertEqual(runs.get().status, 'completed')
 
 

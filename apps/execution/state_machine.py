@@ -145,8 +145,13 @@ def _collect_plan_suites(plan):
 
 
 def start_plan(plan):
-    """Plan 进入 running。自动启动模式下同时启动根 Suite。"""
-    if plan.run_status != 'new':
+    """Plan 进入 running。自动启动模式下同时启动根 Suite。
+
+    允许从 ``new`` / ``done`` / ``interrupt`` 启动——即跑完之后可以**再次驱动**
+    （归一后 Plan 会变成 ``done`` / ``interrupt``，此前是"一次性"的）；仅拒绝
+    ``running``（已在运行中，重复启动只会造成并发执行）。
+    """
+    if plan.run_status not in ('new', 'done', 'interrupt'):
         raise StateMachineError(f'Plan {plan.pk} 状态为 {plan.run_status}，无法启动')
     plan.run_status = 'running'
     plan.save(update_fields=['run_status', 'updated_at'])

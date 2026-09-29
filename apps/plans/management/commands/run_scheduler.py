@@ -72,6 +72,7 @@ class Command(BaseCommand):
             f'Plan Cron scheduler started (interval={interval}s, workers={workers})'
         )
         self._recover_orphans()
+        self._reconcile_plan_states()
         if workers == 0:
             self.stdout.write('[scheduler] workers=0：仅投递任务到 TaskQueue，不执行策略')
             try:
@@ -91,6 +92,8 @@ class Command(BaseCommand):
         + 一条 ``suite_failed`` 告警，避免静默失败。
 
         可用 ``EXECUTION_ORPHAN_RECOVERY_ENABLED=0`` 关闭；收口失败不阻断调度。
+        同时按 ``EXECUTION_PENDING_MAX_AGE_SECONDS``（默认 300 秒）收口**过期**的
+        ``pending`` 执行意向，避免陈旧交易意图被后续补投执行。
         """
         from django.conf import settings
 
@@ -101,7 +104,8 @@ class Command(BaseCommand):
         from apps.execution.recovery import recover_orphaned_runs
 
         try:
-            stats = recover_orphaned_runs()
+            stats = recover_orphaned_runs(
+                pending_max_age=getattr(settings, 'EXECUTION_PENDING_MAX_AGE_SECONDS', None))
         except Exception as exc:  # pylint: disable=broad-except
             self.stderr.write(f'[recovery] 遗留运行收口失败（不阻断调度）：{exc}')
             return None
@@ -113,10 +117,40 @@ class Command(BaseCommand):
             )
         else:
             self.stdout.write('[recovery] 无遗留未完成运行')
+        if stats['pending_expired']:
+            self.stdout.write(
+                f'[recovery] 已收口 {stats["pending_expired"]} 个过期的 pending 执行意向：'
+                f'{stats["pending_expired_ids"]}'
+            )
         if stats['pending_runs']:
             self.stdout.write(
-                f'[recovery] 提示：存在 {stats["pending_runs"]} 个 pending 运行'
-                '（当前无消费者，未收口）')
+                f'[recovery] 提示：{stats["pending_runs"]} 个 pending 执行意向仍在有效期内，'
+                '将由消费循环认领执行')
+        if stats['unconfirmed_orders']:
+            self.stderr.write(
+                f'[recovery] 警告：{stats["unconfirmed_orders"]} 张超时未确认委托单'
+                f'（pending 且无外部订单号），需与券商对账：{stats["unconfirmed_order_ids"]}')
+        return stats
+
+    def _reconcile_plan_states(self):
+        """启动期把 ``Plan.run_status`` 与执行事实（``SuiteRun``）对齐。
+
+        修历史遗留的分叉：``run_status`` 原本只由 REST 手动动作流转，自动收口链条在
+        生产链路零调用者，导致 Plan 长期停在 ``running``。归一只读 ``SuiteRun``、
+        幂等无副作用；失败不阻断调度。
+        """
+        from apps.execution.state_sync import reconcile_all_plan_run_statuses
+
+        try:
+            stats = reconcile_all_plan_run_statuses()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.stderr.write(f'[state-sync] Plan 状态归一失败（不阻断调度）：{exc}')
+            return None
+        if stats['changed_count']:
+            self.stdout.write(
+                f"[state-sync] 已归一 {stats['changed_count']} 个 Plan 的 run_status："
+                f"{[(c['plan_id'], c['from'] + '→' + c['to']) for c in stats['changed']]}"
+            )
         return stats
 
     async def _run_consuming(self, scheduler, workers, options):

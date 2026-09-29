@@ -11,9 +11,10 @@
 """
 
 from datetime import datetime, time as dtime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from django.db.models import Sum
+from django.db.models import F, Sum
 from django.utils import timezone
 
 from apps.execution.models import Order
@@ -149,19 +150,27 @@ class PositionPolicy:
 
 
 class DailyLimitPolicy:
-    """每日累计成交金额上限（基于本地最近 24h 的已成交/已发送订单）。"""
+    """每日累计成交**金额**上限（基于本地当日已 ``pending``/``sent``/``filled`` 订单）。"""
 
     def __init__(self, max_daily_value=None, on_date=None):
         self.max_daily_value = max_daily_value
         self.on_date = on_date
 
     def _cumulative(self, order_data):
+        """当日已挂用**金额**（``price × volume`` 之和）加本笔待发金额。
+
+        注意：聚合必须是金额而非单价之和——此前误用 ``Sum('price')``，量纲错误
+        会让「每日累计金额上限」形同虚设（100 股 ×10 元只按 10 元计入）（v2.14 修复）。
+        两侧金额统一用 ``Decimal``：``Sum`` 聚合结果是 ``Decimal``，与 ``float`` 相加
+        会直接抛 ``TypeError``（此前因该策略默认未启用而一直被掩盖）。
+        """
         today_key = timezone.localdate()
         base_value = Order.objects.filter(
             created_at__date=today_key,
             status__in=('pending', 'sent', 'filled'),
-        ).aggregate(total=Sum('price'))['total'] or 0
-        incoming_value = int(order_data.get('volume', 0)) * float(order_data.get('price', 0))
+        ).aggregate(total=Sum(F('price') * F('volume')))['total'] or Decimal('0')
+        incoming_value = (Decimal(str(order_data.get('price', 0)))
+                          * int(order_data.get('volume', 0)))
         return base_value + incoming_value
 
     def check(self, order_data):
