@@ -102,6 +102,13 @@
 
 - **部署需安装 tzdata**：`zoneinfo` 依赖系统 tzdata，否则 `America/New_York` 等时区解析失败。
 - **secret / token 只经环境变量或 systemd `EnvironmentFile` 注入**，不落仓库、不入日志。
+- **PII 脱敏已落地**：`apps/execution/redaction.py` 的脱敏工具 + `RedactionLogFilter` 已在 dev/prod
+  全部日志 handler 挂载，告警邮件正文脱敏（不夹带异常栈），`AlertChannel.email_recipients` 仅管理员
+  （`tests_redaction.py` 24 例）。新增涉及 PII 的序列化器 / 视图 / 服务时，**必须补 ≥1 个日志卫生测试**。
+- **真正会越过「单机」边界的通道只有 MCP**：AI 助手接入后数据离开本机。新增/扩展 MCP 工具时
+  **必须字段级白名单**，返回体禁止出现 `account_id`、`auth_info`、密钥、`email_recipients`、
+  `User.phone` / `company`。本地服务请固定绑定 `127.0.0.1`（`dev.py` 的 `ALLOWED_HOSTS = ["*"]`
+  仅在误用 `--host 0.0.0.0` 时才会把边界推出本机）。
 
 
 ## MCP 服务（AI 助手接入 · 模块11）

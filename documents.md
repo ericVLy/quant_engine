@@ -1448,7 +1448,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | `users` | ✅ 已完成 | 5 通过 | 100% |
 | `watchlists` | ✅ 已完成 | 22 通过 | 100% |
 | `datasources` | ✅ 已完成 | 42 通过 | 100%（~~D-01 用户自配数据源~~ 已移除（2026-09-15，异构源不可适配）；保留 K 线分表/快照/同步（**含增量优化**）/基本面缓存） |
-| `execution` | 🟢 执行闭环完成 | 237 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**账户资金可按 gm 账户信息同步**（2026-09-28）；**重启恢复（P0）+ 持久化执行意向/原子认领（P1）+ Plan 运行状态数据驱动归一（P2，2026-09-29）**；**PII/日志卫生（N-05 剩余）待做**） |
+| `execution` | 🟢 执行闭环完成 | 237 通过 | 90%（生产回报字段验证待完善；NodeRun 已就绪；**账户资金可按 gm 账户信息同步**（2026-09-28）；**重启恢复（P0）+ 持久化执行意向/原子认领（P1）+ Plan 运行状态数据驱动归一（P2，2026-09-29）**；**PII/日志卫生（N-05）已落地**：`apps/execution/redaction.py` 脱敏工具 + `RedactionLogFilter`（dev/prod 均已挂）+ 24 个测试，见 `tests_redaction.py`） |
 | `cases` | ✅ P0 能力完成 | 22 通过 | 100%（含 run_status 状态机：new→running→done/failed） |
 | `suites` | 🟢 编排核心能力完成 | 30 通过 | 98%（含 run_status 状态机：new→running→done/interrupt；画布前端对接已完成，见 5.1.1） |
 | `plans` | ✅ P0 能力完成 | 24 通过 | 100%（含 run_status 状态机：new→running→done/interrupt；suite_start_mode；**调度器已内置 TaskQueue 消费端（`--workers`，默认 2）与账户资金同步（`--funds-source` / `--funds-capital-basis`）**；~~多实例调度治理~~ → 单机部署下非必要，已降为 P4，见 5.1.2） |
@@ -1546,7 +1546,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 |------|----------|------------|----------|------|
 | 1 | P0 基础闭环 | `cases`、`suites`、`plans`、`runner` 核心能力 | C-07、C-09、S-09、S-10、S-11、P-03、P-08、P-09、P-10、R-01、R-06、R-07、R-09 | ✅ 已完成 |
 | 2 | P1 生产可靠性 | 真实交易回报、账户级风控、基本面扩展 | R-07、R-08、EX-18 | 🟢 大部分已完成（订单联调、账户级风控、基本面财务数据/缓存/历史时点、边条件操作符、拓扑校验、交易失败告警通道已完成；剩余真实交易环境验证） |
-| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、日志清理、**分时监控** | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**、**分时监控模块9 已完成**（见模块9）；**日志清理（N-04）与 PII/日志卫生（N-05 剩余）待做**；~~`auth_info` 加密~~已随 D-01 移除而取消；多实例治理已随单机部署目标降为 P4） |
+| 3 | P1/P2 产品与运维增强 | Suite 条件操作符、拓扑增强、分页、日志清理、**分时监控** | S-09、N-01、N-03、N-04、N-05 | ⏳ 部分完成（条件操作符、拓扑增强、**API 统一分页已完成**、**分时监控模块9 已完成**（见模块9）；**日志清理（N-04）已完成**（`retention.py`）；**PII/日志卫生（N-05）已完成**——`apps/execution/redaction.py`（邮箱/手机/UUID/长十六进制密钥脱敏 + 异常栈折叠 + `RedactionLogFilter`）已在 `dev.py`/`production.py` 全量挂载，`AlertChannel` 管理员权限与告警邮件脱敏均有测试（`tests_redaction.py` 24 例）；~~`auth_info` 加密~~已随 D-01 移除而取消；多实例治理已随单机部署目标降为 P4） |
 | 4 | P1 产品体验增强 | **策略快速创建向导（模块10）**：3 步向导一键生成「Case/Suite/Plan 并发布」 | 模块10 设计 | ✅ 已完成（2026-09-14，见模块10 前端实施记录） |
 
 #### 5.1.4 新一轮开发任务（v2.4）
@@ -1652,7 +1652,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | N-02 | API 响应时间 < 500ms（不含外部数据源调用） | P2 |
 | N-03 | 策略配置变更支持热加载（无需重启服务） | ✅ 已实现；P0；关联开发任务：PlanRegistry/调度配置刷新；关联测试任务：5.2-4 |
 | N-04 | 执行日志保留 30 天（自动清理） | P2；关联开发任务：日志清理（5.1.2，待做） |
-| N-05 | ~~敏感信息加密存储（数据源 `auth_info`）~~ → **随 D-01/`DataSource` 模块移除而取消**（2026-09-15）：用户自配第三方数据源已删除，`auth_info` 字段不复存在；剩余范围收敛为 PII 与日志卫生（账户 ID / 联系方式 / 交易明细不进日志与通知明文） | P1；关联开发任务：PII/日志卫生（5.1.2，待做） |
+| N-05 | ~~敏感信息加密存储（数据源 `auth_info`）~~ → **随 D-01/`DataSource` 模块移除而取消**（2026-09-15）：用户自配第三方数据源已删除，`auth_info` 字段不复存在；剩余范围收敛为 PII 与日志卫生（账户 ID / 联系方式 / 交易明细不进日志与通知明文） | ✅ **已完成**：走「脱敏 + 权限 + 日志卫生」而非加密。① `apps/execution/redaction.py` 提供 `mask_email` / `mask_phone` / `mask_account_id` / `strip_traceback` / `redact_text` + `RedactionLogFilter`（把 %-style args 折叠后统一脱敏，异常时静默放行不阻塞日志）；② 过滤器在 `settings/dev.py` 与 `settings/production.py` **全部 handler** 上挂载；③ 告警通知正文脱敏（不夹带完整异常栈）、`AlertChannel.email_recipients` 仅管理员（`AlertChannelPermissionTests` 3 例 + 未认证 403）；④ `AccountFundConfig` 无 REST/MCP 暴露面（仅 `fund_sync` 内部与 `sync_account_funds` 命令，输出默认脱敏、`--show-account-id` 才显全）；⑤ `User.phone`/`company` 无他人档案端点（仅 `/users/me`，`AllowAny` 只用于注册/登录），分级要求自动满足。测试：`apps/execution/tests_redaction.py` 24 例 + `tests_fund_sync.py` 账户 ID 脱敏用例。**单机单用户部署下无需再做增量工作**；后续新增 PII 路径时按「新增涉及 PII 的序列化器/视图/服务必须补 ≥1 个日志卫生测试」执行 |
 
 
 ## 六、附录
