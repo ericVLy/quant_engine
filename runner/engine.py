@@ -340,7 +340,7 @@ class SuiteRunner:
         self.data_context_builder = data_context_builder
         self.use_threads = use_threads
 
-    def run(self, plan, symbol, payload=None, on_run=None):
+    def run(self, plan, symbol, payload=None, on_run=None, risk_controller=None):
         """创建 SuiteRun 并跑完事件循环。
 
         Args:
@@ -349,6 +349,10 @@ class SuiteRunner:
             payload: 触发载荷（作为初始事件上下文）。
             on_run: 可选回调 ``callable(run)``，在 SuiteRun 创建后、执行前调用一次。
                 供调用方（如 TaskQueue 消费端）在执行失败时拿到 run 句柄以发告警。
+            risk_controller: 本次执行使用的风控控制器；``None`` 表示沿用装配时的
+                默认实例。生产执行端会按 **Plan 级限额**逐次构造（见
+                :func:`runner.risk.risk_kwargs_from_plan`），因此不同 Plan 可以有
+                不同的限额与交易时段窗口。
 
         Returns:
             Any: ``EventLoop.run_to_completion`` 的返回值（``ExecutionLog`` 或 ``None``）。
@@ -357,22 +361,31 @@ class SuiteRunner:
         if on_run is not None:
             on_run(run)
         return EventLoop(
-            run, self.case_executor, payload, self.broker, self.risk_controller,
+            run, self.case_executor, payload, self.broker,
+            self.risk_controller if risk_controller is None else risk_controller,
             context_builder=self.data_context_builder, use_threads=self.use_threads,
         ).run_to_completion()
 
     async def arun(self, plan, symbol, payload=None):
         return await sync_to_async(self.run, thread_sensitive=True)(plan, symbol, payload)
 
-    def run_existing(self, run):
+    def run_existing(self, run, risk_controller=None):
         """执行**已存在**的运行实例（持久化执行意向 / 认领路径使用）。
 
         与 :meth:`run` 的区别：不新建 ``SuiteRun``，直接驱动其事件队列。
         因此「重启后重复投递同一执行意向」不会产生第二条运行；配合
         ``apps.execution.services.claim_suite_run`` 的原子认领，
         同一条运行只可能被真正执行一次。
+
+        Args:
+            run: 已认领（``status='running'``）的 ``SuiteRun`` 实例。
+            risk_controller: 本次执行使用的风控控制器；``None`` 沿用默认实例。
+
+        Returns:
+            Any: ``EventLoop.run_to_completion`` 的返回值。
         """
         return EventLoop(
-            run, self.case_executor, None, self.broker, self.risk_controller,
+            run, self.case_executor, None, self.broker,
+            self.risk_controller if risk_controller is None else risk_controller,
             context_builder=self.data_context_builder, use_threads=self.use_threads,
         ).run_to_completion()

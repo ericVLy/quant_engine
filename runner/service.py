@@ -27,6 +27,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 
 from .engine import SuiteRunner
+from .risk import RiskController
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,26 @@ class PlanExecutionService:
             # 成功 / 失败都归一：Plan.run_status 必须反映执行事实，不能停在 running
             _reconcile_plan_state(resolved)
 
+    def _risk_controller_for(self, plan):
+        """按 **Plan 级风控限额**构造本次执行使用的风控控制器。
+
+        Plan 未声明任何限额时复用装配时的默认实例（零额外开销）；声明了则逐次
+        构造，限额随策略配置存在 DB 里、每次执行现读，因此**改限额无需重启进程**。
+
+        Args:
+            plan: 已重读的 ``Plan`` 实例。
+
+        Returns:
+            RiskController | None: 风控装配被整体关闭时返回 ``None``（不拦截）。
+        """
+        from .risk import has_plan_risk_limits, risk_kwargs_from_plan
+
+        # 用 getattr：测试可注入只实现 run/arun 的替身，未必有该属性
+        base = getattr(self._suite_runner, 'risk_controller', None)
+        if base is None or not has_plan_risk_limits(plan):
+            return base
+        return RiskController(**risk_kwargs_from_plan(plan, base=base))
+
     def _run_fresh(self, plan, symbol, payload=None):
         """新建运行并执行（无持久化意向的兼容路径，如 REST 手动触发）。"""
         self._refresh_funds(plan)
@@ -137,7 +158,9 @@ class PlanExecutionService:
             captured['run'] = run
 
         try:
-            return self._suite_runner.run(plan, symbol, payload, on_run=_capture)
+            return self._suite_runner.run(
+                plan, symbol, payload, on_run=_capture,
+                risk_controller=self._risk_controller_for(plan))
         except Exception as exc:
             self._alert_failure(captured.get('run'), exc)
             raise
@@ -172,7 +195,8 @@ class PlanExecutionService:
 
         self._refresh_funds(plan)
         try:
-            return self._suite_runner.run_existing(run)
+            return self._suite_runner.run_existing(
+                run, risk_controller=self._risk_controller_for(plan))
         except Exception as exc:
             self._alert_failure(run, exc)
             raise

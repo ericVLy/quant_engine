@@ -16,6 +16,11 @@ class PlanRegistry:
     _executable_keys = (
         'root_suite_id', 'trigger_type', 'cron_expr', 'event_type',
         'exec_mode', 'retry_policy', 'status', 'version',
+        # Plan 级风控限额：直接影响下单前拦截，必须随注册中心一起热加载，
+        # 否则改了限额仍按旧值执行（内存缓存会长期滞留）
+        'risk_position_mode', 'risk_max_order_volume', 'risk_max_order_value',
+        'risk_max_daily_value', 'risk_max_account_value',
+        'risk_max_position_value', 'risk_max_position_volume', 'risk_allowed_sessions',
     )
 
     @classmethod

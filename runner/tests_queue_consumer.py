@@ -275,7 +275,7 @@ class PlanExecutionServiceTest(TestCase):
         plan = _make_due_plan()
 
         class BoomRunner:
-            def run(self, plan_obj, symbol, payload=None, on_run=None):
+            def run(self, plan_obj, symbol, payload=None, on_run=None, risk_controller=None):
                 run = SuiteRun.objects.create(
                     plan=plan_obj, suite=plan_obj.root_suite, symbol=symbol)
                 on_run(run)
@@ -294,7 +294,7 @@ class PlanExecutionServiceTest(TestCase):
         plan = _make_due_plan()
 
         class BoomRunner:
-            def run(self, plan_obj, symbol, payload=None, on_run=None):
+            def run(self, plan_obj, symbol, payload=None, on_run=None, risk_controller=None):
                 run = SuiteRun.objects.create(
                     plan=plan_obj, suite=plan_obj.root_suite, symbol=symbol)
                 on_run(run)
@@ -308,7 +308,7 @@ class PlanExecutionServiceTest(TestCase):
 
     def test_alert_skipped_when_no_run_handle(self):
         class BoomRunner:
-            def run(self, plan_obj, symbol, payload=None, on_run=None):
+            def run(self, plan_obj, symbol, payload=None, on_run=None, risk_controller=None):
                 raise CaseExecutionError('early-boom')
 
         plan = _make_due_plan()

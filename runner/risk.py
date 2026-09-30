@@ -30,6 +30,88 @@ MARKET_TIMEZONES = {
 DEFAULT_TRADE_TIMEZONE = MARKET_TIMEZONES['A']
 
 
+#: Plan 上的风控限额字段（与 ``Plan`` 模型一一对应）
+PLAN_RISK_FIELDS = (
+    'risk_position_mode', 'risk_max_order_volume', 'risk_max_order_value',
+    'risk_max_daily_value', 'risk_max_account_value',
+    'risk_max_position_value', 'risk_max_position_volume', 'risk_allowed_sessions',
+)
+
+#: 取默认值即等同"未声明"的字段（与 ``RiskController`` 的默认值保持一致）
+_PLAN_RISK_DEFAULTS = {'risk_position_mode': 'both'}
+
+
+def plan_risk_limits(plan):
+    """返回 Plan 上**已声明**的风控限额（未声明的键直接不出现）。
+
+    ``None`` / ``''`` 视为"不设限"；``risk_position_mode`` 保持默认 ``both`` 也不算
+    声明（与 ``RiskController`` 默认一致，避免把默认值误当成"用户配置过"）。
+
+    Args:
+        plan: ``Plan`` 实例。
+
+    Returns:
+        dict: ``{字段名: 值}``；无任何声明时为空 dict。
+    """
+    limits = {}
+    for field in PLAN_RISK_FIELDS:
+        value = getattr(plan, field, None)
+        if value is None or value == '':
+            continue
+        if field in _PLAN_RISK_DEFAULTS and value == _PLAN_RISK_DEFAULTS[field]:
+            continue
+        limits[field] = value
+    return limits
+
+
+def has_plan_risk_limits(plan):
+    """该 Plan 是否声明了任何风控限额。"""
+    return bool(plan_risk_limits(plan))
+
+
+def risk_kwargs_from_plan(plan, base=None):
+    """把 Plan 限额映射为 :class:`RiskController` 的构造参数。
+
+    ``base`` 是装配时的默认控制器（可为 ``None``）。它携带的两类配置属于
+    **环境相关**（部署时区、账户快照来源），**不允许被 Plan 覆盖**：
+    Plan 只能改"限额数值、持仓方向与交易时段窗口"。
+
+    Args:
+        plan: ``Plan`` 实例。
+        base: 装配时的默认 :class:`RiskController`。
+
+    Returns:
+        dict: 可直接展开为 ``RiskController(**kwargs)`` 的参数。
+    """
+    kwargs = {}
+    if base is not None:
+        if base.trade_timezone:
+            kwargs['trade_timezone'] = base.trade_timezone
+        if base.account_provider is not None:
+            kwargs['account_provider'] = base.account_provider
+        if not getattr(plan, 'risk_allowed_sessions', None):
+            kwargs['allowed_sessions'] = list(base.trade_window.sessions)
+
+    limits = plan_risk_limits(plan)
+    if 'risk_position_mode' in limits:
+        kwargs['position_mode'] = limits['risk_position_mode']
+    if limits.get('risk_max_order_volume') is not None:
+        kwargs['max_volume'] = int(limits['risk_max_order_volume'])
+    if limits.get('risk_max_order_value') is not None:
+        kwargs['max_value'] = float(limits['risk_max_order_value'])
+    if limits.get('risk_max_daily_value') is not None:
+        kwargs['max_daily_value'] = float(limits['risk_max_daily_value'])
+    if limits.get('risk_max_account_value') is not None:
+        kwargs['max_account_value'] = float(limits['risk_max_account_value'])
+    if limits.get('risk_max_position_value') is not None:
+        kwargs['max_position_value'] = float(limits['risk_max_position_value'])
+    if limits.get('risk_max_position_volume') is not None:
+        kwargs['max_position_volume'] = int(limits['risk_max_position_volume'])
+    if limits.get('risk_allowed_sessions') is not None:
+        kwargs['allowed_sessions'] = limits['risk_allowed_sessions']
+    return kwargs
+
+
 def resolve_market_timezone(symbol=None, market=None):
     """解析交易时段判定时区（库内 ``Symbol.market`` 优先，回退前缀推断）。
 

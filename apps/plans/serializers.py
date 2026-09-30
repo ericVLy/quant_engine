@@ -42,6 +42,65 @@ def validate_retry_policy(value):
     return value
 
 
+def validate_risk_amount(value, label):
+    """风控金额字段：必须是 > 0 的有限 Decimal（``None`` 表示不限制）。"""
+    if value in (None, ''):
+        return None
+    from decimal import Decimal, InvalidOperation
+    try:
+        amount = Decimal(str(value))
+    except (TypeError, ValueError, InvalidOperation) as exc:
+        raise serializers.ValidationError(f'{label}必须是数值') from exc
+    if not amount.is_finite() or amount <= 0:
+        raise serializers.ValidationError(f'{label}必须大于 0')
+    return amount
+
+
+def validate_risk_volume(value, label):
+    """风控数量字段：必须是 > 0 的整数（拒绝布尔伪装；``None`` 表示不限制）。"""
+    if value in (None, ''):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise serializers.ValidationError(f'{label}必须是大于 0 的整数')
+    if value <= 0:
+        raise serializers.ValidationError(f'{label}必须大于 0')
+    return value
+
+
+def _normalize_session(item, index):
+    """把单个时段窗口规整成 ``[起始时, 起始分, 结束时, 结束分]``。"""
+    if not isinstance(item, (list, tuple)):
+        raise serializers.ValidationError(f'risk_allowed_sessions[{index}] 必须是数组')
+    values = list(item)
+    if len(values) == 2 and all(isinstance(v, (list, tuple)) for v in values):
+        values = [v for pair in values for v in pair]      # [[9,30],[11,30]] → 4 元
+    if len(values) != 4:
+        raise serializers.ValidationError(
+            f'risk_allowed_sessions[{index}] 必须是 4 个整数或两个 [时,分] 二元组')
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise serializers.ValidationError(
+                f'risk_allowed_sessions[{index}] 只能包含整数（时/分）')
+    start_h, start_m, end_h, end_m = values
+    for label, hour, minute in (('起始', start_h, start_m), ('结束', end_h, end_m)):
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise serializers.ValidationError(
+                f'risk_allowed_sessions[{index}] 的{label}时间越界（时 0-23，分 0-59）')
+    if (start_h, start_m) >= (end_h, end_m):
+        raise serializers.ValidationError(
+            f'risk_allowed_sessions[{index}] 的起始时间必须早于结束时间')
+    return [start_h, start_m, end_h, end_m]
+
+
+def validate_risk_allowed_sessions(value):
+    """交易时段窗口：接受扁平 ``[[h,m,h,m]]`` 或嵌套 ``[[[h,m],[h,m]]]``，统一存扁平形式。"""
+    if value in (None, '', []):
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise serializers.ValidationError('risk_allowed_sessions 必须是数组')
+    return [_normalize_session(item, index) for index, item in enumerate(value)]
+
+
 class PlanSerializer(serializers.ModelSerializer):
     available_capital = serializers.SerializerMethodField()
 
@@ -106,21 +165,29 @@ class PlanSerializer(serializers.ModelSerializer):
         except serializers.ValidationError as exc:
             raise serializers.ValidationError(exc.detail) from exc
 
-    def validate(self, attrs):
-        trigger_type = attrs.get('trigger_type', getattr(self.instance, 'trigger_type', 'time'))
-        cron_expr = attrs.get('cron_expr', getattr(self.instance, 'cron_expr', None))
-        event_type = attrs.get('event_type', getattr(self.instance, 'event_type', None))
+    # ---- Plan 级风控限额（F1）----
+    # 说明：这里**只保留一个** ``validate`` 方法。历史上本类曾定义过两个同名
+    # ``validate``（一个含资金占用校验、一个只做触发器校验），Python 中后者会
+    # 静默覆盖前者，导致 ``validate_plan_capital`` 成为死代码、"Plan 占用资金
+    # 不得超过账户空闲资金"的规则实际不生效。新增字段时一律挂 ``validate_<field>``。
+    def validate_risk_max_order_value(self, value):
+        return validate_risk_amount(value, '单笔金额上限')
 
-        if trigger_type == 'time':
-            if not cron_expr:
-                raise serializers.ValidationError({'cron_expr': '时间触发的 Plan 必须提供 cron_expr'})
-            try:
-                validate_cron_expression(cron_expr)
-            except serializers.ValidationError as exc:
-                raise serializers.ValidationError({'cron_expr': exc.detail}) from exc
-        elif trigger_type == 'event':
-            if not event_type:
-                raise serializers.ValidationError({'event_type': '事件触发的 Plan 必须提供 event_type'})
-            if not EventRegistry.validate(event_type):
-                raise serializers.ValidationError({'event_type': f'未注册的事件类型: {event_type}'})
-        return attrs
+    def validate_risk_max_daily_value(self, value):
+        return validate_risk_amount(value, '每日累计金额上限')
+
+    def validate_risk_max_account_value(self, value):
+        return validate_risk_amount(value, '账户可用资金上限')
+
+    def validate_risk_max_position_value(self, value):
+        return validate_risk_amount(value, '总仓位金额上限')
+
+    def validate_risk_max_order_volume(self, value):
+        return validate_risk_volume(value, '单笔数量上限')
+
+    def validate_risk_max_position_volume(self, value):
+        return validate_risk_volume(value, '总仓位数量上限')
+
+    def validate_risk_allowed_sessions(self, value):
+        return validate_risk_allowed_sessions(value)
+

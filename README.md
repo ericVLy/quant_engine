@@ -103,8 +103,12 @@
   `America/New_York`（按订单 `symbol` 解析，`Symbol.market` 优先）。**禁止**用
   `timezone.localtime(timezone.now())` 当墙钟——`TIME_ZONE='UTC'` 时那是 UTC 时间，
   会把 A 股窗口错成 8 小时前的时刻。默认窗口本身仍是 A 股时段，多市场需自行配置。
-- **每日累计金额口径**：`DailyLimitPolicy` 按库内 `Order` 聚合，`build_execution_service`
-  默认**不启用**（`max_daily_value=None`）。
+- **每日累计金额口径**：`DailyLimitPolicy` 按库内 `Order` 聚合（`price × volume`），
+  `build_execution_service` 默认**不启用**（`max_daily_value=None`）；限额通常在 **Plan 级**配置。
+- **风控限额在 Plan 上配置**：`Plan.risk_*` 8 个字段（持仓方向 / 单笔数量与金额 / 每日累计 /
+  账户可用 / 总仓位数量与金额 / 交易时段窗口），全部留空 = 不限制。限额随 `PlanRegistry`
+  热加载，**改限额无需重启调度器**，并随 `PlanVersion` 快照一起发布与回滚。
+  整体关闭风控用 `--no-risk-control`。
 - **单机部署**：只允许运行一个 Scheduler 实例。多实例分布式去重、租约、领导者选举为 P4。
 
 ### 环境

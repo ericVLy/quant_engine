@@ -13,6 +13,62 @@ class PlanError(Exception):
     """Raised when a Plan cannot be published or triggered."""
 
 
+#: Plan 级风控限额字段。
+#: 与 ``runner.risk.PLAN_RISK_FIELDS`` 一一对应——这里刻意**不复用**该常量：
+#: 按架构约定 ``apps.plans`` 不得依赖 ``runner``（``publish_plan`` 里的
+#: ``PlanRegistry`` 也是函数内延迟导入），因此两侧各存一份字段名，修改时需同步。
+_RISK_FIELDS = (
+    'risk_position_mode', 'risk_max_order_volume', 'risk_max_order_value',
+    'risk_max_daily_value', 'risk_max_account_value',
+    'risk_max_position_value', 'risk_max_position_volume', 'risk_allowed_sessions',
+)
+
+#: 参与发布快照的 Plan 字段。风控限额必须在其中：否则"回滚了策略、风控还是新的"，
+#: 会出现策略与限额不一致的危险状态。
+_SNAPSHOT_FIELDS = (
+    'name', 'root_suite_id', 'trigger_type', 'cron_expr', 'event_type',
+    'exec_mode', 'retry_policy', 'status', 'version',
+) + _RISK_FIELDS
+
+#: 回滚时写入的模型字段名（注意是 ``root_suite`` 而非 ``root_suite_id``）
+_ROLLBACK_FIELDS = (
+    'name', 'root_suite', 'trigger_type', 'cron_expr', 'event_type',
+    'exec_mode', 'retry_policy', 'status', 'version', 'updated_at',
+) + _RISK_FIELDS
+
+#: 回滚时由代码显式决定、不从快照恢复的字段
+_ROLLBACK_EXCLUDE = ('root_suite_id', 'status', 'version')
+
+#: 风控里的金额字段（快照里以字符串存放，回滚时需还原为 Decimal）
+_RISK_DECIMAL_FIELDS = (
+    'risk_max_order_value', 'risk_max_daily_value',
+    'risk_max_account_value', 'risk_max_position_value',
+)
+
+
+def _json_safe(value):
+    """把快照值归一为 JSON 可序列化形式（``Decimal`` → 字符串）。
+
+    ``PlanVersion.snapshot`` 是 JSONField，直接放入 ``Decimal`` 会在保存时抛
+    ``Object of type Decimal is not JSON serializable``（SQLite 与 MariaDB 都会失败）。
+    金额以字符串存放既保住精度，也与 DRF 序列化 Decimal 的行为一致。
+    """
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _take_snapshot(plan):
+    """按 :data:`_SNAPSHOT_FIELDS` 生成可安全入库的版本快照。"""
+    return _json_safe({key: getattr(plan, key) for key in _SNAPSHOT_FIELDS})
+
+
 def publish_plan(plan):
     """Publish a Plan only when its root Suite is already published.
 
@@ -35,17 +91,7 @@ def publish_plan(plan):
         plan.status = 'published'
         plan.version += 1
         plan.save(update_fields=('status', 'version', 'updated_at'))
-        snapshot = {
-            'name': plan.name,
-            'root_suite_id': plan.root_suite_id,
-            'trigger_type': plan.trigger_type,
-            'cron_expr': plan.cron_expr,
-            'event_type': plan.event_type,
-            'exec_mode': plan.exec_mode,
-            'retry_policy': plan.retry_policy,
-            'status': plan.status,
-            'version': plan.version,
-        }
+        snapshot = _take_snapshot(plan)
         PlanVersion.objects.create(plan=plan, version=plan.version, snapshot=snapshot)
         transaction.on_commit(lambda: PlanRegistry.refresh(plan))
     return plan
@@ -68,28 +114,23 @@ def rollback_plan(plan, version):
         root_suite_id = snapshot['root_suite_id']
         if not Suite.objects.filter(pk=root_suite_id, status='published').exists():
             raise PlanError('历史版本的根 Suite 未发布')
-        plan.name = snapshot.get('name', plan.name)
+        # 风控限额与策略配置一并回滚：两者必须来自同一个版本，
+        # 否则会出现「策略回滚了、风控还是新的」这种危险的不一致。
+        # 快照里没有的键（历史版本）保持现值，不臆断为空。
+        for key in _SNAPSHOT_FIELDS:
+            if key in _ROLLBACK_EXCLUDE or key not in snapshot:
+                continue
+            setattr(plan, key, snapshot[key])
+        # 快照里的金额是字符串，还原为 Decimal 以免内存对象类型漂移
+        for key in _RISK_DECIMAL_FIELDS:
+            if getattr(plan, key, None) is not None:
+                from decimal import Decimal
+                setattr(plan, key, Decimal(str(getattr(plan, key))))
         plan.root_suite_id = root_suite_id
-        plan.trigger_type = snapshot.get('trigger_type', plan.trigger_type)
-        plan.cron_expr = snapshot.get('cron_expr')
-        plan.event_type = snapshot.get('event_type')
-        plan.exec_mode = snapshot.get('exec_mode', plan.exec_mode)
-        plan.retry_policy = snapshot.get('retry_policy') or {}
         plan.status = 'published'
         plan.version += 1
-        plan.save(update_fields=(
-            'name', 'root_suite', 'trigger_type', 'cron_expr', 'event_type',
-            'exec_mode', 'retry_policy', 'status', 'version',
-            'updated_at',
-        ))
-        new_snapshot = {
-            key: getattr(plan, key)
-            for key in (
-                'name', 'root_suite_id', 'trigger_type', 'cron_expr',
-                'event_type', 'exec_mode', 'retry_policy',
-                'status', 'version',
-            )
-        }
+        plan.save(update_fields=_ROLLBACK_FIELDS)
+        new_snapshot = _take_snapshot(plan)
         PlanVersion.objects.create(
             plan=plan, version=plan.version, snapshot=new_snapshot,
         )
