@@ -39,6 +39,15 @@
 - 内部更新器：`updater.py` 随 Django 服务启动（启动回填 → 周期采样 → UTC 23:00 清理）；**无单独更新命令**
 - API：`GET /api/monitoring/intraday/` · `GET /api/monitoring/intraday/realtime/` · `GET /api/monitoring/intraday/stream/`（SSE 推送）
 
+### dashboard（N-06 · 运行总览）
+
+- 只读聚合，**不持有模型**（无迁移）；统计全部在 DB 侧完成，不在前端拉列表自行统计
+- API：`GET /api/dashboard/overview/?window_days=7` · `GET /api/dashboard/execution-trend/?days=14`
+  （单对象接口，**不分页**）
+- 口径：比率型受 `window_days` 限制且分母只含终态；存量/健康度取全表；金额按 `price × volume`
+- 前端：`/dashboard`（KPI 卡片 + ECharts 趋势 + 健康提示条 + 30s 自动刷新），侧边导航首项
+- 资金块只输出聚合数值，**不含 `account_id`**（N-05 卫生测试守住）
+
 ## 常用命令
 
 > 全部命令在 Linux 下以 `.venv/bin/python` 执行（项目**禁止** `.\.venv\Scripts\python.exe` 等 Windows 风格写法）。
