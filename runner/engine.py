@@ -14,7 +14,6 @@ from apps.suites.models import Suite, SuiteVersion
 from apps.suites.services import aggregate_directions, build_topology_snapshot, event_condition_matches
 
 from .executor import CaseExecutionError, CaseExecutor
-from .risk import RiskController
 
 
 class EventLoop:

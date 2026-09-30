@@ -62,6 +62,9 @@
   - 真实下单务必先确认账户/风控与模拟环境：`.venv/bin/python manage.py run_scheduler --order-broker gm`
 - MCP 服务（SSE，Web 接入）：`.venv/bin/python manage.py run_mcp_server --port 8765`
 - MCP 专项测试：`.venv/bin/python manage.py test mcp_server`
+- 静态检查（单个文件）：`DJANGO_SETTINGS_MODULE=quant_engine.settings.test .venv/bin/pylint --rcfile=pylint.conf runner/engine.py`
+  - `pylint-django` 是**必需**插件，缺失会让所有 `Model.objects` 误报 `E1101`
+  - `pylint.conf` 的 `jobs=8` 偶发触发 astroid 崩溃（`F0002`），复核时加 `--jobs=1`
 
 ## 已知边界与限制（务必阅读）
 
@@ -122,6 +125,11 @@
   **必须字段级白名单**，返回体禁止出现 `account_id`、`auth_info`、密钥、`email_recipients`、
   `User.phone` / `company`。本地服务请固定绑定 `127.0.0.1`（`dev.py` 的 `ALLOWED_HOSTS = ["*"]`
   仅在误用 `--host 0.0.0.0` 时才会把边界推出本机）。
+- **执行是串行的，不是并行**：`run_scheduler --workers N` 的多个 worker 在
+  `sync_to_async(thread_sensitive=True)` 下被收敛到同一线程排队，因此 N 个 worker
+  没有并行收益（也不会造成 SQLite 写冲突）。它真正提供的是"消费端不阻塞调度端"。
+- **EX-18 真实回报验证属用户侧操作**：取决于 Plan 配置的账户是否为 gm 模拟账户，
+  项目对此无感知，**不构成开发或测试的阻塞**。
 
 
 ## MCP 服务（AI 助手接入 · 模块11）
