@@ -227,3 +227,39 @@ class AlertChannelPermissionTests(APITestCase):
     def test_unauthenticated_forbidden(self):
         resp = self.client.get(self.list_url)
         self.assertIn(resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_401_UNAUTHORIZED))
+
+class AlertResendViewRedactionTests(APITestCase):
+    """告警重发接口错误分支的脱敏（N-05）。
+
+    回归背景：``views.resend_notifications`` 的错误分支引用 ``redact_text``
+    却曾漏了导入，一旦真走到该分支就是 NameError（E0602）；而正常路径
+    （通知发送成功）永远覆盖不到它。此处把通知发送直接打成异常，
+    强制走失败分支，同时校验错误详情已脱敏。
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user('resend_user', password='x')
+        self.client.force_authenticate(self.user)
+        self.service = AlertService()
+        # views 使用模块级单例，直接 patch 其方法即可命中视图的错误分支
+        self.singleton = __import__(
+            'apps.execution.alerts', fromlist=['alert_service']
+        ).alert_service
+
+    def test_failure_branch_returns_500_with_redacted_detail(self):
+        alert = self.service.create_alert(
+            alert_type='system_error', severity='high', title='t',
+            message='m', send_notifications=False,
+        )
+        url = f'/api/execution/alerts/{alert.pk}/resend-notifications/'
+        with __import__('unittest').mock.patch.object(
+            self.singleton, 'send_alert_notifications',
+            side_effect=Exception('connect 13800138000 refused'),
+        ):
+            resp = self.client.post(url)
+
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        detail = resp.data['detail']
+        self.assertIn('发送通知失败', detail)
+        self.assertIn('138****8000', detail)        # 已脱敏
+        self.assertNotIn('13800138000', detail)     # 不留明文 PII

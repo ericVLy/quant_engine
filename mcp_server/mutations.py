@@ -18,6 +18,8 @@
 被引用/有执行记录抛 :class:`MutationConflictError`（REST 语义 409）、
 写开关未开启抛 ``PermissionError``。
 """
+# pylint: disable=too-many-positional-arguments  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import os
@@ -184,14 +186,13 @@ def create_case(name: str, node_type: str, params: dict | None = None) -> dict:
         PermissionError: 写开关未开启。
         ValueError: 名称/节点类型/params 校验失败（消息含字段路径）。
     """
-    from apps.cases.models import Case
     from apps.cases.serializers import CaseSerializer
 
     ensure_mutate_enabled()
     serializer = CaseSerializer(
         data={'name': name, 'node_type': node_type, 'params': params or {}}
     )
-    instance = _save(serializer)
+    _save(serializer)
     return to_jsonable(serializer.data)
 
 
@@ -278,7 +279,6 @@ def create_suite(
         PermissionError: 写开关未开启。
         ValueError: 名称/聚合方式/parent/case_ids/资金校验失败。
     """
-    from apps.suites.models import Suite
     from apps.suites.serializers import SuiteSerializer
 
     ensure_mutate_enabled()
@@ -431,7 +431,6 @@ def create_plan(
         PermissionError: 写开关未开启。
         ValueError: 任一字段/对象级校验失败（含 cron、事件注册、资金校验）。
     """
-    from apps.plans.models import Plan
     from apps.plans.serializers import PlanSerializer
 
     ensure_mutate_enabled()

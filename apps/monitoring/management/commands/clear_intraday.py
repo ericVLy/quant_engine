@@ -8,6 +8,7 @@
 - 建议挂在外部 cron 于 UTC 23:00 触发（美股收盘后、A股开盘前，全市场当日数据同时过期）。
 """
 from datetime import datetime
+from datetime import timezone as dt_timezone
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -27,7 +28,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if options['before']:
             before = timezone.make_aware(
-                datetime.strptime(options['before'], '%Y-%m-%d'), timezone.utc,
+                datetime.strptime(options['before'], '%Y-%m-%d'), dt_timezone.utc,
             )
         else:
             before = None

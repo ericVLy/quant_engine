@@ -3,6 +3,7 @@
 与 `run_scheduler` 同一运维约定：入口放管理命令，运行期逻辑全部在 `mcp_server` 包内。
 配置通过环境变量（`MCP_*`）或命令行参数提供，见 `mcp_server/config.py`。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from django.core.management.base import BaseCommand
 
 

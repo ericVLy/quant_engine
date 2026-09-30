@@ -1,4 +1,5 @@
 """P0 重启恢复测试：非正常终止遗留运行的收口、幂等、dry-run 与告警。"""
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
@@ -242,7 +243,7 @@ class OrphanRecoveryTest(TestCase):
         stale = _order()
         Order.objects.filter(pk=stale.pk).update(
             created_at=self.now - timedelta(seconds=3600))
-        fresh = _order()
+        _fresh = _order()  # 近期 pending 订单（用于验证不计入未确认对账）
         sent = _order(status='sent', external_order_id='EXT-RECONCILE-1')
         Order.objects.filter(pk=sent.pk).update(
             created_at=self.now - timedelta(seconds=3600))
@@ -269,12 +270,12 @@ class SchedulerStartupRecoveryTest(TestCase):
             plan=self.plan, suite=self.suite, symbol='000001',
             status='running', event_queue=[], started_at=timezone.now(),
         )
+        self.stdout = StringIO()
+        self.stderr = StringIO()
 
     def _command(self):
         from apps.plans.management.commands.run_scheduler import Command
 
-        self.stdout = StringIO()
-        self.stderr = StringIO()
         return Command(stdout=self.stdout, stderr=self.stderr)
 
     def test_startup_closes_orphans_and_reports(self):

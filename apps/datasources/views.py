@@ -1,8 +1,13 @@
-﻿from rest_framework import viewsets, status, serializers
+﻿# pylint: disable=too-many-ancestors  # DRF ModelViewSet 混入多个 mixin，继承链天然深
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
+from datetime import datetime, timedelta
+
+from django.shortcuts import get_object_or_404
+from rest_framework import viewsets, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
-from datetime import datetime, timedelta
+
+from apps.watchlists.models import Symbol
 
 from .models import RealtimeSnapshot, KLineSyncLog
 from .serializers import (
@@ -10,7 +15,6 @@ from .serializers import (
     KLineSyncLogSerializer, KLineSerializer
 )
 from .services import sync_kline_for_symbol, sync_all_symbols
-from apps.watchlists.models import Symbol
 
 
 class RealtimeSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
@@ -53,8 +57,10 @@ class KLineViewSet(viewsets.GenericViewSet):
         try:
             start = datetime.strptime(start_date, '%Y-%m-%d').date()
             end = datetime.strptime(end_date, '%Y-%m-%d').date()
-        except ValueError:
-            raise serializers.ValidationError({"detail": "日期格式应为 YYYY-MM-DD"})
+        except ValueError as exc:
+            raise serializers.ValidationError(
+                {"detail": "日期格式应为 YYYY-MM-DD"}
+            ) from exc
 
         results = query_kline_table(symbol, start, end)
         page = self.paginate_queryset(results)
@@ -85,27 +91,26 @@ class KLineViewSet(viewsets.GenericViewSet):
         if symbol_code == 'all':
             results = sync_all_symbols(sync_type, service_start, end_date or None, adjust)
             return Response({'status': 'completed', 'results': results})
-        else:
-            symbol = get_object_or_404(Symbol, code=symbol_code)
-            added, skipped, error = sync_kline_for_symbol(
-                symbol, sync_type,
-                start_date=service_start,
-                end_date=end_date,
-                adjust=adjust
-            )
-            KLineSyncLog.objects.create(
-                symbol=symbol,
-                sync_type=sync_type,
-                start_date=log_start,
-                end_date=log_end,
-                records_added=added,
-                records_skipped=skipped,
-                status='success' if error is None else 'failed',
-                error_msg=error or ''
-            )
-            return Response({
-                'symbol': symbol.code,
-                'added': added,
-                'skipped': skipped,
-                'error': error
-            })
+        symbol = get_object_or_404(Symbol, code=symbol_code)
+        added, skipped, error = sync_kline_for_symbol(
+            symbol, sync_type,
+            start_date=service_start,
+            end_date=end_date,
+            adjust=adjust
+        )
+        KLineSyncLog.objects.create(
+            symbol=symbol,
+            sync_type=sync_type,
+            start_date=log_start,
+            end_date=log_end,
+            records_added=added,
+            records_skipped=skipped,
+            status='success' if error is None else 'failed',
+            error_msg=error or ''
+        )
+        return Response({
+            'symbol': symbol.code,
+            'added': added,
+            'skipped': skipped,
+            'error': error
+        })

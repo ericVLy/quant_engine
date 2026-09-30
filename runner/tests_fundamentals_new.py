@@ -1,4 +1,5 @@
 """基本面数据扩展测试 - 验证新的 Provider 抽象 + AkShare 实现。"""
+# pylint: disable=abstract-class-instantiated  # 测试故意实例化抽象 FundamentalsProvider 以断言 TypeError
 import unittest
 from unittest.mock import patch
 
@@ -146,7 +147,8 @@ class TestFundamentalsProviderAbstract(unittest.TestCase):
             FundamentalsProvider()
 
     def test_subclass_must_implement_fetch_basic_info(self):
-        class IncompleteProvider(FundamentalsProvider):
+        # 故意不实现 fetch_basic_info，用于断言抽象方法未实现时无法实例化
+        class IncompleteProvider(FundamentalsProvider):  # pylint: disable=abstract-method
             name = 'incomplete'
         with self.assertRaises(TypeError):
             IncompleteProvider()

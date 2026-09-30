@@ -19,6 +19,8 @@
 下单默认关闭（``order_broker='none'``）：只落库 ``Order``（状态 pending），
 需要真实下单时显式传 ``order_broker='gm'``。
 """
+# pylint: disable=too-many-positional-arguments  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import logging
@@ -284,7 +286,6 @@ def build_execution_service(order_broker='none', use_threads=True, enable_risk=T
                 funds_source)
 
     from .fixture import DataContextBuilder
-    from .risk import RiskController
 
     risk_controller = None
     if enable_risk:

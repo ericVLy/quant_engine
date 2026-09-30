@@ -1,5 +1,5 @@
+# pylint: disable=too-many-statements,too-many-locals  # 已知偏大：编排型主流程，拆分需专门重构（暂不处理）；已知偏大：编排型主流程需同时持有多个局部上下文，拆分需专门重构
 import logging
-import json
 import re
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -13,7 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     from . import ashare as ashare_lib
 
-from django.db import transaction, connections
+from django.db import connections
 from apps.watchlists.models import Symbol
 from apps.watchlists.services import normalize_a_share_code, resolve_a_share_exchange
 from .models import (

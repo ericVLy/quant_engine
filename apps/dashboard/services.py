@@ -13,6 +13,7 @@
 - 自然日切分使用**市场时区**（默认 ``Asia/Shanghai``），与分时监控的本地日历一致；
 - 资金块只暴露**聚合数值**，不暴露 ``account_id``（N-05 / 规则 §12.8）。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 from datetime import datetime, time as dtime, timedelta

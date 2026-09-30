@@ -1,11 +1,13 @@
-﻿from rest_framework import status, viewsets
+﻿# pylint: disable=too-many-ancestors  # DRF ModelViewSet 混入多个 mixin，继承链天然深
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+
+from apps.execution.state_machine import start_suite, interrupt_suite, StateMachineError
 
 from .models import Edge, Suite
 from .serializers import EdgeSerializer, SuiteSerializer
 from .services import SuiteError, delete_suite, publish_suite, update_topology
-from apps.execution.state_machine import start_suite, interrupt_suite, StateMachineError
 
 
 class SuiteViewSet(viewsets.ModelViewSet):

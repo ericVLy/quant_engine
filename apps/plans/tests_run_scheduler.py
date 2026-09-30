@@ -1,4 +1,5 @@
 """``manage.py run_scheduler`` 编排测试（消费端开关、参数透传、资金同步循环）。"""
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 import asyncio
 from io import StringIO
 from unittest.mock import MagicMock, patch

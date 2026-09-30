@@ -1,15 +1,15 @@
-from .redaction import redact_text, mask_email
-
-"""
-告警服务模块：提供应用内通知和邮件通知功能
-"""
+"""告警服务模块：提供应用内通知和邮件通知功能。"""
+# pylint: disable=import-outside-toplevel,too-many-positional-arguments  # 延迟导入以规避循环依赖/加载期副作用；构造器需注入执行依赖（编辑与执行分离），或兼容既有调用方
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional
+
 from django.conf import settings
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.utils import timezone
+
 from .models import Alert, AlertChannel
+from .redaction import redact_text, mask_email
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +53,11 @@ def _plan_symbol_summary(plan) -> str:
 
 class AlertService:
     """告警服务类：统一管理告警创建和发送"""
-    
+
     def __init__(self):
         self.channels_cache = None
         self._load_channels()
-    
+
     def _load_channels(self):
         """加载启用的告警渠道配置"""
         try:
@@ -65,11 +65,11 @@ class AlertService:
         except Exception as e:
             logger.error(f"加载告警渠道配置失败: {e}")
             self.channels_cache = []
-    
+
     def reload_channels(self):
         """重新加载告警渠道配置"""
         self._load_channels()
-    
+
     def create_alert(
         self,
         alert_type: str,
@@ -84,7 +84,7 @@ class AlertService:
     ) -> Alert:
         """
         创建告警记录
-        
+
         Args:
             alert_type: 告警类型
             title: 告警标题
@@ -95,7 +95,7 @@ class AlertService:
             order: 关联的Order实例
             error_code: 错误代码
             send_notifications: 是否立即发送通知
-            
+
         Returns:
             Alert: 创建的告警实例
         """
@@ -110,30 +110,30 @@ class AlertService:
                 suite_run=suite_run,
                 order=order
             )
-            
+
             logger.info(f"创建告警成功: [{severity.upper()}] {title}")
-            
+
             # 立即发送通知
             if send_notifications:
                 self.send_alert_notifications(alert)
-            
+
             return alert
-            
+
         except Exception as e:
             logger.error(f"创建告警失败: {e}")
             raise
-    
+
     def send_alert_notifications(self, alert: Alert):
         """
         发送告警通知到所有启用的渠道
-        
+
         Args:
             alert: 告警实例
         """
         if not self.channels_cache:
             logger.warning("没有启用的告警渠道")
             return
-        
+
         for channel in self.channels_cache:
             try:
                 if channel.should_send_alert(alert):
@@ -147,11 +147,11 @@ class AlertService:
                 # 记录通知错误
                 alert.notification_error += f"{channel.channel_type}: {redact_text(str(e))}\n"
                 alert.save(update_fields=['notification_error'])
-    
+
     def _send_in_app_notification(self, alert: Alert, channel: AlertChannel):
         """
         发送应用内通知
-        
+
         Args:
             alert: 告警实例
             channel: 告警渠道配置
@@ -160,19 +160,19 @@ class AlertService:
             # 标记应用内通知已发送
             alert.in_app_notified = True
             alert.save(update_fields=['in_app_notified'])
-            
+
             # 这里可以扩展为 WebSocket 推送或存储到应用内通知表
             # 当前版本主要通过数据库查询实现应用内通知
             logger.info(f"应用内通知已发送: {alert.title}")
-            
+
         except Exception as e:
             logger.error(f"发送应用内通知失败: {redact_text(str(e))}")
             raise
-    
+
     def _send_email_notification(self, alert: Alert, channel: AlertChannel):
         """
         发送邮件通知
-        
+
         Args:
             alert: 告警实例
             channel: 告警渠道配置
@@ -183,17 +183,17 @@ class AlertService:
             if not recipients:
                 logger.warning("邮件渠道未配置收件人，跳过发送")
                 return
-            
+
             # 检查邮件配置
             if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
                 logger.warning("邮件服务器未配置，跳过发送邮件通知")
                 return
-            
+
             # 构建邮件主题
             subject = f"{channel.email_subject_prefix} [{alert.severity.upper()}] {alert.title}"
             # N-05 PII：收件人邮箱为个人信息，日志只保留脱敏形态
             logger.info(f"准备发送邮件: 主题={subject}, 收件人={[mask_email(r) for r in recipients]}")
-            
+
             # 构建邮件内容
             context = {
                 'alert': alert,
@@ -202,7 +202,7 @@ class AlertService:
                 'created_at': alert.created_at.strftime('%Y-%m-%d %H:%M:%S'),
                 'base_url': getattr(settings, 'BASE_URL', 'http://localhost:8000'),
             }
-            
+
             # 尝试渲染HTML邮件模板
             try:
                 html_message = render_to_string('emails/alert_notification.html', context)
@@ -210,7 +210,7 @@ class AlertService:
             except Exception as e:
                 logger.warning(f"渲染HTML邮件模板失败，使用纯文本格式: {redact_text(str(e))}")
                 html_message = None
-            
+
             # 构建纯文本内容（备用）
             # N-05：邮件正文不夹带异常栈与 PII 明文（邮箱/手机号/账户与订单 UUID/密钥串）
             text_message = f"""
@@ -229,9 +229,9 @@ class AlertService:
                 text_message += f"\n关联执行: {alert.suite_run}"
             if alert.order:
                 text_message += f"\n关联订单: {alert.order}"
-            
+
             text_message += f"\n\n请登录系统查看详情: {context['base_url']}/admin/execution/alert/{alert.id}/"
-            
+
             # 发送邮件
             logger.info("开始发送邮件...")
             send_mail(
@@ -247,13 +247,13 @@ class AlertService:
             alert.email_notified = True
             alert.save(update_fields=['email_notified'])
             logger.info(f"邮件通知标记已设置: email_notified={alert.email_notified}")
-            
+
             logger.info(f"邮件通知已发送: {alert.title} -> {[mask_email(r) for r in recipients]}")
-            
+
         except Exception as e:
             logger.error(f"发送邮件通知失败: {redact_text(str(e))}")
             raise
-    
+
     def create_order_failed_alert(
         self,
         order,
@@ -263,13 +263,13 @@ class AlertService:
     ) -> Alert:
         """
         创建订单失败告警
-        
+
         Args:
             order: 失败的订单实例
             error_message: 错误消息
             error_code: 错误代码
             severity: 严重程度
-            
+
         Returns:
             Alert: 创建的告警实例
         """
@@ -297,7 +297,7 @@ class AlertService:
             order=order,
             error_code=error_code
         )
-    
+
     def create_suite_failed_alert(
         self,
         suite_run,
@@ -307,13 +307,13 @@ class AlertService:
     ) -> Alert:
         """
         创建策略执行失败告警
-        
+
         Args:
             suite_run: 失败的策略执行实例
             error_message: 错误消息
             error_code: 错误代码
             severity: 严重程度
-            
+
         Returns:
             Alert: 创建的告警实例
         """
@@ -341,7 +341,7 @@ class AlertService:
             suite_run=suite_run,
             error_code=error_code
         )
-    
+
     def create_risk_violation_alert(
         self,
         plan,
@@ -351,13 +351,13 @@ class AlertService:
     ) -> Alert:
         """
         创建风控违规告警
-        
+
         Args:
             plan: 违规的计划实例
             violation_message: 违规消息
             violation_type: 违规类型
             severity: 严重程度
-            
+
         Returns:
             Alert: 创建的告警实例
         """
@@ -382,7 +382,7 @@ class AlertService:
             severity=severity,
             plan=plan
         )
-    
+
     def create_system_error_alert(
         self,
         error_message: str,
@@ -391,12 +391,12 @@ class AlertService:
     ) -> Alert:
         """
         创建系统错误告警
-        
+
         Args:
             error_message: 错误消息
             error_code: 错误代码
             severity: 严重程度
-            
+
         Returns:
             Alert: 创建的告警实例
         """

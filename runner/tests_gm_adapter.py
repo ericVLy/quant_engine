@@ -1,3 +1,4 @@
+# pylint: disable=protected-access  # 测试需访问私有成员以验证内部状态
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase

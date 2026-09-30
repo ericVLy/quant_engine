@@ -9,6 +9,7 @@
 
 保持对旧 ``calculation`` 接口（``last`` / ``mean`` / ``compare``）的向后兼容。
 """
+# pylint: disable=too-many-return-statements,too-many-statements,too-many-locals  # 多分支早返回（校验 / 查表 / 降级链）比深嵌套更易读；已知偏大：编排型主流程，拆分需专门重构（暂不处理）；已知偏大：编排型主流程需同时持有多个局部上下文，拆分需专门重构
 
 from statistics import mean
 

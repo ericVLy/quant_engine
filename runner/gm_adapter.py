@@ -1,12 +1,14 @@
 """Minimal adapter around the external gm Python SDK."""
+# pylint: disable=too-many-positional-arguments  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约
+# pylint: disable=import-outside-toplevel,not-callable  # 延迟导入 gm SDK（未连终端时 runner 仍可用）；SDK 的 getter/setter 经 getattr 取出后调用，静态无法推断可调用性
 
-from decimal import Decimal
 import os
+from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 
 from apps.execution.models import Order
-from django.conf import settings
 
 
 class GmBrokerAdapter:

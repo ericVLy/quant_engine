@@ -4,6 +4,7 @@
 （``complete_case → _try_complete_suite → _try_complete_plan``）在生产链路零调用者，
 导致 Plan 长期停在 ``running``。本模块按 ``SuiteRun`` 事实做数据驱动归一。
 """
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 from io import StringIO
 from unittest import mock
 

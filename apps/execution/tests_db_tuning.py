@@ -1,4 +1,5 @@
 """SQLite 连接调优（db_tuning）测试：busy_timeout 生效 + PRAGMA 注入契约。"""
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from django.db import connection
 from django.test import TestCase
 

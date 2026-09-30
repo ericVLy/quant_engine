@@ -23,6 +23,8 @@
 - **幂等**：行锁 + 事务 + 状态复检，重复执行为 0 变更；
 - 告警失败不回滚收口；收口本身的异常由调用方决定是否阻断启动。
 """
+# pylint: disable=too-many-positional-arguments  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import logging

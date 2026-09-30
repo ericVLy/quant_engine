@@ -1,3 +1,5 @@
+# pylint: disable=too-many-return-statements  # 多分支早返回（校验 / 查表 / 降级链）比深嵌套更易读
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from django.db import transaction
 
 from .models import Edge, Suite, SuiteVersion
@@ -122,10 +124,16 @@ def _apply_operator(condition, payload):
     except (TypeError, ValueError):
         lhs = actual  # 非数值字段按原样比较（仅 eq/neq 有意义）
 
+    # eq / neq 是同一比较的互补，先算一次再取反。
+    # 注意：不能写成 `lhs in (threshold, actual)` —— 那会把比较对象换成
+    # threshold（101 in (100, 101) 为真），且 float 转换失败、lhs is actual 时
+    # 会退化成 `actual == actual` 恒真。
+    # pylint: disable-next=consider-using-in  # 合并成 `in` 会把比较对象换成 threshold
+    matched = lhs == threshold or actual == threshold
     if op == 'eq':
-        return lhs == threshold or actual == threshold
+        return matched
     if op == 'neq':
-        return not (lhs == threshold or actual == threshold)
+        return not matched
     if op in ('gt', 'gte', 'lt', 'lte'):
         if not isinstance(lhs, (int, float)) or isinstance(lhs, bool):
             return False
@@ -188,9 +196,6 @@ def validate_topology(suite):
 
     覆盖：跨树入边、重复边、非法权重、不可达节点、孤立节点。
     """
-    root_id = suite.pk
-    from_suites = set(Edge.objects.filter(from_suite_id=root_id).values_list('from_suite_id', flat=True))
-
     # 1. 所有出边必须属于本树（from_suite 只能在本树内）
     all_edges = Edge.objects.filter(
         from_suite_id__in=_collect_suite_ids(suite),

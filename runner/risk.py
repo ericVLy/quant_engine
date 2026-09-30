@@ -9,8 +9,10 @@
 
 每个拦截器的决策以 ``RiskDecision`` 表达，wrapper 聚合后给出最终结论。
 """
+# pylint: disable=too-many-positional-arguments,too-many-return-statements  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约；多分支早返回（校验 / 查表 / 降级链）比深嵌套更易读
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 
-from datetime import datetime, time as dtime
+from datetime import time as dtime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 

@@ -36,6 +36,7 @@ class IntradayUpdater:
         self._stop_event = threading.Event()
         self._thread = None
         self._backfill_complete = False
+        self._backfill_warned = False
         self._last_cleanup_date = None
         self._startup_cleared = False
         self._market_clear_dates = {}  # market -> 已执行开盘清理的本地日期
@@ -149,7 +150,7 @@ class IntradayUpdater:
             )
         if not incomplete:
             self._backfill_complete = True
-        elif not getattr(self, '_backfill_warned', False):
+        elif not self._backfill_warned:
             # 首次发现不完整即告警一次，避免每轮刷屏
             logger.warning('[monitoring-updater] 回填不完整，下一轮继续重试: %s', incomplete)
             self._backfill_warned = True
@@ -164,7 +165,7 @@ class IntradayUpdater:
             logger.info('[monitoring-updater] UTC23:00 收盘清理，删除 %s 条', deleted)
 
 
-_instance: IntradayUpdater | None = None
+_instance: IntradayUpdater | None = None  # pylint: disable=invalid-name  # 可变的进程级单例句柄，非模块常量
 _instance_lock = threading.Lock()
 
 

@@ -38,12 +38,12 @@ class RegistrationSerializer(serializers.ModelSerializer):
         return User.objects.create_user(**validated_data)
 
 
-class LoginSerializer(serializers.Serializer):
+class LoginSerializer(serializers.Serializer):  # pylint: disable=abstract-method  # 仅用于登录入参校验，不经 create/update 落库
     username = serializers.CharField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
 
-class RoleSerializer(serializers.Serializer):
+class RoleSerializer(serializers.Serializer):  # pylint: disable=abstract-method  # 仅用于角色入参校验，不经 create/update 落库
     roles = serializers.ListField(
         child=serializers.CharField(max_length=150), allow_empty=True
     )

@@ -13,6 +13,7 @@
 （``database table is locked``）。生产路径不存在该问题——ORM 只出现在同步阶段。
 SSE 传输层由 ``mcp_server/tests.py`` 与实机冒烟运行覆盖。
 """
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 import json
 import os
 from io import StringIO
@@ -228,5 +229,3 @@ class McpSmokeTestCommandTest(TestCase):
                      publish=False, trigger=False, keep=True)
         self.assertEqual(captured['url'], 'http://example/sse')
         self.assertEqual(captured['headers'], {'Authorization': 'Bearer tok-1'})
-
-

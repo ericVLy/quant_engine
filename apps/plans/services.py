@@ -1,3 +1,6 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
+from decimal import Decimal
+
 from django.db import transaction
 
 from apps.execution.models import ExecutionLog, SuiteRun
@@ -53,8 +56,6 @@ def _json_safe(value):
     ``Object of type Decimal is not JSON serializable``（SQLite 与 MariaDB 都会失败）。
     金额以字符串存放既保住精度，也与 DRF 序列化 Decimal 的行为一致。
     """
-    from decimal import Decimal
-
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, dict):
@@ -124,7 +125,6 @@ def rollback_plan(plan, version):
         # 快照里的金额是字符串，还原为 Decimal 以免内存对象类型漂移
         for key in _RISK_DECIMAL_FIELDS:
             if getattr(plan, key, None) is not None:
-                from decimal import Decimal
                 setattr(plan, key, Decimal(str(getattr(plan, key))))
         plan.root_suite_id = root_suite_id
         plan.status = 'published'
@@ -188,8 +188,7 @@ def iter_plan_cases(plan):
         if suite.pk in seen_suites:
             continue
         seen_suites.add(suite.pk)
-        for case in suite.cases.all():
-            yield case
+        yield from suite.cases.all()
         pending.extend(suite.children.all())
 
 

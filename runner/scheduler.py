@@ -1,3 +1,5 @@
+# pylint: disable=too-many-return-statements  # 多分支早返回（校验 / 查表 / 降级链）比深嵌套更易读
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import asyncio
 import logging
 from datetime import datetime, timedelta

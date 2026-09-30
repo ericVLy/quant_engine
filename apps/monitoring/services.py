@@ -1,4 +1,5 @@
 """分时监控采样与清理服务（模块9）。"""
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation

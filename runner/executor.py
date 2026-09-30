@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from dataclasses import dataclass, field
 
 

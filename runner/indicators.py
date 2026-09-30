@@ -17,7 +17,8 @@ def _clean(values):
             number = float(item)
         except (TypeError, ValueError):
             continue
-        if number != number or number in (float('inf'), float('-inf')):  # NaN/inf 排除
+        # `x != x` 是 NaN 判定惯用法，不是冗余比较
+        if number != number or number in (float('inf'), float('-inf')):  # pylint: disable=comparison-with-itself
             continue
         result.append(number)
     return result
@@ -56,7 +57,7 @@ def exponential_moving_average(values, period):
             number = float(value)
         except (TypeError, ValueError):
             continue
-        if number != number:  # NaN
+        if number != number:  # pylint: disable=comparison-with-itself  # NaN 惯用法
             continue
         if ema is None:
             ema = number

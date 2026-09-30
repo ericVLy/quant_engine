@@ -1,6 +1,6 @@
-from rest_framework import serializers
-
 from zoneinfo import ZoneInfo
+
+from rest_framework import serializers
 
 from .market_calendar import market_timezone
 from .models import IntradayPoint

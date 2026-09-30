@@ -22,6 +22,7 @@
 
 依赖方向：本模块属 ``mcp_server`` 叶子包，只单向依赖 ``apps.*`` 与 ``mcp`` SDK。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import json
@@ -569,7 +570,3 @@ class McpSmokeRunner:
         self.steps.append('purge_runs')
         self._emit(f'[smoke] 清理本次触发的 SuiteRun {self.created_run_ids}（{deleted} 行）')
         return deleted
-
-
-
-

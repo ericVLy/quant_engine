@@ -23,6 +23,22 @@ class EventConditionOperatorMatchTest(TestCase):
         self.assertFalse(event_condition_matches(
             {'field': 'price', 'op': 'neq', 'threshold': 100}, {'price': 100}))
 
+    def test_eq_neq_on_non_numeric_field(self):
+        """非数值字段：float 转换失败后 lhs 即 actual，仍须与 threshold 逐值比较。
+
+        回归背景：曾把 eq 改写成 ``lhs in (threshold, actual)``，那会把比较对象
+        换成 threshold（``101 in (100, 101)`` 为真），并在本用例这种「lhs is actual」
+        情形下退化成恒真。
+        """
+        self.assertTrue(event_condition_matches(
+            {'field': 'name', 'op': 'eq', 'threshold': 'pingan'}, {'name': 'pingan'}))
+        self.assertFalse(event_condition_matches(
+            {'field': 'name', 'op': 'eq', 'threshold': 'pingan'}, {'name': 'other'}))
+        self.assertTrue(event_condition_matches(
+            {'field': 'name', 'op': 'neq', 'threshold': 'pingan'}, {'name': 'other'}))
+        self.assertFalse(event_condition_matches(
+            {'field': 'name', 'op': 'neq', 'threshold': 'pingan'}, {'name': 'pingan'}))
+
     def test_gt_gte_lt_lte(self):
         self.assertTrue(event_condition_matches(
             {'field': 'vol', 'op': 'gt', 'threshold': 1000}, {'vol': 1001}))

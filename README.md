@@ -62,9 +62,11 @@
   - 真实下单务必先确认账户/风控与模拟环境：`.venv/bin/python manage.py run_scheduler --order-broker gm`
 - MCP 服务（SSE，Web 接入）：`.venv/bin/python manage.py run_mcp_server --port 8765`
 - MCP 专项测试：`.venv/bin/python manage.py test mcp_server`
-- 静态检查（单个文件）：`DJANGO_SETTINGS_MODULE=quant_engine.settings.test .venv/bin/pylint --rcfile=pylint.conf runner/engine.py`
+- 静态检查：`scripts/pylint.sh`（全仓）/ `scripts/pylint.sh <file>`（单文件）/ `scripts/pylint.sh --tests <file>`（测试文件，放宽豁免）
   - `pylint-django` 是**必需**插件，缺失会让所有 `Model.objects` 误报 `E1101`
-  - `pylint.conf` 的 `jobs=8` 偶发触发 astroid 崩溃（`F0002`），复核时加 `--jobs=1`
+  - 脚本已固定 `jobs=1` 并清理 astroid 缓存，规避 pylint 4.x 的 `F0002` 崩溃
+  - 脚本内已关掉分时更新器 / 基本面（静态检查不应发起外部请求或写库）
+  - 当前状态：**全仓 0 告警 / 10.00/10**
 
 ## 已知边界与限制（务必阅读）
 

@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import math
 
 from rest_framework import serializers
@@ -190,4 +191,3 @@ class PlanSerializer(serializers.ModelSerializer):
 
     def validate_risk_allowed_sessions(self, value):
         return validate_risk_allowed_sessions(value)
-

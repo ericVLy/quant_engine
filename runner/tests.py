@@ -1,4 +1,5 @@
-﻿from datetime import datetime
+﻿# pylint: disable=protected-access  # 测试需访问私有成员以验证内部状态
+from datetime import datetime
 from decimal import Decimal
 import asyncio
 from threading import Event
@@ -15,9 +16,13 @@ from apps.watchlists.models import Symbol
 
 from .engine import SuiteRunner
 from .gm_adapter import GmBrokerAdapter
+from .queue import TaskQueue, WorkerPool
+from .registry import PlanRegistry
+from .risk import RiskController
+from .scheduler import Scheduler
 
 
-class _GmStubAPI(object):
+class _GmStubAPI:
     """测试桩：仅提供无副作用的 set_token / set_serv_addr，屏蔽真实 GM 配置。"""
 
     def set_token(self, token):
@@ -25,10 +30,6 @@ class _GmStubAPI(object):
 
     def set_serv_addr(self, addr):
         return None
-from .risk import RiskController
-from .scheduler import Scheduler
-from .registry import PlanRegistry
-from .queue import TaskQueue, WorkerPool
 
 
 class RunnerIntegrationTest(TestCase):
@@ -292,7 +293,7 @@ class SuiteRuntimeTest(TestCase):
 class GmOrderReportTest(TestCase):
     def test_report_updates_order_by_external_id(self):
         suite = Suite.objects.create(name='Report Suite')
-        plan = Plan.objects.create(name='Report Plan', root_suite=suite)
+        Plan.objects.create(name='Report Plan', root_suite=suite)
         log = ExecutionLog.objects.create(symbol='000001', final_direction=1)
         order = Order.objects.create(
             log=log, symbol='000001', direction='buy', price='12.0000',
@@ -310,7 +311,7 @@ class GmOrderReportTest(TestCase):
         self.assertEqual(order.price, Decimal('12.5000'))
 
     def test_old_report_cannot_regress_filled_order(self):
-        suite = Suite.objects.create(name='Idempotent Report Suite')
+        Suite.objects.create(name='Idempotent Report Suite')
         log = ExecutionLog.objects.create(symbol='000002', final_direction=1)
         order = Order.objects.create(
             log=log, symbol='000002', direction='buy', price='12.0000',
@@ -335,7 +336,7 @@ class GmOrderLifecycleTest(TestCase):
 
     def _make_order(self, symbol='000003', external_id='gm-LC-001', volume=200,
                     status='pending'):
-        suite = Suite.objects.create(name='LC Suite')
+        Suite.objects.create(name='LC Suite')
         log = ExecutionLog.objects.create(symbol=symbol, final_direction=1)
         return Order.objects.create(
             log=log, symbol=symbol, direction='buy', price='12.0000',

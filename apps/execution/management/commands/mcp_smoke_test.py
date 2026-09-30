@@ -24,6 +24,7 @@
 退出码：全部步骤通过为 0；任一步失败抛 ``CommandError``（打印已完成步骤与已创建主键，
 并按依赖逆序尽力清理，避免残留半成品）。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import asyncio
 import json
 import os

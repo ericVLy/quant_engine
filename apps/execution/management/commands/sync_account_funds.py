@@ -13,6 +13,7 @@
 **失败语义**：任一账户查询失败时**不会**把资金写 0，而是保留上一次成功同步的
 数值并以非零退出码结束（见 ``apps.execution.fund_sync``）。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import json
 
 from django.core.management.base import BaseCommand, CommandError
@@ -56,13 +57,14 @@ class Command(BaseCommand):
         except Exception as exc:  # pylint: disable=broad-except
             raise CommandError(f'初始化 gm 账户查询通道失败: {exc}') from exc
 
+        def run_one(account_id):
+            return sync_account_funds(
+                account_id, broker, source=source, capital_basis=basis)
+
         if options['account_id']:
             targets = [options['account_id']]
-            run_one = lambda account_id: sync_account_funds(  # noqa: E731
-                account_id, broker, source=source, capital_basis=basis)
         else:
             targets = None
-            run_one = None
 
         failures = 0
         if targets is None:

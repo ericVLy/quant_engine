@@ -14,6 +14,8 @@ update_suite_topology/delete_suite/create_plan/update_plan/delete_plan` 共 10 �
 默认禁用，需 `MCP_ALLOW_MUTATE=1` 或 `--allow-mutate`；与执行开关 `MCP_ALLOW_TRIGGER`
 相互独立。门面实现见 `mcp_server/mutations.py`。
 """
+# pylint: disable=too-many-positional-arguments,too-many-locals  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约；已知偏大：编排型主流程需同时持有多个局部上下文，拆分需专门重构
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import argparse

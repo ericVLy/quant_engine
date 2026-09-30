@@ -1,4 +1,5 @@
 ﻿"""Case / Suite / Plan 运行状态机 + 资金校验测试。"""
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 
 from decimal import Decimal
 
@@ -177,8 +178,9 @@ class CapitalValidationTest(TestCase):
         validate_plan_capital(plan)
 
     def test_plan_capital_exceeds_available(self):
-        s = Suite.objects.create(name='tmp')
-        Plan.objects.create(name='P0', account_id='ACC001', allocated_capital=Decimal('80000'), root_suite=s)
+        suite = Suite.objects.create(name='tmp')
+        Plan.objects.create(
+            name='P0', account_id='ACC001', allocated_capital=Decimal('80000'), root_suite=suite)
         plan = Plan(name='P1', account_id='ACC001', allocated_capital=Decimal('30000'),
                     root_suite=Suite.objects.create(name='tmp2'))
         with self.assertRaises(StateMachineError):

@@ -46,7 +46,8 @@ class RunDevStackCommandTest(SimpleTestCase):
     def test_starts_django_and_mcp_by_default(self):
         procs = self._run({})
         self.assertEqual(len(procs), 2)
-        web, mcp = procs
+        # 上一行已断言元素个数；pylint 只能看到辅助函数内的 `procs = []`，故报误报
+        web, mcp = procs  # pylint: disable=unbalanced-tuple-unpacking
         self.assertIn('runserver', web.args)
         self.assertEqual(web.env.get('RUN_MAIN'), 'true')
         self.assertIn('--noreload', web.args)
@@ -54,8 +55,8 @@ class RunDevStackCommandTest(SimpleTestCase):
         self.assertNotIn('--allow-trigger', mcp.args)
         self.assertNotIn('--allow-mutate', mcp.args)
         # 退出前对所有子进程执行 wait 清理（poll 已返回的不再 terminate）
-        for p in procs:
-            self.assertIn('wait', p.calls)
+        for proc in procs:
+            self.assertIn('wait', proc.calls)
 
     def test_options_forwarded_and_optional_scheduler(self):
         procs = self._run({
@@ -64,7 +65,7 @@ class RunDevStackCommandTest(SimpleTestCase):
             'allow_mutate': True, 'with_scheduler': True,
         })
         self.assertEqual(len(procs), 3)
-        web, mcp, sched = procs
+        web, mcp, sched = procs  # pylint: disable=unbalanced-tuple-unpacking  # 同上
         self.assertIn('127.0.0.1:8001', ' '.join(web.args))
         mcp_joined = ' '.join(mcp.args)
         self.assertIn('--port 8766', mcp_joined)

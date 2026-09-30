@@ -8,17 +8,18 @@
 - ``clear_intraday``：默认当日 00:00 UTC 边界 / 幂等
 - API：/api/monitoring/intraday/ 响应契约 + realtime 合并 RealtimeSnapshot
 """
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 import os
 import zoneinfo
 from datetime import datetime, time, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
-from unittest.mock import patch
 
 from apps.datasources.models import RealtimeSnapshot
 from apps.watchlists.models import Symbol
@@ -280,7 +281,8 @@ class SampleIntradayTest(TestCase):
         now = self._aware_utc('A', 10, 0)
         sample_intraday(provider=provider, symbols=['000001'], now=now)
         self.assertEqual(IntradayPoint.objects.count(), 1)
-def test_sample_passes_symbols_to_provider(self):
+
+    def test_sample_passes_symbols_to_provider(self):
         class _RecordingProvider:
             def __init__(self):
                 self.calls = []
@@ -334,6 +336,26 @@ class ClearIntradayTest(TestCase):
         self._point(self.yesterday)
         deleted = clear_intraday(before=self.yesterday)
         self.assertEqual(deleted, 1)
+
+    def test_command_before_option_parses_date(self):
+        """CLI ``--before=YYYY-MM-DD`` 必须可用（N-04 兜底清理入口）。
+
+        回归背景：``timezone.utc`` 自 Django 5.0 起已被移除，该分支此前必然
+        抛 AttributeError，使命令的日期入参完全不可用；而 service 层的
+        ``clear_intraday()`` 走的是另一条路径，原有用例覆盖不到。
+        """
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        self._point(self.yesterday)
+        self._point(self.today_early)
+        out = StringIO()
+        call_command(
+            'clear_intraday', before=self.today_early.date().isoformat(), stdout=out,
+        )
+        self.assertEqual(IntradayPoint.objects.count(), 1)
+        self.assertIn('清理完成', out.getvalue())
 
 
 class IntradayAPITest(APITestCase):
@@ -868,7 +890,6 @@ class IntradayUpdaterTest(TestCase):
 
     def test_startup_clear_wipes_all_once(self):
         """服务启动时清空全部分时数据；每进程仅执行一次（幂等）。"""
-        from .models import IntradayPoint
 
         past = datetime(2026, 9, 13, 1, 31, tzinfo=zoneinfo.ZoneInfo('UTC'))
         now_pt = datetime(2026, 9, 14, 1, 31, tzinfo=zoneinfo.ZoneInfo('UTC'))
@@ -895,7 +916,6 @@ class IntradayUpdaterTest(TestCase):
     def test_open_clear_removes_history_during_trading(self):
         """开盘（交易时段首轮）清理历史数据：删除早于当日当地零点的记录，当日数据保留。"""
         import apps.monitoring.updater as updater_module
-        from .models import IntradayPoint
 
         history = datetime(2026, 9, 11, 3, 0, tzinfo=zoneinfo.ZoneInfo('UTC'))  # 上周五
         today_pt = datetime(2026, 9, 14, 1, 35, tzinfo=zoneinfo.ZoneInfo('UTC'))  # 周一 09:35 北京
@@ -1124,4 +1144,3 @@ class MonitoringUpdaterProcessGateTest(TestCase):
     def test_disabled_setting_skips_updater(self):
         self._ready(['manage.py', 'runserver'], enabled=False,
                     run_main='true').assert_not_called()
-

@@ -51,21 +51,21 @@ class CachedFundamentalsProviderTest(TestCase):
         future = timezone.now() + timedelta(days=365)
         FundamentalSnapshot.objects.create(symbol=self.symbol, asof=future, payload={'market_cap': 999.0})
         # 空 provider 不能回源（fetch_basic_info 已消费）
-        metrics = self.cache.fetch(self.symbol, asof=timezone.now())
+        self.cache.fetch(self.symbol, asof=timezone.now())
         # 过去时点无快照 → 回源；这里 fake 返回新数据
         self.assertEqual(_FakeProvider.calls, 1)
 
     def test_historical_asof_reads_latest_available(self):
         now = timezone.now()
-        old = FundamentalSnapshot.objects.create(
+        FundamentalSnapshot.objects.create(
             symbol=self.symbol, asof=now - timedelta(days=10), payload={'market_cap': 100.0})
-        newer = FundamentalSnapshot.objects.create(
+        FundamentalSnapshot.objects.create(
             symbol=self.symbol, asof=now - timedelta(days=5), payload={'market_cap': 150.0})
         metrics = self.cache.fetch(self.symbol, asof=now - timedelta(days=3))
         self.assertEqual(metrics['market_cap'], 150.0)
 
     def test_expired_cache_refreshes_source(self):
-        old = FundamentalSnapshot.objects.create(
+        FundamentalSnapshot.objects.create(
             symbol=self.symbol,
             asof=timezone.now() - timedelta(days=2),  # 超过 24h TTL
             payload={'market_cap': 100.0})

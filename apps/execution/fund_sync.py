@@ -48,6 +48,7 @@ gm 账户查询契约（``GmBrokerAdapter.get_account`` → ``gm.api.get_cash``�
 - 同步**不触碰** ``FundAllocation``（Plan/Suite/Case 的已占用额度由运行时链路维护）；
 - 日志中的账户 ID 统一脱敏（见 :func:`mask_account`，遵循 N-05 日志卫生）。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import logging
@@ -397,4 +398,3 @@ def sync_published_plan_accounts(broker, source='gm',
             logger.warning('账户 %s 资金同步失败（保持上次值）：%s', mask_account(account_id), exc)
             results.append({'account_id': mask_account(account_id), 'error': str(exc)})
     return results
-

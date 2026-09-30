@@ -1,6 +1,8 @@
 ﻿"""风控（R-08）、热加载注册中心（R-09）与引擎数据集成测试。"""
+# pylint: disable=protected-access  # 测试需访问私有成员以验证内部状态
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 
-from datetime import date, datetime, time as dtime
+from datetime import datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -111,7 +113,7 @@ class DailyLimitPolicyTest(TestCase):
         """v2.14 修复：聚合必须是「单价 × 数量」，不是单价之和（量纲错误会让限额失效）。"""
         from decimal import Decimal
 
-        from apps.execution.models import ExecutionLog, Order
+        from apps.execution.models import Order
 
         log = ExecutionLog.objects.create(symbol='000001', final_direction=1)
         Order.objects.create(log=log, symbol='000001', direction='buy',
@@ -184,7 +186,7 @@ class EngineDataRunTest(TestCase):
         )
 
         class StubBuilder(DataContextBuilder):
-            def build(self, symbol, context=None, **kwargs):
+            def build(self, symbol, context=None, **kwargs):  # pylint: disable=arguments-differ  # 桩只接收用到的参数，其余由 **kwargs 吸收
                 ctx = super().build(symbol, context=context, **kwargs)
                 # 提供确定性的行情数据以驱动 MA 方向判定
                 ctx['market_data'] = [{'close': float(10 + i)} for i in range(30)]

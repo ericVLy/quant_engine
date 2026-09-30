@@ -1,10 +1,10 @@
-﻿import json
+﻿# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
+import json
 import logging
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
-from unittest.mock import patch, MagicMock
 
 from apps.plans.models import Plan
 from apps.suites.models import Edge, Suite
@@ -474,8 +474,6 @@ class PaginationContractTest(TestLoggingMixin, APITestCase):
         )
 
     def test_execution_list_endpoints_are_paginated(self):
-        from .models import Event, ExecutionLog, Order
-
         run = SuiteRun.objects.create(
             plan=self.plan, suite=self.suite, symbol='000001', status='running',
             event_queue=[],

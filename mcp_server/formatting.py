@@ -1,4 +1,5 @@
 """JSON-safe serialization for MCP tool outputs."""
+# pylint: disable=too-many-return-statements  # 多分支早返回（校验 / 查表 / 降级链）比深嵌套更易读
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any

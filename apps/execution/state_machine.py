@@ -1,10 +1,10 @@
 ﻿"""Case / Suite / Plan 运行状态机。"""
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 
 from decimal import Decimal
 
 from django.db import transaction
 
-from apps.cases.models import Case
 from apps.suites.models import Suite
 from apps.plans.models import Plan
 
@@ -135,12 +135,12 @@ def _collect_plan_suites(plan):
     pending = [plan.root_suite] if plan.root_suite else []
     seen = set()
     while pending:
-        s = pending.pop()
-        if s is None or s.pk in seen:
+        suite = pending.pop()
+        if suite is None or suite.pk in seen:
             continue
-        seen.add(s.pk)
-        result.append(s)
-        pending.extend(s.children.all())
+        seen.add(suite.pk)
+        result.append(suite)
+        pending.extend(suite.children.all())
     return result
 
 
@@ -194,7 +194,11 @@ def validate_plan_capital(plan):
     try:
         cfg = AccountFundConfig.objects.select_for_update().get(account_id=plan.account_id)
     except AccountFundConfig.DoesNotExist:
-        raise StateMachineError(f'账户 {plan.account_id} 未配置资金，无法创建 Plan')
+        # 缺配置记录是控制流信号，原异常（DoesNotExist）对使用者无信息量，
+        # 显式抑制异常链，与 mcp_server/mutations.py 的同类处理保持一致。
+        raise StateMachineError(
+            f'账户 {plan.account_id} 未配置资金，无法创建 Plan'
+        ) from None
     used = Plan.objects.filter(account_id=plan.account_id).exclude(
         pk=plan.pk,
     ).aggregate(total=_sum('allocated_capital'))['total'] or Decimal('0')

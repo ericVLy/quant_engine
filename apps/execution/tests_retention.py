@@ -1,4 +1,5 @@
 """执行日志生命周期管理（N-04）测试：清理范围、订单保护、幂等、dry-run 与调度门禁。"""
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 import warnings
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone

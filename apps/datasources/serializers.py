@@ -1,6 +1,8 @@
 from rest_framework import serializers
-from .models import RealtimeSnapshot, KLineSyncLog
+
 from apps.watchlists.models import Symbol
+
+from .models import RealtimeSnapshot, KLineSyncLog
 
 
 class SymbolField(serializers.PrimaryKeyRelatedField):
@@ -31,10 +33,6 @@ class SymbolField(serializers.PrimaryKeyRelatedField):
             'market': obj.market
         }
 
-    def to_internal_value(self, data):
-        # 父类处理，接受 ID
-        return super().to_internal_value(data)
-
 
 class RealtimeSnapshotSerializer(serializers.ModelSerializer):
     symbol = SymbolField(queryset=Symbol.objects.all())
@@ -54,7 +52,7 @@ class KLineSyncLogSerializer(serializers.ModelSerializer):
         read_only_fields = ('created_at',)
 
 
-class KLineSerializer(serializers.Serializer):
+class KLineSerializer(serializers.Serializer):  # pylint: disable=abstract-method  # 仅用于 K 线查询结果序列化，不经 create/update 落库
     """K线查询结果的序列化器，统一字段"""
     symbol = serializers.CharField()
     date = serializers.DateField()

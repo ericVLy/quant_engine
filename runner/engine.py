@@ -1,3 +1,5 @@
+# pylint: disable=too-many-positional-arguments,too-many-statements  # 执行/构造依赖以位置参数注入（编辑与执行分离），参数列表本身即契约；已知偏大：编排型主流程，拆分需专门重构（暂不处理）
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal

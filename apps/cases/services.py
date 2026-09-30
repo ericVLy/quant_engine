@@ -1,4 +1,5 @@
 """Case 业务服务：删除保护与发布（REST 与 MCP 共用同一处判定）。"""
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from django.db import transaction
 
 from .models import CaseVersion
@@ -52,4 +53,3 @@ def publish_case(case):
         status=case.status,
     )
     return case
-

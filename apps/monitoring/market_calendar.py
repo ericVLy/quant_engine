@@ -15,6 +15,7 @@
 - pre_market  交易日内开盘前
 - closed      收盘后 / 周末 / 开盘前非交易日
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 

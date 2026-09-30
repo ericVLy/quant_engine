@@ -1,4 +1,5 @@
-﻿from rest_framework import status, viewsets
+﻿# pylint: disable=too-many-ancestors  # DRF ModelViewSet 混入多个 mixin，继承链天然深
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 

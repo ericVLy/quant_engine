@@ -16,6 +16,7 @@
 price / change(涨跌幅%) / volume(累计成交量) / amount(累计成交额)
 / high / low / open_price / pre_close
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -140,7 +141,7 @@ class MarketSnapshotProvider(ABC):
         raise NotImplementedError('该数据源不支持逐分钟历史回填')
 
 
-class AkshareSpotProvider(MarketSnapshotProvider):
+class AkshareSpotProvider(MarketSnapshotProvider):  # pylint: disable=abstract-method  # 不支持逐分钟历史回填，基类默认抛 NotImplementedError 属文档化契约
     """基于 akshare spot 接口的实现（A/HK/US 三市场）。
 
     **指数与个股区分**：``stock_zh_a_spot_em`` 等 spot 接口只含个股；
@@ -354,7 +355,6 @@ class GmSnapshotProvider(MarketSnapshotProvider):
 
     def _today_ticks(self, gm_symbol):
         from django.utils import timezone
-        from .market_calendar import to_market_local
 
         broker = self._get_broker()
         local = to_market_local(timezone.now(), 'A')
@@ -368,7 +368,6 @@ class GmSnapshotProvider(MarketSnapshotProvider):
     def _today_bars(self, gm_symbol):
         """当日 60s bar（用于 tick 为空时的快照回退聚合）。"""
         from django.utils import timezone
-        from .market_calendar import to_market_local
 
         broker = self._get_broker()
         local = to_market_local(timezone.now(), 'A')
@@ -396,7 +395,6 @@ class GmSnapshotProvider(MarketSnapshotProvider):
         if not bars:
             return None
         from django.utils import timezone
-        from .market_calendar import to_market_local
 
         today = to_market_local(timezone.now(), 'A').date()
         # 倒序找第一根日期早于今日的 bar（含 eob/bob/date/time 等字段兼容）

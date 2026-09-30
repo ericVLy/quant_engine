@@ -1,4 +1,5 @@
-﻿import logging
+﻿# pylint: disable=too-many-ancestors  # DRF ModelViewSet 混入多个 mixin，继承链天然深
+import logging
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -109,7 +110,7 @@ class WatchlistViewSet(viewsets.GenericViewSet):
     serializer_class = WatchlistSerializer
 
     def get_object(self):
-        obj, created = Watchlist.objects.get_or_create(user=self.request.user)
+        obj, _ = Watchlist.objects.get_or_create(user=self.request.user)
         return obj
 
     def list(self, request, *args, **kwargs):

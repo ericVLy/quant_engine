@@ -62,7 +62,7 @@ class IndicatorTest(SimpleTestCase):
         highs = [10, 11, 12, 13, 14, 15, 14, 13, 12, 11]
         lows = [9, 9, 9, 10, 10, 11, 10, 9, 8, 8]
         closes = [9.5, 10, 11, 12, 13, 14, 13, 12, 11, 10]
-        k, d, j = ind.kdj(highs, lows, closes, 9)
+        k, _, _ = ind.kdj(highs, lows, closes, 9)
         self.assertIsNotNone(k)
         upper, mid, lower = ind.bollinger(closes, 5)
         self.assertIsNotNone(upper)

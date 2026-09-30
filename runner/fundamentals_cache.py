@@ -2,6 +2,7 @@
 
 在保证「指定历史时点不读取未来数据」的前提下，命中有效缓存即返回，过期/未命中回源刷新。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from datetime import timedelta
 
 from django.utils import timezone

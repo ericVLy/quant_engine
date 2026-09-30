@@ -350,5 +350,3 @@ class DashboardApiTest(APITestCase):
         self.assertTrue(resp.data['funds']['configured'])
         self.assertEqual(resp.data['funds']['total_capital'], '1000.00')
         self.assertEqual(resp.data['funds']['available_capital'], '900.00')
-
-

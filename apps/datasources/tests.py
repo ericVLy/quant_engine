@@ -1,12 +1,13 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import logging
-from django.test import TestCase, TransactionTestCase
-from rest_framework.test import APITestCase, APIClient, APITransactionTestCase
-from rest_framework import status
+from datetime import date
 from decimal import Decimal
-from datetime import date, datetime, timedelta
-import pandas as pd
 from unittest.mock import patch
-from django.db import connections
+
+import pandas as pd
+from django.test import TestCase, TransactionTestCase
+from rest_framework import status
+from rest_framework.test import APITestCase, APIClient, APITransactionTestCase
 
 from apps.watchlists.models import Symbol
 from apps.datasources.models import (
@@ -160,7 +161,7 @@ class KLineAPITest(APITransactionTestCase):
         self.symbol = Symbol.objects.create(
             code='000001', name='平安银行', market='A', exchange='SZSE'
         )
-        table_name = ensure_kline_table(self.symbol)
+        ensure_kline_table(self.symbol)
         runtime_model = get_runtime_kline_model(self.symbol)
         runtime_model.objects.using('kline').all().delete()
         for i in range(1, 6):
@@ -176,7 +177,7 @@ class KLineAPITest(APITransactionTestCase):
                 adj_factor=Decimal('1.0'),
                 turnover_rate=Decimal('0.5') * Decimal(i),
             )
-        logger.info(f"预置 5 条 K 线数据，日期 2024-01-11 至 2024-01-15")
+        logger.info("预置 5 条 K 线数据，日期 2024-01-11 至 2024-01-15")
         self.query_url = '/api/datasources/kline/query/'
         self.sync_url = '/api/datasources/kline/sync/'
 
@@ -440,7 +441,7 @@ class ServicesTest(TransactionTestCase):
             '换手率': [0.5],
         })
 
-        added, skipped, error = sync_kline_for_symbol(
+        added, _, error = sync_kline_for_symbol(
             self.symbol_a,
             start_date='2024-01-01',
             end_date='2024-01-10',
@@ -482,7 +483,7 @@ class ServicesTest(TransactionTestCase):
             '换手率': [0.5],
         })
 
-        added, skipped, error = sync_kline_for_symbol(
+        _, _, error = sync_kline_for_symbol(
             self.symbol_a,
             start_date='2024-01-01',
             end_date='2024-01-10',
@@ -545,9 +546,6 @@ class AshareCodeNormalizeTest(TestCase):
         self.assertEqual(_normalize_ashare_code('300750'), 'sz300750')
         self.assertEqual(_normalize_ashare_code('688981'), 'sh688981')
 
-    def test_short_code_zero_pad(self):
-        from apps.datasources.ashare import _normalize_ashare_code
-        self.assertEqual(_normalize_ashare_code('426'), 'sz000426')
     def test_short_code_zero_pad(self):
         from apps.datasources.ashare import _normalize_ashare_code
         self.assertEqual(_normalize_ashare_code('426'), 'sz000426')
@@ -703,7 +701,7 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
     @patch('apps.datasources.services.akshare_lib.stock_us_hist')
     def test_sync_new_us_symbol_end_to_end(self, mock_hist):
         mock_hist.return_value = self._akshare_hist_df()
-        added, skipped, error = sync_kline_for_symbol(
+        added, _, error = sync_kline_for_symbol(
             self.symbol_us, 'daily',
             start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
         )
@@ -718,7 +716,7 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
     def test_sync_hk_failure_returns_located_error(self, mock_hist):
         mock_hist.side_effect = Exception('network unreachable')
-        added, skipped, error = sync_kline_for_symbol(
+        added, _, error = sync_kline_for_symbol(
             self.symbol_hk, 'daily',
             start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
         )

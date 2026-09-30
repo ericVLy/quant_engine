@@ -98,7 +98,6 @@ KLINE_DB_ALIAS = 'kline'
 FUNDAMENTALS_ENABLED = False
 
 # 分时监控内部更新器（随 Django 服务启动；禁止单独的更新命令）
-import os  # noqa: E402  # pylint: disable=wrong-import-position
 
 MONITORING_UPDATER_ENABLED = os.getenv('MONITORING_UPDATER_ENABLED', '1').lower() in {'1', 'true', 'yes'}
 MONITORING_UPDATER_INTERVAL = int(os.getenv('MONITORING_UPDATER_INTERVAL', '60'))
@@ -186,4 +185,3 @@ LOGGING = {
 # SQLite 连接调优（WAL + busy_timeout）：多进程开发栈（run_dev_stack：Django + MCP）
 # 并发访问 SQLite 时消除 "database is locked"。仅 SQLite 生效，生产 MariaDB 不受影响。
 from quant_engine import db_tuning  # noqa: E402,F401  pylint: disable=unused-import
-

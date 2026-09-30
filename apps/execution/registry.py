@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel,too-many-positional-arguments  # 延迟导入以规避循环依赖/加载期副作用；构造器需注入执行依赖（编辑与执行分离），或兼容既有调用方
 from typing import Optional, Dict
 from django.core.cache import cache
 from .models import EventTypeRegistry
@@ -118,7 +119,7 @@ class EventRegistry:
                  plugin_id: str = None, description: str = '',
                  payload_schema: dict = None, base_event_type: str = None):
         cls._validate_registration(scope, base_event_type)
-        obj, created = EventTypeRegistry.objects.update_or_create(
+        obj, _ = EventTypeRegistry.objects.update_or_create(
             name=event_type,
             defaults={
                 'scope': scope,

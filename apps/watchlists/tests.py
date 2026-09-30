@@ -1,10 +1,12 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import logging
+from unittest.mock import patch
+
+import pandas as pd
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
-from unittest.mock import patch
-import pandas as pd
 
 from .models import Symbol, Group, Watchlist
 from .services import resolve_symbol_scope, sync_market_data
@@ -199,6 +201,7 @@ class WatchlistAPITest(APITestCase):
     def test_watchlist_auto_create(self):
         logger.info("测试 GET 自动创建 Watchlist")
         response = self.client.get(self.watchlist_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(Watchlist.objects.count(), 1)
         logger.info("Watchlist 自动创建成功")
 
@@ -212,7 +215,7 @@ class ServicesTest(TestCase):
         self.group1.symbols.add(self.symbol1, self.symbol2)
         self.group2 = Group.objects.create(name='g2')
         self.group2.symbols.add(self.symbol1)
-        logger.info(f"创建 2 个标、2 个分组")
+        logger.info("创建 2 个标、2 个分组")
 
     def test_resolve_symbol_scope_all(self):
         logger.info("测试解析 symbol_scope: all")

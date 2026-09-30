@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from django.contrib import admin
 from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, Alert, AlertChannel, AccountFundConfig, FundAllocation
 
@@ -43,7 +44,7 @@ class AlertAdmin(admin.ModelAdmin):
     list_filter = ('alert_type', 'severity', 'status', 'in_app_notified', 'email_notified')
     search_fields = ('title', 'message', 'error_code')
     readonly_fields = ('in_app_notified', 'email_notified', 'notification_error', 'created_at', 'updated_at')
-    
+
     fieldsets = (
         ('基本信息', {
             'fields': ('alert_type', 'severity', 'status', 'title', 'message', 'error_code')
@@ -62,9 +63,9 @@ class AlertAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
-    
+
     actions = ['acknowledge_alerts', 'resolve_alerts']
-    
+
     def acknowledge_alerts(self, request, queryset):
         """批量确认告警"""
         from django.utils import timezone
@@ -75,7 +76,7 @@ class AlertAdmin(admin.ModelAdmin):
         )
         self.message_user(request, f'已确认 {updated} 个告警')
     acknowledge_alerts.short_description = '确认选中的告警'
-    
+
     def resolve_alerts(self, request, queryset):
         """批量解决告警"""
         from django.utils import timezone
@@ -92,7 +93,7 @@ class AlertAdmin(admin.ModelAdmin):
 class AlertChannelAdmin(admin.ModelAdmin):
     list_display = ('id', 'channel_type', 'is_enabled', 'min_severity', 'created_at')
     list_filter = ('channel_type', 'is_enabled', 'min_severity')
-    
+
     fieldsets = (
         ('基本配置', {
             'fields': ('channel_type', 'is_enabled')
@@ -105,9 +106,9 @@ class AlertChannelAdmin(admin.ModelAdmin):
             'description': '仅当渠道类型为"邮件通知"时使用'
         }),
     )
-    
+
     actions = ['enable_channels', 'disable_channels']
-    
+
     def enable_channels(self, request, queryset):
         """批量启用渠道"""
         updated = queryset.update(is_enabled=True)
@@ -116,7 +117,7 @@ class AlertChannelAdmin(admin.ModelAdmin):
         alert_service.reload_channels()
         self.message_user(request, f'已启用 {updated} 个告警渠道')
     enable_channels.short_description = '启用选中的渠道'
-    
+
     def disable_channels(self, request, queryset):
         """批量禁用渠道"""
         updated = queryset.update(is_enabled=False)

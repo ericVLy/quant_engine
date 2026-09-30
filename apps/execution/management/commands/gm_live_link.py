@@ -11,6 +11,7 @@
   - 默认 volume 极小（100 股），避免激进的成交与敞口；
   - 无论成功与否，命令结束前会尝试撤掉仍未成交的挂单，避免遗留敞口。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 
 import time
 from decimal import Decimal

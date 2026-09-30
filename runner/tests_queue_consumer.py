@@ -11,6 +11,8 @@
 Django ``TestCase`` 的事务对其他连接不可见，所以跨线程的用例用 ``TransactionTestCase``
 （数据已提交）。不跨线程的用例仍用 ``TestCase``。
 """
+# pylint: disable=protected-access  # 测试需访问私有成员以验证内部状态
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -185,7 +187,7 @@ class SchedulerAsyncLoopTest(TransactionTestCase):
         executed: list[tuple] = []
 
         class RecordingService(PlanExecutionService):
-            def run(self, plan_obj, symbol, payload=None):
+            def run(self, plan_obj, symbol, payload=None):  # pylint: disable=arguments-renamed  # 沿用 plan_obj 以免遮蔽用例里的外层 plan 局部变量
                 result = super().run(plan_obj, symbol, payload)
                 executed.append((plan_obj.pk, symbol))
                 return result
@@ -591,7 +593,7 @@ class RestartDurabilityTest(TransactionTestCase):
         executed = []
 
         class RecordingService(PlanExecutionService):
-            def run(self, plan_obj, symbol, payload=None):
+            def run(self, plan_obj, symbol, payload=None):  # pylint: disable=arguments-renamed  # 沿用 plan_obj 以免遮蔽用例里的外层 plan 局部变量
                 result = super().run(plan_obj, symbol, payload)
                 executed.append((plan_obj.pk, symbol))
                 return result
@@ -619,5 +621,3 @@ class RestartDurabilityTest(TransactionTestCase):
         self.assertEqual(runs.count(), 1)                # 未产生第二条运行
         self.assertEqual(executed, [(plan.pk, '000001')])
         self.assertEqual(runs.get().status, 'completed')
-
-

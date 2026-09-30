@@ -195,8 +195,7 @@ def _event_stream(symbol, interval):
                     'session_status': status,
                 })
             yield format_event('tick', payload)
-    except GeneratorExit:
-        # 客户端断开：正常结束流
-        raise
     except Exception as exc:  # pylint: disable=broad-except
+        # GeneratorExit（客户端断开）继承自 BaseException，不会被此处捕获，
+        # 会自然向上传播从而正常结束生成器，无需显式 except 后再 raise。
         yield format_event('error', {'detail': str(exc)})

@@ -8,6 +8,7 @@
 fake 的错误返回契约与真实服务一致（``is_error=True`` + 通用文本，
 服务端异常详情只落在服务端日志）。
 """
+# pylint: disable=protected-access  # 测试需访问私有成员以验证内部状态
 import asyncio
 
 from decimal import Decimal
@@ -577,7 +578,3 @@ class SmokeSyncStepsTest(TestCase):
         runner = McpSmokeRunner()
         self.assertEqual(runner.purge_runs(), 0)
         self.assertEqual(runner.steps, [])
-
-
-
-

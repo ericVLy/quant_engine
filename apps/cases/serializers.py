@@ -1,3 +1,5 @@
+# pylint: disable=too-many-statements  # 已知偏大：编排型主流程，拆分需专门重构（暂不处理）
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import math
 
 from rest_framework import serializers

@@ -9,6 +9,7 @@
 
 未配置任何资金额度时，运行时不做资金拦截（向后兼容既有行为）。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from decimal import Decimal
 
 from django.db import transaction

@@ -3,6 +3,7 @@
 重点覆盖 gm ``Cash`` 字段归一、**失败绝不写 0** 的安全约定、TTL 刷新守卫、
 批量同步的失败隔离，以及与执行服务 / gm 适配器 / 管理命令的接线。
 """
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
@@ -534,5 +535,3 @@ class SyncAccountFundsCommandTest(TestCase):
         with patch('runner.gm_adapter.GmBrokerAdapter', side_effect=RuntimeError('no token')):
             with self.assertRaisesRegex(CommandError, 'gm 账户查询通道'):
                 self._run(account_id=ACCOUNT)
-
-

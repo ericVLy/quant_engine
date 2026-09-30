@@ -24,6 +24,7 @@
 按 ``(Plan, 标的)`` 多路并发，单槽无法表达并发事实，自动归一会产生误导，故仍只由
 REST 手动 ``/start`` ``/stop`` 流转（见 README「已知边界与限制」）。
 """
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from __future__ import annotations
 
 import logging

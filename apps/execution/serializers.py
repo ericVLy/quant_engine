@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from rest_framework import serializers
 from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel, NodeRun
 from .funds import FundError, allocate_funds
@@ -108,6 +109,11 @@ class FundAllocationSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ('used_amount', 'status', 'level', 'created_at', 'updated_at')
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # validate() 阶段已原子完成资金占用，create()/update() 只需回传该结果
+        self._allocation = None
+
     def validate(self, attrs):
         plan = attrs.get('plan') or getattr(self.instance, 'plan', None)
         suite = attrs.get('suite') or getattr(self.instance, 'suite', None)
@@ -145,7 +151,7 @@ class AlertSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     plan_name = serializers.CharField(source='plan.name', read_only=True, allow_null=True)
     suite_run_display = serializers.CharField(source='suite_run.__str__', read_only=True, allow_null=True)
-    
+
     class Meta:
         model = Alert
         fields = '__all__'
@@ -156,7 +162,7 @@ class AlertChannelSerializer(serializers.ModelSerializer):
     """告警渠道配置序列化器"""
     channel_type_display = serializers.CharField(source='get_channel_type_display', read_only=True)
     min_severity_display = serializers.CharField(source='get_min_severity_display', read_only=True)
-    
+
     class Meta:
         model = AlertChannel
         # 显式白名单（弃用 '__all__'）：渠道配置含收件人邮箱等 PII，新增字段须显式放行（N-05）
@@ -167,32 +173,32 @@ class AlertChannelSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         )
         read_only_fields = ('created_at', 'updated_at')
-    
+
     def validate_alert_types(self, value):
         """验证告警类型列表"""
         if not isinstance(value, list):
             raise serializers.ValidationError("alert_types 必须是列表")
-        
+
         valid_types = [choice[0] for choice in Alert.ALERT_TYPE_CHOICES]
         for alert_type in value:
             if alert_type not in valid_types:
                 raise serializers.ValidationError(f"无效的告警类型: {alert_type}")
-        
+
         return value
-    
+
     def validate_email_recipients(self, value):
         """验证邮件收件人列表"""
         if not isinstance(value, list):
             raise serializers.ValidationError("email_recipients 必须是列表")
-        
+
         for email in value:
             if not isinstance(email, str) or '@' not in email:
                 raise serializers.ValidationError(f"无效的邮件地址: {email}")
-        
+
         return value
 
 
-class AlertActionSerializer(serializers.Serializer):
+class AlertActionSerializer(serializers.Serializer):  # pylint: disable=abstract-method  # 仅承载告警动作入参校验，不经 create/update 落库
     """告警操作序列化器"""
     action = serializers.ChoiceField(choices=['acknowledge', 'resolve'])
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)

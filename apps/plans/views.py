@@ -1,11 +1,13 @@
-﻿from rest_framework import status, viewsets
+﻿# pylint: disable=too-many-ancestors  # DRF ModelViewSet 混入多个 mixin，继承链天然深
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+
+from apps.execution.state_machine import start_plan, stop_plan, StateMachineError
 
 from .models import Plan, PlanVersion
 from .serializers import PlanSerializer
 from .services import PlanError, delete_plan, publish_plan, resolve_plan_symbols, rollback_plan
-from apps.execution.state_machine import start_plan, stop_plan, StateMachineError
 
 
 class PlanViewSet(viewsets.ModelViewSet):
@@ -72,7 +74,7 @@ class PlanViewSet(viewsets.ModelViewSet):
     def rollback(self, request, pk=None):
         try:
             version = int(request.data.get('version'))
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError):
             return Response({'detail': 'version 必须是整数'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             plan = rollback_plan(self.get_object(), version)

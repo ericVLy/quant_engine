@@ -1,7 +1,6 @@
 import logging
 import akshare as ak
-from django.core.exceptions import ValidationError
-from .models import Symbol, Group
+from .models import Symbol
 
 
 def infer_market_from_code(code):
@@ -70,7 +69,7 @@ def is_a_share_index(code, exchange=''):
     return False
 
 
-def resolve_a_share_exchange(code, exchange=''):
+def resolve_a_share_exchange(code, exchange=''):  # pylint: disable=too-many-return-statements  # 交易所/名称归一是多分支查表，扁平早返回比深嵌套更易读
     """解析 6 位 A 股代码的交易所（SSE/SZSE/BSE），指数与个股同规则。
 
     - ``exchange`` 显式给出且可识别时直接归一化采用（最高优先级）；
@@ -106,7 +105,7 @@ def resolve_a_share_exchange(code, exchange=''):
     return 'SZSE'
 
 
-def resolve_symbol_name(code, market=None):
+def resolve_symbol_name(code, market=None):  # pylint: disable=too-many-return-statements  # 交易所/名称归一是多分支查表，扁平早返回比深嵌套更易读
     """通过代码和市场类型解析对应名称，失败时返回安全回退值。"""
     code_str = str(code or '').strip()
     if not code_str:
@@ -194,18 +193,17 @@ def resolve_symbol_scope(symbol_scope):
     scope_type = symbol_scope.get('type')
     if scope_type == 'all':
         return Symbol.objects.all()
-    elif scope_type == 'groups':
+    if scope_type == 'groups':
         group_ids = symbol_scope.get('group_ids', [])
         if not group_ids:
             return Symbol.objects.none()
         return Symbol.objects.filter(groups__id__in=group_ids).distinct()
-    elif scope_type == 'symbols':
+    if scope_type == 'symbols':
         codes = symbol_scope.get('symbol_codes', [])
         if not codes:
             return Symbol.objects.none()
         return Symbol.objects.filter(code__in=codes)
-    else:
-        raise ValueError(f"不支持的 symbol_scope 类型: {scope_type}")
+    raise ValueError(f"不支持的 symbol_scope 类型: {scope_type}")
 
 
 def case_symbol_scope(case):
@@ -240,7 +238,7 @@ def sync_market_data():
         name = row['name']
 
         # 去除可能的市场后缀，并归一化为 6 位数字
-        from .services import normalize_a_share_code, resolve_a_share_exchange
+        # （直接用本模块函数，勿再 from .services import —— 那是同模块自导入）
         code = normalize_a_share_code(code)
 
         # 交易所解析：exchange 字段优先；否则按代码段推断（指数与个股同规则）
@@ -249,7 +247,7 @@ def sync_market_data():
         market = 'A'
 
         try:
-            obj, created_flag = Symbol.objects.update_or_create(
+            _, created_flag = Symbol.objects.update_or_create(
                 code=code,
                 defaults={
                     'name': name,

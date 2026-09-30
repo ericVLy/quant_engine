@@ -5,6 +5,7 @@
 实际只有「交易时段」和「volume > 0」在生效——单笔/每日/总仓位限额形同虚设。
 本文件守住「Plan 声明的限额必须真的拦截订单」这一契约。
 """
+# pylint: disable=import-outside-toplevel,protected-access  # 延迟导入以规避循环依赖/加载期副作用；测试需访问私有成员以验证内部状态
 from datetime import datetime
 from datetime import timezone as dt_timezone
 from decimal import Decimal
@@ -260,7 +261,7 @@ class PlanRiskLimitEnforcementTest(TestCase):
         self.assertIn('交易时段', log.error_msg)
 
     def test_daily_limit_accumulates_amount_not_unit_price(self):
-        from apps.execution.models import ExecutionLog, Order
+        from apps.execution.models import ExecutionLog
 
         plan = _executable_plan(
             name='risk-daily', order={'direction': 'buy', 'price': 10, 'volume': 10},
