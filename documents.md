@@ -312,6 +312,16 @@ class Watchlist(models.Model):
 | 编号 | 需求描述 | 实现文件 |
 |------|----------|----------|
 | ~~D-01~~ | ~~数据源配置 CRUD（AkShare/TuShare/TDX/YFinance）~~ | ❌ **已移除（2026-09-15）**：用户自配第三方源不可行（系统无法适配异构数据结构）；`DataSource` 模型与 `/api/datasources/sources/` 已删除（迁移 0004），数据获取收敛为内置 ashare + gm 适配层；前端同步清理——`/datasources` 页移除数据源配置表格/新增/编辑对话框与 `datasourcesApi.sources/createSource/updateSource/deleteSource` 封装（页面保留快照/同步日志/K 线查询工具），`vue-tsc -b` 0 错误 + `vite build` 通过 |
+| D-11 | **K 线附图指标扩展（前端，2026-10-01）** | ✅ 完成（`views/Datasources.vue`：附图 4 → **10 个**，新增 WR(14)/CCI(14)/ATR(14)/OBV/VR(26)/DMI(14)；同时把每指标手写 grid/坐标轴/序列的样板重构为**声明式 `SubIndicatorDef` 定义表**，新增指标只需追加一条定义） | `quant-frontend/src/views/Datasources.vue` |
+
+**D-11 附图口径与实现约定（2026-10-01）**
+
+- 全部指标在浏览器端按 `/api/datasources/kline/query/` 返回的**日线序列**实时计算（`toFixed(4)`，预热期返回 `null` 断点），后端零改动、零新增接口。
+- 新增指标口径：`WR(14)=(HH−C)/(HH−LL)×100`（固定 0–100 轴，参考 80/20）；`CCI(14)=(TP−MA(TP,14))/(0.015×平均绝对偏差)`（对称轴，保 ±100 可见）；`ATR(14)` 为 `TR=max(H−L,|H−preC|,|L−preC|)` 的 **Wilder 递推**平滑（首值取窗口均值，其后 `prev+(x−prev)/14`）；`OBV` 按收盘涨跌累加成交量（首根无前收可比，不计入）；`VR(26)` 为涨跌日量之比含收盘价修正（参考 150/50）；`DMI(14)` 出 +DI/−DI/ADX（参考 25，ADX>25 视为趋势成立）。
+- **ADX 预热期处理**：DX 预热期为 `null`，需先压缩有效段做 Wilder 平滑再映射回原下标；若把预热期当 `0` 参与平滑，ADX 会被系统性拉低，产生"恒在 25 以下"的假象——已按压缩口径实现并有回归断言。
+- 实现约定：① grid 占位、坐标轴、序列由**同一次 `forEach`（`gridIndex = index + 1`）**生成，与 `grids` 下标严格对齐，取消勾选即不占空间；② `SUB_INDICATOR_FLAGS` 决定附图自上而下顺序、`chartHeight` 与 `watch` 监听范围；③ 参考线以 `silent` 渲染并**按 `silent` 统一排除出图例**（旧实现按 `'RSI 70'/'RSI 30'` 硬编码字符串过滤，扩展后会漏掉新指标参考线）；④ `setOption(option, true)` 全量重绘是取消勾选不残留旧图的前提，不可改为增量合并。
+- 验证：`vue-tsc -b` + `vite build` 通过（0 错误）；另用一次性 Node 脚本对 6 个新指标做 **26 项数值断言**（WR 边界/区间无波动退化 50、CCI 多空对称超买超卖、ATR 首值=窗口均值与单步递推步长、OBV 首根不计与涨跌平处理、VR 预热期为周期、DMI 多空方向与 ADX>25、极小样本不崩溃等）全部通过。
+- 边界：RSI 沿用既有实现（窗口累计涨跌幅之比，非 Wilder 平滑），与部分行情软件口径可能不同，本轮未改动；未做复权差异处理，指标直接使用接口返回的原始 OHLCV。
 | D-02 | 实时快照存储（仅保留最新值，`OneToOneField`） | `models.py` (RealtimeSnapshot) |
 | D-03 | K线抽象基类（定义公共字段，不建表） | `models.py` (AbstractKLine) |
 | D-04 | A股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
@@ -1180,6 +1190,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 
 - 路由 `/monitoring`，导航菜单「分时监控」。
 - ECharts 分时图：现价折线（蓝）+ 均价黄线 + 底部量能柱 + 涨跌幅着色。
+- **量能附图口径（2026-10-01 修正）**：后端 `volume` / `amount` 为**当日累计值**，附图柱状一律画**分钟增量**（相邻累计值差分）；缺口分钟不画柱（避免假天量）；柱子按**当分钟涨跌**着色（红涨绿跌，首根以昨收为基准），并叠加量能均线 **量MA5 / 量MA10**；量能轴 0 基线；tooltip 同时给出分钟量 / 累计量 / 累计额。
 - X 轴按市场本地时间渲染（`local_time` 字段）。
 - **SSE 持久化连接**（EventSource 订阅 `/api/monitoring/intraday/stream/`）替代 15s 轮询：`snapshot` 全量 → `tick` 按 ts 增量合并（非全量重绘）→ `session` 状态变化即时更新；连接连续失败且未收到消息时自动降级回 HTTP 轮询。
 - 非交易时段显示「已收盘」提示。
@@ -1220,6 +1231,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | X 轴固定刻度（2026-09-14） | X 轴按市场固定为全交易分钟（与后端 `market_calendar` 时段一致：A=240 / HK=330 / US=390），不随已有数据伸缩；序列数据按 `local_time` 对齐固定刻度、缺失为 null；刻度只标注每 30 分钟与收盘点 |
 | Y 轴最小振幅（2026-09-14） | 价格轴以昨收为中心：`±max(实际波动, 最小振幅%)×1.05`；默认 2%，图表右上 `el-input-number`（0.1~20，步进 0.1）可改，保存在 `localStorage`（`monitoring.yMinSpanPct`），刷新后保留 |
 | SSE 持久化连接（2026-09-14） | `api/monitoring.ts` 新增 `subscribeIntradayStream()`（EventSource 订阅 `/api/monitoring/intraday/stream/`，处理 `snapshot`/`tick`/`session` 事件）；`Monitoring.vue` 用 SSE 替代 15s 轮询（`tick` 按 ts 增量合并），连续 3 次错误且未收到消息自动降级回 HTTP 轮询，状态标签显示「实时推送 (SSE) / 轮询中（降级）/ 推送已暂停」 |
+| 量能附图语义修正（2026-10-01） | 后端 `IntradayPoint.volume` 是**当日累计成交量**（gm `cum_volume` / akshare spot 累计口径），原实现直接把累计值按分钟画柱，得到的是一条单调递增的斜坡，量能分布信息全部丢失。现改为 `computeMinuteVolumes`（相邻累计值差分）：首个有效点取开盘至今累计量；数据缺口（缺前一交易分钟）置 `null` 不画柱——把多分钟的量压到一根柱上会造出假天量；累计值回退夹到 0 防负柱。柱子着色由「当日累计涨跌幅」改为 `computeMinuteDirections`（当分钟价 vs 上一分钟价，首根以昨收为基准）——原口径下单边行情全天同色，丢失当分钟多空信息。新增量能均线 **量MA5 / 量MA10**（`computeMovingAverage`，窗口内有效样本不足即返回 null，不用残缺样本伪造均线）；量能轴强制 `min: 0`（非 0 基线会视觉放大分钟量差异）+ `splitNumber: 2`；tooltip 同时给出**分钟量 / 累计量 / 累计额**（原仅一个「成交量」且是累计值，与柱高对不上）；量能 grid 高度 10% → 12% 容纳均线，指标子图起点 55% → 56%；图例与面板图例同步（现价/均价/成交量/量MA5/量MA10，红色=分钟上涨、绿色=分钟下跌）。`vue-tsc -b` 0 错误、`vite build` 通过（Monitoring 15.71 kB JS） |
 | 验证 | `vue-tsc -b` 0 错误 + `vite build` 通过（Monitoring 产物分块已生成） |
 
 
