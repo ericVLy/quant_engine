@@ -16,9 +16,14 @@ from apps.datasources.models import (
 )
 from apps.datasources.services import (
     sync_kline_for_symbol, sync_all_symbols,
-    get_kline_table_name, query_kline_table, fetch_kline_from_ashare
+    get_kline_table_name, query_kline_table, fetch_kline_from_ashare,
+    fetch_kline_from_ashare_tx, _tx_window_filter,
 )
-from apps.datasources.ashare import get_price_day_tx, get_price_sina
+from apps.datasources.ashare import (
+    get_price_day_tx, get_price_sina,
+    get_price_day_tx_hk, get_price_day_tx_us,
+    _normalize_hk_code_tx, _us_exchange_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -551,13 +556,27 @@ class AshareCodeNormalizeTest(TestCase):
         self.assertEqual(_normalize_ashare_code('426'), 'sz000426')
 
 
+def _tencent_unavailable(func):
+    """固定走东财回退路径的标记装饰器。
+
+    腾讯升为主源后，仅 mock 东财接口的用例会真的打到腾讯网络（结果不确定且很慢）。
+    凡是用例**要断言东财通道自身行为**（代码补零、交易所前缀、列名规整）的，
+    都必须显式钉在东财路径上，避免隐式依赖外网。
+    """
+    return patch(
+        'apps.datasources.services.fetch_kline_from_ashare_tx',
+        side_effect=Exception('tencent 主源不可用（测试固定走东财路径）'),
+    )(func)
+
+
 class MultiMarketKlineFetchTest(APITransactionTestCase):
     """港股/美股日线拉取（akshare 东财）与按市场分派防回归。
 
     背景：拉取层原先只实现 A 股（ashare/sina/腾讯），新增港股标的时
     `_normalize_ashare_code('00700')` 会把港股代码补零成 `000700` 当深市
     A 股拉取（错误行情静默入库）；美股代码 sina 不识别，永远返回空。
-    修复后 HK/US 分派到 akshare 东财接口，并禁止再落入 A 股 ashare 通道。
+    修复后 HK/US 分派到港美股专用通道（腾讯为主源、东财为回退），
+    并禁止再落入 A 股 ashare 通道。
     """
 
     databases = ['default', 'kline']
@@ -590,7 +609,8 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
     # ---- 港股 ----
 
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
-    def test_fetch_hk_kline_via_akshare(self, mock_hist):
+    @_tencent_unavailable
+    def test_fetch_hk_kline_via_akshare(self, mock_tx, mock_hist):
         mock_hist.return_value = self._akshare_hist_df()
         df = fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31', 'qfq')
         self.assertEqual(len(df), 2)
@@ -603,23 +623,33 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
             self.assertIn(col, df.columns)
 
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
-    def test_fetch_hk_short_code_padded_to_five(self, mock_hist):
+    @_tencent_unavailable
+    def test_fetch_hk_short_code_padded_to_five(self, mock_tx, mock_hist):
         mock_hist.return_value = self._akshare_hist_df()
         symbol = Symbol.objects.create(code='700', name='腾讯', market='HK', exchange='HKEX')
         fetch_kline_from_ashare(symbol, '2024-01-01', '2024-01-31')
         self.assertEqual(mock_hist.call_args.kwargs['symbol'], '00700')
 
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
-    def test_fetch_hk_empty_result_raises_located_error(self, mock_hist):
+    def test_fetch_hk_empty_result_raises_located_error(self, mock_hist, mock_tx):
+        # 两通道都无数据才报错：腾讯（主源）空 → 回退东财 → 东财也空 → 可定位 ValueError
         mock_hist.return_value = pd.DataFrame()
+        mock_tx.side_effect = ValueError('腾讯通道未取到数据')
         with self.assertRaises(ValueError) as ctx:
             fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
-        self.assertIn('00700', str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn('00700', message)
+        # 报错须同时说明两条通道，便于从同步日志定位是哪一侧的问题
+        self.assertIn('腾讯通道', message)
+        self.assertIn('东财通道', message)
+        mock_tx.assert_called_once()
 
     # ---- 美股 ----
 
     @patch('apps.datasources.services.akshare_lib.stock_us_hist')
-    def test_fetch_us_kline_prefix_fallback(self, mock_hist):
+    @_tencent_unavailable
+    def test_fetch_us_kline_prefix_fallback(self, mock_tx, mock_hist):
         # 105(NASDAQ) 失败 → 106(NYSE) 命中
         mock_hist.side_effect = [Exception('not found'), self._akshare_hist_df()]
         df = fetch_kline_from_ashare(self.symbol_us, '2024-01-01', '2024-01-31', 'qfq')
@@ -629,16 +659,20 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
         self.assertEqual(mock_hist.call_args_list[1].kwargs['symbol'], '106.AAPL')
 
     @patch('apps.datasources.services.akshare_lib.stock_us_hist')
-    def test_fetch_us_explicit_prefix_used_directly(self, mock_hist):
+    @_tencent_unavailable
+    def test_fetch_us_explicit_prefix_used_directly(self, mock_tx, mock_hist):
         mock_hist.return_value = self._akshare_hist_df()
         symbol = Symbol.objects.create(code='105.TSLA', name='特斯拉', market='US', exchange='NASDAQ')
         fetch_kline_from_ashare(symbol, '2024-01-01', '2024-01-31')
         self.assertEqual(mock_hist.call_count, 1)
         self.assertEqual(mock_hist.call_args.kwargs['symbol'], '105.TSLA')
 
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
     @patch('apps.datasources.services.akshare_lib.stock_us_hist')
-    def test_fetch_us_all_prefixes_fail_raises_located_error(self, mock_hist):
+    def test_fetch_us_all_prefixes_fail_raises_located_error(self, mock_hist, mock_tx):
+        # 腾讯（主源）失败 → 回退东财 → 东财三前缀全失败 → 可定位 ValueError
         mock_hist.side_effect = Exception('connection down')
+        mock_tx.side_effect = ValueError('腾讯通道未取到数据')
         with self.assertRaises(ValueError) as ctx:
             fetch_kline_from_ashare(self.symbol_us, '2024-01-01', '2024-01-31')
         message = str(ctx.exception)
@@ -651,7 +685,8 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
     @patch('apps.datasources.services.akshare_lib.stock_us_hist')
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
     @patch('apps.datasources.services.ashare_lib.get_price')
-    def test_hk_us_never_routed_through_ashare(self, mock_get_price, mock_hk, mock_us):
+    @_tencent_unavailable
+    def test_hk_us_never_routed_through_ashare(self, mock_tx, mock_get_price, mock_hk, mock_us):
         mock_hk.return_value = self._akshare_hist_df()
         mock_us.return_value = self._akshare_hist_df()
         fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
@@ -683,8 +718,57 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
 
     # ---- 新增港股/美股标的 → 同步入库 端到端 ----
 
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
+    def test_sync_hk_end_to_end_tencent_primary(self, mock_tx):
+        """腾讯为主源的港股端到端入库：不 mock 任何远端 HTTP，只 mock 通道函数。"""
+        mock_tx.return_value = pd.DataFrame({
+            'date': ['2024-01-02', '2024-01-03'], 'open': [430.0, 432.0],
+            'close': [432.0, 435.0], 'high': [439.0, 436.0], 'low': [431.0, 430.0],
+            'volume': [18015236, 17000000], 'amount': [7.8e9, 7.4e9],
+        })
+        added, skipped, error = sync_kline_for_symbol(
+            self.symbol_hk, 'daily',
+            start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
+        )
+        self.assertIsNone(error)
+        self.assertEqual(added, 2)
+        rows = query_kline_table(self.symbol_hk, date(2024, 1, 1), date(2024, 1, 31))
+        self.assertEqual(len(rows), 2)
+        # 币种等市场元数据仍需正确落到 extra，不能因换通道丢失
+        self.assertEqual(rows[0]['extra']['currency'], 'HKD')
+        self.assertEqual(rows[0]['symbol'], '00700')
+        self.assertEqual(rows[0]['close'], 432.0)
+        # 重复同步应命中增量跳过，不重复写入
+        added_again, skipped_again, error_again = sync_kline_for_symbol(
+            self.symbol_hk, 'daily',
+            start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
+        )
+        self.assertIsNone(error_again)
+        self.assertEqual(added_again, 0)
+        self.assertEqual(skipped_again, 2)
+
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
+    def test_sync_us_end_to_end_tencent_primary(self, mock_tx):
+        """腾讯为主源的美股端到端入库。"""
+        mock_tx.return_value = pd.DataFrame({
+            'date': ['2024-01-02', '2024-01-03'], 'open': [185.0, 182.0],
+            'close': [185.64, 184.25], 'high': [186.5, 183.9], 'low': [184.6, 181.7],
+            'volume': [58000000, 61000000], 'amount': [1.07e10, 1.12e10],
+        })
+        added, _, error = sync_kline_for_symbol(
+            self.symbol_us, 'daily',
+            start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
+        )
+        self.assertIsNone(error)
+        self.assertEqual(added, 2)
+        rows = query_kline_table(self.symbol_us, date(2024, 1, 1), date(2024, 1, 31))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['extra']['split_factor'], 1.0)
+        self.assertEqual(rows[0]['symbol'], 'AAPL')
+
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
-    def test_sync_new_hk_symbol_end_to_end(self, mock_hist):
+    @_tencent_unavailable
+    def test_sync_new_hk_symbol_end_to_end(self, mock_tx, mock_hist):
         mock_hist.return_value = self._akshare_hist_df()
         added, skipped, error = sync_kline_for_symbol(
             self.symbol_hk, 'daily',
@@ -699,7 +783,8 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
         self.assertEqual(rows[0]['symbol'], '00700')
 
     @patch('apps.datasources.services.akshare_lib.stock_us_hist')
-    def test_sync_new_us_symbol_end_to_end(self, mock_hist):
+    @_tencent_unavailable
+    def test_sync_new_us_symbol_end_to_end(self, mock_tx, mock_hist):
         mock_hist.return_value = self._akshare_hist_df()
         added, _, error = sync_kline_for_symbol(
             self.symbol_us, 'daily',
@@ -713,12 +798,191 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
 
     # ---- 同步失败语义：拉取异常透传为可定位 error（不静默） ----
 
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
-    def test_sync_hk_failure_returns_located_error(self, mock_hist):
+    def test_sync_hk_failure_returns_located_error(self, mock_hist, mock_tx):
+        # 同步层：两通道均失败时，added=0 且 error 可定位（此处必须 mock 腾讯通道，
+        # 否则腾讯主源会打到真实网络，导致用例变慢且结果不确定）
         mock_hist.side_effect = Exception('network unreachable')
+        mock_tx.side_effect = ValueError('腾讯通道未取到数据')
         added, _, error = sync_kline_for_symbol(
             self.symbol_hk, 'daily',
             start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
         )
         self.assertEqual(added, 0)
         self.assertIn('network unreachable', error or '')
+        self.assertIn('腾讯通道', error or '')
+
+
+class TencentChannelNormalizeTest(TestCase):
+    """腾讯港美股通道：代码规整与成交额量纲（对齐腾讯真实返回结构）。"""
+
+    def test_hk_code_zero_padded_to_five(self):
+        # 实测：hk700 返回空数组，必须补零为 hk00700
+        for raw in ['700', '00700', 'hk00700', 'HK$00700', '00700.HK']:
+            self.assertEqual(_normalize_hk_code_tx(raw), 'hk00700', raw)
+        self.assertEqual(_normalize_hk_code_tx('9988'), 'hk09988')
+
+    def test_us_exchange_suffix_candidates(self):
+        self.assertEqual(_us_exchange_candidates('AAPL'), ['AAPL.OQ', 'AAPL.N', 'AAPL.A'])
+        self.assertEqual(_us_exchange_candidates('aapl'), ['AAPL.OQ', 'AAPL.N', 'AAPL.A'])
+        # 已带后缀 → 不再回退
+        self.assertEqual(_us_exchange_candidates('AAPL.OQ'), ['AAPL.OQ'])
+        self.assertEqual(_us_exchange_candidates('usBABA.N'), ['BABA.N'])
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_hk_amount_converted_from_wan_yuan(self, mock_get):
+        """港股行第 9 列是**万元**，需 ×1e4；否则成交额会缩小 1e4 倍。"""
+        payload = {'code': 0, 'data': {'hk00700': {'qfqday': [
+            ['2026-09-29', '439.4', '432.0', '439.4', '431.6', '18015236.0',
+             {'cqr': '2026-09-29'}, '0.200', '780870.203'],
+        ]}}}
+        mock_get.return_value.json.return_value = payload
+        df = get_price_day_tx_hk('700', count=1)
+        self.assertAlmostEqual(float(df['amount'].iloc[0]), 780870.203 * 10000, places=2)
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_us_amount_not_scaled(self, mock_get):
+        """美股成交额为**美元**（部分代码 11 列含该字段），系数必须为 1。"""
+        payload = {'code': 0, 'data': {'usPDD.OQ': {'qfqday': [
+            ['2026-09-30', '77.65', '77.94', '78.23', '77.29', '6191074',
+             {}, '0.43', '481596571', '', '0.43'],
+        ]}}}
+        mock_get.return_value.json.return_value = payload
+        df = get_price_day_tx_us('PDD', count=1)
+        self.assertAlmostEqual(float(df['amount'].iloc[0]), 481596571.0, places=2)
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_row_without_amount_drops_column_for_fallback(self, mock_get):
+        """6 列美股行无成交额 → 必须丢弃 amount 列，让上游 close*volume 兜底生效。
+
+        留 NaN 会被上游 fillna(0) 归零，导致成交额整体丢失（实测 AAPL/BABA 为该形态）。
+        """
+        payload = {'code': 0, 'data': {'usAAPL.OQ': {'qfqday': [
+            ['2026-09-30', '330.80', '333.02', '339.50', '330.14', '49988558.00'],
+        ]}}}
+        mock_get.return_value.json.return_value = payload
+        df = get_price_day_tx_us('AAPL.OQ', count=1)
+        self.assertNotIn('amount', df.columns)
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_us_tries_exchange_suffixes_until_data(self, mock_get):
+        """接口对无效代码返回 200 + 空数组，只能靠后缀回退定位交易所。"""
+        empty = {'code': 0, 'data': {'usXXX.OQ': {'day': []}}}
+        hit = {'code': 0, 'data': {'usXXX.N': {'qfqday': [
+            ['2026-09-30', '10.0', '10.5', '10.6', '9.9', '1000'],
+        ]}}}
+        mock_get.side_effect = [
+            type('R', (), {'json': lambda s: empty, 'raise_for_status': lambda s: None})(),
+            type('R', (), {'json': lambda s: hit, 'raise_for_status': lambda s: None})(),
+        ]
+        df = get_price_day_tx_us('XXX', count=1)
+        self.assertEqual(len(df), 1)
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch('apps.datasources.ashare.requests.get')
+    def test_us_all_suffixes_empty_raises_located_error(self, mock_get):
+        empty = {'code': 0, 'data': {'usZZZ.OQ': {'day': []}}}
+        mock_get.side_effect = [
+            type('R', (), {'json': lambda s: empty, 'raise_for_status': lambda s: None})()
+            for _ in range(3)
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            get_price_day_tx_us('ZZZ', count=1)
+        self.assertIn('ZZZ', str(ctx.exception))
+
+
+class TencentWindowFilterTest(TestCase):
+    """腾讯通道忽略 start 参数，必须按请求窗口裁剪（否则窗口外历史行会污染分表）。"""
+
+    def _frame(self, dates):
+        return pd.DataFrame(
+            [{'open': 10, 'close': 11, 'high': 12, 'low': 9, 'volume': 100, 'amount': 1100}
+             for _ in dates],
+            index=pd.DatetimeIndex([pd.Timestamp(d) for d in dates], name=''),
+        )
+
+    def test_filters_outside_window(self):
+        df = self._frame(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04'])
+        out = _tx_window_filter(df, date(2024, 1, 2), date(2024, 1, 3), 'US:TEST')
+        self.assertEqual([ts.date().isoformat() for ts in out.index], ['2024-01-02', '2024-01-03'])
+
+    def test_window_fully_outside_returns_empty(self):
+        df = self._frame(['2024-01-01', '2024-01-02'])
+        out = _tx_window_filter(df, date(2024, 3, 1), date(2024, 3, 5), 'US:TEST')
+        self.assertTrue(out.empty)
+
+    def test_empty_input_is_safe(self):
+        empty = pd.DataFrame()
+        self.assertTrue(_tx_window_filter(empty, date(2024, 1, 1), date(2024, 1, 2), 'X').empty)
+        self.assertIsNone(_tx_window_filter(None, date(2024, 1, 1), date(2024, 1, 2), 'X'))
+
+
+class TencentChannelDispatchTest(TestCase):
+    """分派：腾讯主源 → 东财回退；A 股不受影响。"""
+
+    def setUp(self):
+        self.symbol_hk = Symbol.objects.create(
+            code='00700', name='腾讯控股', market='HK', exchange='HKEX')
+
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_tencent_success_does_not_call_east_money(self, mock_hist, mock_tx):
+        # 腾讯为主源：命中即返回，东财通道不应被打到（既省 akshare 依赖也省一次远端请求）
+        mock_tx.return_value = pd.DataFrame({
+            'date': [date(2024, 1, 2)], 'open': [430.0], 'close': [432.0],
+            'high': [439.0], 'low': [431.0], 'volume': [18015236], 'amount': [7.8e9],
+        })
+        df = fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
+        self.assertEqual(len(df), 1)
+        mock_tx.assert_called_once()
+        mock_hist.assert_not_called()
+
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_tencent_failure_falls_back_to_east_money(self, mock_hist, mock_tx):
+        mock_tx.side_effect = Exception('tencent unreachable')
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-02'], '开盘': [430.0], '收盘': [432.0], '最高': [439.0],
+            '最低': [431.0], '成交量': [18015236], '成交额': [7.8e9],
+        })
+        df = fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
+        self.assertEqual(len(df), 1)
+        mock_tx.assert_called_once()
+        mock_hist.assert_called_once()
+
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
+    @patch('apps.datasources.services.akshare_lib.stock_us_hist')
+    def test_us_tencent_failure_falls_back_to_east_money(self, mock_hist, mock_tx):
+        # 美股同样以腾讯为主源，且回退只落到美股东财接口（不误调港股接口）
+        mock_tx.side_effect = Exception('tencent unreachable')
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-02'], '开盘': [430.0], '收盘': [432.0], '最高': [439.0],
+            '最低': [431.0], '成交量': [18015236], '成交额': [7.8e9],
+        })
+        symbol_us = Symbol.objects.create(
+            code='AAPL', name='苹果', market='US', exchange='NASDAQ')
+        df = fetch_kline_from_ashare(symbol_us, '2024-01-01', '2024-01-31')
+        self.assertEqual(len(df), 1)
+        mock_hist.assert_called_once()
+
+    @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
+    @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
+    def test_both_channels_fail_error_names_both(self, mock_hist, mock_tx):
+        mock_tx.side_effect = Exception('tencent unreachable')
+        mock_hist.side_effect = Exception('east money rate limited')
+        with self.assertRaises(ValueError) as ctx:
+            fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
+        message = str(ctx.exception)
+        # 报错须同时说明两条通道，且先列主源腾讯，便于从同步日志定位是哪一侧的问题
+        self.assertIn('腾讯通道', message)
+        self.assertIn('东财通道', message)
+        self.assertIn('tencent unreachable', message)
+        self.assertIn('east money rate limited', message)
+
+    def test_tencent_channel_rejects_a_share_market(self):
+        symbol_a = Symbol.objects.create(
+            code='600519', name='贵州茅台', market='A', exchange='SSE')
+        with self.assertRaises(ValueError) as ctx:
+            fetch_kline_from_ashare_tx(symbol_a, date(2024, 1, 1), date(2024, 1, 31))
+        self.assertIn('仅支持港股/美股', str(ctx.exception))

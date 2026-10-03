@@ -2,6 +2,14 @@
 #-*- coding:utf-8 -*-    --------------Ashare 股票行情数据双核心版( https://github.com/mpquant/Ashare )
 import json,requests,datetime;      import pandas as pd  #
 
+# 港股：腾讯 hkfqkline 的代码前缀 + 5 位补零（'700' → '00700'；实测 'hk700' 返回空数组）
+_HK_TX_PREFIX = 'hk'
+# 美股：腾讯 usfqkline 的代码前缀 + 交易所后缀（.OQ=NASDAQ / .N=NYSE / .A=AMEX）
+_US_TX_PREFIX = 'us'
+_US_TX_EXCHANGE_SUFFIX = {'.OQ': 'NASDAQ', '.N': 'NYSE', '.A': 'AMEX'}
+# 腾讯返回行数上限（实测 count=1024 可用、2000 返回空），超过会被静默截断为空
+_TX_MAX_COUNT = 1024
+
 def _normalize_ashare_code(code):
     """统一 A 股代码格式，确保腾讯/Sina 接口接受带交易所前缀的代码。
 
@@ -29,6 +37,45 @@ def _normalize_ashare_code(code):
     if code.startswith('bj'):
         return code
     return code
+
+
+# ============ 港股 / 美股代码规整（腾讯通道） ============
+# 注意：_normalize_ashare_code 只适用于 A 股——它对非 6 位数字会原样返回，
+# 但会把 '00700' 当深市代码、给美股字母代码加 'sh' 前缀，因此港美股必须走独立规整。
+
+def _normalize_hk_code_tx(code):
+    """港股代码规整为腾讯 hk 通道要求：``hk`` + 5 位数字。
+
+    - 剥掉 ``HK$`` / ``HK.`` / ``hk`` 前缀与 ``.HK`` 后缀；
+    - 纯数字补零到 5 位（``700`` → ``hk00700``；实测 ``hk700`` 返回空数组，必须补零）；
+    - 非纯数字（如带字母的港股代码）原样加前缀交由腾讯判定。
+    """
+    value = str(code or '').strip().upper()
+    if value.startswith('HK$') or value.startswith('HK.'):
+        value = value[3:]
+    elif value.startswith('HK'):
+        value = value[2:]
+    value = value.replace('.HK', '')
+    digits = ''.join(ch for ch in value if ch.isdigit())
+    if digits and len(digits) != len(value.replace('.', '').replace('-', '')):
+        # 含非数字成分（如 '00700.HK' 已处理完、'R_00700' 之类），不做补零改造
+        return _HK_TX_PREFIX + value
+    return _HK_TX_PREFIX + (digits.zfill(5) if digits else value)
+
+
+def _us_exchange_candidates(code):
+    """美股代码的交易所后缀候选（腾讯 us 通道按后缀区分交易所）。
+
+    库中代码可能已带后缀（``AAPL.OQ``）或纯代码（``AAPL``）；
+    纯代码按 NASDAQ → NYSE → AMEX 顺序尝试（与东财 105/106/107 的回退思路一致）。
+    """
+    value = str(code or '').strip().upper()
+    if value.startswith('US'):
+        value = value[2:]
+    for suffix in _US_TX_EXCHANGE_SUFFIX:
+        if value.endswith(suffix):
+            return [value]
+    return [f'{value}{suffix}' for suffix in _US_TX_EXCHANGE_SUFFIX]
 
 
 #---腾讯日线---  2025-12-21日正常使用
@@ -99,6 +146,105 @@ def get_price_sina(code, end_date='', count=10, frequency='60m'):    #新浪全�
     if (end_date!='') & (frequency in ['240m','1200m','7200m']):
         return df[df.index<=end_date][-mcount:]
     return df
+
+
+#---腾讯港股/美股日线---  与 A 股共用 fqkline 风格，但行字段数不同，单独解析
+def _tx_kline_unit(unit):
+    """把 frequency 映射为腾讯 unit 参数。"""
+    return 'week' if unit in '1w' else 'month' if unit in '1M' else 'day'
+
+
+def _tx_end_date_arg(end_date):
+    """腾讯的 end 参数：当日传空串（当日 bar 尚未收盘时接口返回不完整数据）。"""
+    if not end_date:
+        return ''
+    value = end_date.strftime('%Y-%m-%d') if isinstance(end_date, datetime.date) else str(end_date).split(' ')[0]
+    return '' if value == datetime.datetime.now().strftime('%Y-%m-%d') else value
+
+
+def _fetch_tx_market_daily(symbol, path, end_date='', unit='day', count=10, fq='qfq', amount_unit=1.0):
+    """腾讯港美股日线公共拉取。返回 DataFrame，字段 time/open/close/high/low/volume/amount。
+
+    - ``start`` 参数腾讯通道会忽略（总是返回截至 end 的最近 count 根），故不传；
+    - 无数据时接口仍返回 HTTP 200 + 空数组，这里统一返回空 DataFrame，由调用方判定。
+
+    ``amount_unit``：成交额换算系数——**腾讯港股返回万元、美股返回美元（系数 1）**，
+    两者量纲不同，混用会把港股成交额缩小 1e4 倍（实测 PDD 等部分美股也会带 amount 字段）。
+    """
+    empty = pd.DataFrame(columns=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'])
+    count = max(1, min(int(count), _TX_MAX_COUNT))
+    URL = f'https://web.ifzq.gtimg.cn/appstock/app/{path}/get?param={symbol},{unit},,{_tx_end_date_arg(end_date)},{count},{fq}'
+    try:
+        response = requests.get(URL, timeout=20)
+        response.raise_for_status()
+        st = response.json() if hasattr(response, 'json') else json.loads(response.content)
+    except Exception:
+        return empty
+    data = st.get('data') if isinstance(st, dict) else None
+    stk = (data or {}).get(symbol) if isinstance(data, dict) else None
+    if not stk or not isinstance(stk, dict):
+        return empty
+    buf = stk.get(fq + unit) or stk.get(unit)
+    if not buf:
+        return empty
+
+    rows = []
+    for item in buf:
+        if len(item) < 6:
+            continue
+        # 行字段数**不固定**：港股 9 列（含成交额，万元）、多数美股 6 列（无成交额）、
+        # 部分美股 11 列（含成交额，美元）。故按列数 + 市场量纲双重判断，不能只看长度。
+        raw_amount = item[8] if len(item) >= 9 else None
+        try:
+            amount = float(raw_amount) * amount_unit if raw_amount not in (None, '') else None
+        except (TypeError, ValueError):
+            amount = None
+        rows.append([item[0], item[1], item[2], item[3], item[4], item[5], amount])
+
+    df = pd.DataFrame(rows, columns=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'])
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['time'])
+    df.time = pd.to_datetime(df.time, errors='coerce')
+    df = df.dropna(subset=['time']).set_index(['time'])
+    df.index.name = ''
+    df = df.sort_index()
+    # 全列无成交额时**丢弃 amount 列**（而非留 NaN）：
+    # 上游 _normalize_ashare_kline_dataframe 仅在「无 amount 列」时才用 close*volume 兜底，
+    # 留 NaN 会被 fillna(0) 归零 → 美股成交额全部丢失（实测 AAPL/BABA 为 6 列无成交额行）。
+    if 'amount' in df.columns and df['amount'].isna().all():
+        df = df.drop(columns=['amount'])
+    return df
+
+
+def get_price_day_tx_hk(code, end_date='', count=10, frequency='1d', adjust='qfq'):
+    """港股日线（腾讯 hkfqkline 通道）：``hk00700`` 形式；成交额为万元，需 ×1e4。"""
+    return _fetch_tx_market_daily(
+        _normalize_hk_code_tx(code), 'hkfqkline',
+        end_date=end_date, unit=_tx_kline_unit(frequency), count=count,
+        fq=adjust if adjust in ('qfq', 'hfq') else 'qfq', amount_unit=10000.0,
+    )
+
+
+def get_price_day_tx_us(code, end_date='', count=10, frequency='1d', adjust='qfq'):
+    """美股日线（腾讯 usfqkline 通道）：``usAAPL.OQ`` 形式，按交易所后缀回退。
+
+    美股接口对不存在的代码返回 200 + 空数组（不报错码），因此只能靠"依次尝试后缀 +
+    取首个有数据的候选"来定位代码；全部为空时抛 ValueError 交由上层记录可定位原因。
+    美股成交额为美元（``amount_unit=1``），与港股的万元不同。
+    """
+    unit = _tx_kline_unit(frequency)
+    fq = adjust if adjust in ('qfq', 'hfq') else 'qfq'
+    last_symbol = ''
+    for candidate in _us_exchange_candidates(code):
+        last_symbol = candidate
+        df = _fetch_tx_market_daily(
+            f'{_US_TX_PREFIX}{candidate}', 'usfqkline',
+            end_date=end_date, unit=unit, count=count, fq=fq, amount_unit=1.0,
+        )
+        if not df.empty:
+            return df
+    raise ValueError(f'美股 {code} 在腾讯通道未取到数据（已尝试交易所后缀，最后尝试 {last_symbol}）')
 
 
 def get_price(code, end_date='',count=10, frequency='1d', fields=[]):        #对外暴露只有唯一函数，这样对用户才是最友好的
