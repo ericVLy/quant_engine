@@ -1,6 +1,9 @@
 # pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 import logging
-from datetime import date
+from datetime import date, timedelta
+from unittest import mock
+
+import pandas as pd
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -18,11 +21,12 @@ from apps.datasources.services import (
     sync_kline_for_symbol, sync_all_symbols,
     get_kline_table_name, query_kline_table, fetch_kline_from_ashare,
     fetch_kline_from_ashare_tx, _tx_window_filter,
+    _is_suspect_thin_kline,
 )
 from apps.datasources.ashare import (
     get_price_day_tx, get_price_sina,
-    get_price_day_tx_hk, get_price_day_tx_us,
-    _normalize_hk_code_tx, _us_exchange_candidates,
+    get_price_day_tx_hk, get_price_day_tx_us, get_price_day_sina_us,
+    _normalize_hk_code_tx, _us_exchange_candidates, _fetch_sina_symbol,
 )
 
 logger = logging.getLogger(__name__)
@@ -749,22 +753,29 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
 
     @patch('apps.datasources.services.fetch_kline_from_ashare_tx')
     def test_sync_us_end_to_end_tencent_primary(self, mock_tx):
-        """腾讯为主源的美股端到端入库。"""
+        """腾讯为主源的美股端到端入库。
+
+        mock 必须返回**接近窗口交易日数**的行数：31 天窗口若只回2 根会被
+        ``_is_suspect_thin_kline`` 判定为残缺并触发东财/新浪回退（进而联网），
+        使本用例不再确定。真实美股每个交易日都有数据，用完整序列才符合前提。
+        """
+        dates = pd.bdate_range('2024-01-01', '2024-01-31')
+        rows = len(dates)
         mock_tx.return_value = pd.DataFrame({
-            'date': ['2024-01-02', '2024-01-03'], 'open': [185.0, 182.0],
-            'close': [185.64, 184.25], 'high': [186.5, 183.9], 'low': [184.6, 181.7],
-            'volume': [58000000, 61000000], 'amount': [1.07e10, 1.12e10],
+            'date': list(dates), 'open': [185.0] * rows, 'close': [185.64] * rows,
+            'high': [186.5] * rows, 'low': [184.6] * rows,
+            'volume': [58000000] * rows, 'amount': [1.07e10] * rows,
         })
         added, _, error = sync_kline_for_symbol(
             self.symbol_us, 'daily',
             start_date='2024-01-01', end_date='2024-01-31', adjust='qfq',
         )
         self.assertIsNone(error)
-        self.assertEqual(added, 2)
-        rows = query_kline_table(self.symbol_us, date(2024, 1, 1), date(2024, 1, 31))
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]['extra']['split_factor'], 1.0)
-        self.assertEqual(rows[0]['symbol'], 'AAPL')
+        self.assertEqual(added, rows)
+        stored = query_kline_table(self.symbol_us, date(2024, 1, 1), date(2024, 1, 31))
+        self.assertEqual(len(stored), rows)
+        self.assertEqual(stored[0]['extra']['split_factor'], 1.0)
+        self.assertEqual(stored[0]['symbol'], 'AAPL')
 
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
     @_tencent_unavailable
@@ -929,12 +940,20 @@ class TencentChannelDispatchTest(TestCase):
     @patch('apps.datasources.services.akshare_lib.stock_hk_hist')
     def test_tencent_success_does_not_call_east_money(self, mock_hist, mock_tx):
         # 腾讯为主源：命中即返回，东财通道不应被打到（既省 akshare 依赖也省一次远端请求）
+        #
+        # 注意：mock 必须返回**接近窗口交易日数**的行数。原实现返回 1 根也能通过，
+        # 但 31 天窗口只回 1 根正是 AGQ/SCO 的残缺形态——分派层现已按
+        # 「非空但明显残缺」判定失败并回退东财（见 ``_is_suspect_thin_kline``），
+        # 故此处改用完整数据，以继续验证「腾讯数据完整时不调东财」这一意图。
+        dates = pd.bdate_range('2024-01-01', '2024-01-31')
+        rows = len(dates)
         mock_tx.return_value = pd.DataFrame({
-            'date': [date(2024, 1, 2)], 'open': [430.0], 'close': [432.0],
-            'high': [439.0], 'low': [431.0], 'volume': [18015236], 'amount': [7.8e9],
+            'date': list(dates), 'open': [430.0] * rows, 'close': [432.0] * rows,
+            'high': [439.0] * rows, 'low': [431.0] * rows,
+            'volume': [18015236] * rows, 'amount': [7.8e9] * rows,
         })
         df = fetch_kline_from_ashare(self.symbol_hk, '2024-01-01', '2024-01-31')
-        self.assertEqual(len(df), 1)
+        self.assertEqual(rows, len(df))
         mock_tx.assert_called_once()
         mock_hist.assert_not_called()
 
@@ -986,3 +1005,301 @@ class TencentChannelDispatchTest(TestCase):
         with self.assertRaises(ValueError) as ctx:
             fetch_kline_from_ashare_tx(symbol_a, date(2024, 1, 1), date(2024, 1, 31))
         self.assertIn('仅支持港股/美股', str(ctx.exception))
+
+
+class TencentUsSuffixCoverageTest(TestCase):
+    """美股交易所后缀回退必须以「覆盖度」判定命中，而非「非空」。
+
+    回归背景：AGQ / SCO（ProShares 反向杠杆 ETF，在 NYSE Arca 上市）此前只能拉到
+    当天 1~2 根 K 线。原因是腾讯 ``usAGQ.OQ``（NASDAQ 通道）返回
+    **200 + 非空数组但只有当天 1 根**，而回退逻辑判定「非空即返回」，
+    于是永远不尝试 ``.A``(AMEX/NYSE Arca)——ETF 的历史数据在那里。
+    常规股（NTSK / GOOG）首个候选即数据完整，因此该缺陷长期未暴露。
+    """
+
+    @staticmethod
+    def _make_df(rows):
+        import pandas as pd
+        index = pd.to_datetime([date(2026, 9, 1) + timedelta(days=i) for i in range(rows)])
+        return pd.DataFrame(
+            {
+                'time': index, 'open': [1.0] * rows, 'close': [1.0] * rows,
+                'high': [1.0] * rows, 'low': [1.0] * rows,
+                'volume': [1.0] * rows, 'amount': [1.0] * rows,
+            },
+            index=index,
+        )
+
+    def _patch(self, responses):
+        """responses: {后缀: 行数}；记录每个被请求过的后缀。"""
+        from apps.datasources import ashare as ashare_lib
+        tried = []
+
+        def fake_fetch(symbol, path, end_date='', unit='day', count=10,
+                       fq='qfq', amount_unit=1.0):
+            bare = symbol[len(ashare_lib._US_TX_PREFIX):]
+            tried.append(bare)
+            rows = responses.get(bare, 0)
+            return self._make_df(rows) if rows else pd.DataFrame()
+
+        original = ashare_lib._fetch_tx_market_daily
+        ashare_lib._fetch_tx_market_daily = fake_fetch
+        self.addCleanup(setattr, ashare_lib, '_fetch_tx_market_daily', original)
+        return tried
+
+    def test_etf_falls_through_to_arca_suffix_instead_of_returning_single_bar(self):
+        """核心回归：首个候选仅 1 根时，必须继续试到 NYSE Arca 并取到完整历史。"""
+        tried = self._patch({'AGQ.OQ': 1, 'AGQ.N': 1, 'AGQ.A': 300})
+        df = get_price_day_tx_us('AGQ', count=300)
+        self.assertEqual(300, len(df))
+        self.assertEqual(['AGQ.OQ', 'AGQ.N', 'AGQ.A'], tried)
+
+    def test_sco_etf_recovers_full_history(self):
+        self._patch({'SCO.OQ': 1, 'SCO.N': 1, 'SCO.A': 300})
+        self.assertEqual(300, len(get_price_day_tx_us('SCO', count=300)))
+
+    def test_normal_stock_short_circuits_on_first_suffix(self):
+        """常规股首个候选覆盖度达标时不应再多发请求（控制远端调用量）。"""
+        tried = self._patch({'NTSK.OQ': 300, 'NTSK.N': 300, 'NTSK.A': 300})
+        df = get_price_day_tx_us('NTSK', count=300)
+        self.assertEqual(300, len(df))
+        self.assertEqual(['NTSK.OQ'], tried)
+
+    def test_sparse_candidates_degrade_to_best_attempt(self):
+        """全部后缀都只有 1 根时，退化为最佳尝试而非抛错（避免新股/新股上市被误判失败）。"""
+        self._patch({'ZZZ.OQ': 1, 'ZZZ.N': 1, 'ZZZ.A': 0})
+        self.assertEqual(1, len(get_price_day_tx_us('ZZZ', count=300)))
+
+    def test_all_suffixes_empty_raises_with_attempted_list(self):
+        """全空时抛错，且错误信息列出所有已尝试后缀，便于从同步日志定位。"""
+        self._patch({'QQQ.OQ': 0, 'QQQ.N': 0, 'QQQ.A': 0})
+        with self.assertRaises(ValueError) as ctx:
+            get_price_day_tx_us('QQQ', count=300)
+        message = str(ctx.exception)
+        self.assertIn('QQQ.OQ', message)
+        self.assertIn('QQQ.N', message)
+        self.assertIn('QQQ.A', message)
+
+    def test_explicit_suffix_skips_other_exchanges(self):
+        """库内代码已带后缀时不做多后缀试探（沿用既有约定）。"""
+        from apps.datasources.ashare import _us_exchange_candidates
+        self.assertEqual(['AAPL.OQ'], _us_exchange_candidates('AAPL.OQ'))
+        self.assertEqual(['AAPL.OQ'], _us_exchange_candidates('usaapl.oq'))
+
+
+class SinaUsChannelTest(TestCase):
+    """新浪美股通道（``US_MinKService.getDailyK``）：字段转换与窗口裁剪。
+
+    该通道存在的意义：腾讯与东财对 ``AGQ``/``SCO`` 等反向杠杆 ETF **没有历史数据**
+    （腾讯仅当天 1 根且无复权序列），新浪则提供完整历史（实测 AGQ 自 2008-12-04 起
+    4483 根），故作为第三级回退。
+    """
+
+    # 新浪原始返回：单字母字段 d/o/h/l/c/v/a，a 为美元成交额
+    RAW = [
+        {'d': '2026-09-29', 'o': '1.0', 'h': '2.0', 'l': '0.5', 'c': '1.5', 'v': '100', 'a': '150'},
+        {'d': '2026-09-30', 'o': '1.5', 'h': '2.5', 'l': '1.0', 'c': '2.0', 'v': '200', 'a': '400'},
+        {'d': '2026-10-01', 'o': '2.0', 'h': '3.0', 'l': '1.5', 'c': '2.5', 'v': '300', 'a': '750'},
+        {'d': '2026-10-02', 'o': '2.5', 'h': '3.5', 'l': '2.0', 'c': '3.0', 'v': '400', 'a': '1200'},
+    ]
+
+    def _patch(self, payload):
+        from apps.datasources import ashare as ashare_lib
+
+        class FakeResponse:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                if isinstance(self._data, Exception):
+                    raise self._data
+                return self._data
+
+        original = ashare_lib.requests.get
+        ashare_lib.requests.get = lambda *a, **k: FakeResponse(payload)
+        self.addCleanup(setattr, ashare_lib.requests, 'get', original)
+
+    def test_maps_sina_short_fields_to_internal_schema(self):
+        """d/o/h/l/c/v/a → time/open/high/low/close/volume/amount，映射不可错位。"""
+        self._patch(self.RAW)
+        df = get_price_day_sina_us('AGQ')
+        self.assertEqual(4, len(df))
+        self.assertIsInstance(df.index, pd.DatetimeIndex)
+        self.assertTrue(df.index.is_monotonic_increasing)
+        last = df.iloc[-1]
+        self.assertEqual(2.5, last['open'])     # o
+        self.assertEqual(3.5, last['high'])     # h
+        self.assertEqual(2.0, last['low'])      # l
+        self.assertEqual(3.0, last['close'])    # c
+        self.assertEqual(400, last['volume'])   # v
+        self.assertEqual(1200, last['amount'])  # a（美元，不换算）
+        self.assertEqual(pd.Timestamp('2026-10-02'), df.index[-1])
+
+    def test_accepts_prefixed_and_suffixed_codes(self):
+        """库内代码可能带 ``us`` 前缀或 ``.OQ`` 后缀，均应归一化。"""
+        from apps.datasources.ashare import _fetch_sina_symbol
+
+        self.assertEqual('AGQ', _fetch_sina_symbol('AGQ'))
+        self.assertEqual('AGQ', _fetch_sina_symbol('usAGQ'))
+        self.assertEqual('AGQ', _fetch_sina_symbol('AGQ.OQ'))
+        self.assertEqual('AGQ', _fetch_sina_symbol('  agq  '))
+        self.assertEqual('', _fetch_sina_symbol(''))
+
+    def test_count_limits_to_recent_rows(self):
+        self._patch(self.RAW)
+        df = get_price_day_sina_us('AGQ', count=2)
+        self.assertEqual(2, len(df))
+        self.assertEqual(pd.Timestamp('2026-10-01'), df.index[0])
+
+    def test_amount_column_dropped_when_all_missing(self):
+        """成交额整列缺失时应丢弃该列，交由上游 close*volume 兜底（否则会被归零）。"""
+        raw = [{k: v for k, v in row.items() if k != 'a'} for row in self.RAW]
+        self._patch(raw)
+        df = get_price_day_sina_us('AGQ')
+        self.assertNotIn('amount', df.columns)
+
+    def test_empty_and_invalid_payload_returns_empty_frame(self):
+        for payload in ([], None, {}, 'bad', ValueError('boom')):
+            self._patch(payload)
+            df = get_price_day_sina_us('AGQ')
+            self.assertTrue(df.empty, f'payload={payload!r} 应返回空 DataFrame')
+
+    def test_service_filters_by_requested_window(self):
+        """新浪返回全部历史，必须按请求窗口裁剪，否则污染分表与增量判断。"""
+        from apps.datasources.services import fetch_kline_from_sina_us
+        from apps.watchlists.models import Symbol
+        self._patch(self.RAW)
+        symbol = Symbol.objects.create(code='AGQ', name='AGQ', market='US', exchange='')
+        df = fetch_kline_from_sina_us(symbol, date(2026, 9, 30), date(2026, 10, 1))
+        self.assertEqual(2, len(df))
+        self.assertEqual(date(2026, 9, 30), df['date'].min())
+        self.assertEqual(date(2026, 10, 1), df['date'].max())
+
+    def test_service_raises_when_window_has_no_data(self):
+        from apps.datasources.services import fetch_kline_from_sina_us
+        from apps.watchlists.models import Symbol
+        self._patch(self.RAW)
+        symbol = Symbol.objects.create(code='AGQ', name='AGQ', market='US', exchange='')
+        with self.assertRaises(ValueError) as ctx:
+            fetch_kline_from_sina_us(symbol, date(2020, 1, 1), date(2020, 1, 31))
+        self.assertIn('新浪通道', str(ctx.exception))
+
+    def test_dispatch_falls_back_to_sina_when_tencent_and_east_money_fail(self):
+        """端到端：腾讯残缺 + 东财不可达 → 采用新浪结果（AGQ/SCO 的修复路径）。"""
+        from apps.datasources import services as svc
+        from apps.watchlists.models import Symbol
+        symbol = Symbol.objects.create(code='AGQ', name='AGQ', market='US', exchange='')
+        self._patch(self.RAW)
+        with mock.patch.object(svc, 'fetch_kline_from_ashare_tx',
+                               return_value=self._pd(1)), \
+                mock.patch.object(svc, '_fetch_kline_east_money',
+                                  side_effect=ValueError('east money unreachable')):
+            df = svc.fetch_kline_from_ashare(symbol, date(2026, 9, 28), date(2026, 10, 3))
+        self.assertEqual(4, len(df))          # 新浪 4 根 > 腾讯 1 根
+        self.assertEqual(3.0, df.iloc[-1]['close'])
+
+    def _pd(self, rows):
+        index = pd.date_range('2026-10-01', periods=rows, freq='D')
+        return pd.DataFrame(
+            {'date': [d.date() for d in index], 'open': [1.0] * rows, 'close': [1.0] * rows,
+             'high': [1.0] * rows, 'low': [1.0] * rows,
+             'volume': [1.0] * rows, 'amount': [1.0] * rows},
+        )
+
+
+class SuspectThinKlineTest(TestCase):
+    """「非空但残缺」的 K 线必须被识别，并触发东财通道补全。
+
+    回归背景：AGQ / SCO 重新同步后**仍只有 1 根**（此前的交易所后缀覆盖度修复无效，
+    因为三个后缀都只返回 1 根）。真正的根因是：
+    ``fetch_kline_from_ashare`` 过去**只在腾讯抛异常时**才回退东财，
+    而腾讯对这类 ETF 返回 HTTP 200 + 非空数组（仅 1 根）、**不抛异常**，
+    于是残缺数据被直接判定成功并入库，东财通道永远不会被调用。
+    """
+
+    WIDE = (date(2025, 12, 7), date(2026, 10, 3))     # 约 300 天，应有 ~215 根
+    NARROW = (date(2026, 9, 30), date(2026, 10, 2))   # 3 天
+
+    @staticmethod
+    def _df(rows):
+        import pandas as pd
+        index = pd.date_range('2025-12-07', periods=rows, freq='D')
+        return pd.DataFrame(
+            {'date': index, 'open': [1.0] * rows, 'close': [1.0] * rows,
+             'high': [1.0] * rows, 'low': [1.0] * rows,
+             'volume': [1.0] * rows, 'amount': [1.0] * rows},
+            index=index,
+        )
+
+    def test_single_bar_for_wide_window_is_suspect(self):
+        """核心回归：300 天窗口只回 1 根，必须判定为残缺。"""
+        self.assertTrue(_is_suspect_thin_kline(self._df(1), *self.WIDE))
+
+    def test_healthy_row_count_is_not_suspect(self):
+        self.assertFalse(_is_suspect_thin_kline(self._df(214), *self.WIDE))
+
+    def test_partially_thin_is_suspect(self):
+        """300 天只回 50 根同样属残缺（比例过低）。"""
+        self.assertTrue(_is_suspect_thin_kline(self._df(50), *self.WIDE))
+
+    def test_short_windows_not_flagged(self):
+        """短窗口内的少量数据是正常的，不能误判（否则新股/当日同步会被拖累）。"""
+        self.assertFalse(_is_suspect_thin_kline(self._df(3), *self.NARROW))
+        single = date(2026, 10, 2)
+        self.assertFalse(_is_suspect_thin_kline(self._df(1), single, single))
+
+    def test_empty_is_not_suspect(self):
+        """空结果交由原有「抛异常→回退」逻辑处理，不重复判定。"""
+        self.assertFalse(_is_suspect_thin_kline(pd.DataFrame(), *self.WIDE))
+        self.assertFalse(_is_suspect_thin_kline(None, *self.WIDE))
+
+    def test_dispatch_prefers_east_money_when_tencent_thin(self):
+        """端到端：腾讯 1 根 + 东财 214 根 → 采用东财结果。"""
+        from apps.datasources import services as svc
+        symbol = Symbol.objects.create(code='AGQ', name='AGQ', market='US', exchange='')
+        em_calls = []
+
+        def fake_em(*args, **kwargs):
+            em_calls.append(1)
+            return self._df(214)
+
+        with mock.patch.object(svc, 'fetch_kline_from_ashare_tx', return_value=self._df(1)), \
+                mock.patch.object(svc, '_fetch_kline_east_money', side_effect=fake_em):
+            df = svc.fetch_kline_from_ashare(symbol, *self.WIDE)
+        self.assertEqual(214, len(df))
+        self.assertEqual(1, len(em_calls))
+
+    def test_dispatch_keeps_tencent_result_when_all_fallbacks_unavailable(self):
+        """东财与新浪**都**不可用时保留腾讯结果，不让整个同步失败。
+
+        新浪接入后本用例必须同时屏蔽两个回退通道——否则新浪会真的联网取到数据
+        （AGQ/SCO 在新浪有完整历史），掩盖「全部回退失效」的降级行为。
+        """
+        from apps.datasources import services as svc
+        symbol = Symbol.objects.create(code='SCO', name='SCO', market='US', exchange='')
+        with mock.patch.object(svc, 'fetch_kline_from_ashare_tx', return_value=self._df(1)), \
+                mock.patch.object(svc, '_fetch_kline_east_money',
+                                  side_effect=ValueError('east money unreachable')), \
+                mock.patch.object(svc, 'fetch_kline_from_sina_us',
+                                  side_effect=ValueError('sina unreachable')):
+            df = svc.fetch_kline_from_ashare(symbol, *self.WIDE)
+        self.assertEqual(1, len(df))
+
+    def test_dispatch_does_not_call_east_money_when_tencent_healthy(self):
+        """腾讯数据完整时不得多余调用东财（控制远端请求量）。"""
+        from apps.datasources import services as svc
+        symbol = Symbol.objects.create(code='NTSK', name='NTSK', market='US', exchange='')
+        em_calls = []
+
+        def fake_em(*args, **kwargs):
+            em_calls.append(1)
+            return self._df(214)
+
+        with mock.patch.object(svc, 'fetch_kline_from_ashare_tx', return_value=self._df(214)), \
+                mock.patch.object(svc, '_fetch_kline_east_money', side_effect=fake_em):
+            df = svc.fetch_kline_from_ashare(symbol, *self.WIDE)
+        self.assertEqual(214, len(df))
+        self.assertEqual([], em_calls)

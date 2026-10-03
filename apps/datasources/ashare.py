@@ -9,6 +9,12 @@ _US_TX_PREFIX = 'us'
 _US_TX_EXCHANGE_SUFFIX = {'.OQ': 'NASDAQ', '.N': 'NYSE', '.A': 'AMEX'}
 # 腾讯返回行数上限（实测 count=1024 可用、2000 返回空），超过会被静默截断为空
 _TX_MAX_COUNT = 1024
+# 美股「交易所后缀回退」的最低覆盖度（返回根数 / 请求根数）：
+# ETF 类标的（AGQ / SCO 等）在 NASDAQ 通道会返回非空但仅当天 1 根，
+# 必须以覆盖度而非「非空」判定命中，否则永远取不到 NYSE Arca 的历史数据。
+_US_MIN_COVERAGE_RATIO = 0.5
+# 新浪美股通道单次返回上限（实测单次即返回全部历史，count 只是安全上限）
+_SINA_MAX_COUNT = 8000
 
 def _normalize_ashare_code(code):
     """统一 A 股代码格式，确保腾讯/Sina 接口接受带交易所前缀的代码。
@@ -217,6 +223,112 @@ def _fetch_tx_market_daily(symbol, path, end_date='', unit='day', count=10, fq='
     return df
 
 
+def _fetch_sina_symbol(code):
+    """归一化新浪美股接口所需的纯代码。
+
+    库内代码可能带 ``us`` 前缀（腾讯通道格式）或交易所后缀（``.OQ``/``.N``/``.A``），
+    新浪接口只认纯代码，故统一剥离并转大写。
+    """
+    value = str(code or '').strip().upper()
+    if value.startswith('US'):
+        value = value[2:]
+    return value.split('.')[0].strip()
+
+
+def _sina_end_bound(end_date):
+    """把 end_date 归一化为 ``YYYY-MM-DD`` 字符串，用于过滤「晚于 end 的行」。
+
+    空值表示不设上界（取到最新）。接受 ``date`` / ``datetime`` / 字符串。
+    """
+    if not end_date:
+        return ''
+    if isinstance(end_date, datetime.datetime):
+        return end_date.strftime('%Y-%m-%d')
+    if isinstance(end_date, datetime.date):
+        return end_date.strftime('%Y-%m-%d')
+    return str(end_date).strip()[:10]
+
+
+def get_price_day_sina_us(code, end_date='', count=10, frequency='1d', adjust='qfq'):
+    """美股日线（新浪 ``US_MinKService.getDailyK`` 通道）。
+
+    **存在的意义**：腾讯与东财对部分标的（实测 ProShares 反向杠杆 ETF ``AGQ``/``SCO``）
+    **都没有历史数据**——腾讯仅返回当天 1 根且 ``qfqday``/``hfqday`` 恒为空，
+    指定更早的 ``end`` 直接返回 0 根。新浪则提供完整日线序列
+    （实测 AGQ 自 2008-12-04 起 4483 根，SCO 自 2008-11-25 起 4489 根）。
+
+    接口返回 **JSON 数组**，字段为单字母缩写，需转换为本模块统一格式
+    （``time`` 为 DatetimeIndex，其余为 open/close/high/low/volume/amount）：
+
+    ==============  =========  =========================================
+    新浪字段        内部字段    说明
+    ==============  =========  =========================================
+    ``d``           time       交易日
+    ``o``           open       开盘
+    ``h``           high       最高
+    ``l``           low        最低
+    ``c``           close      收盘
+    ``v``           volume     成交量（股）
+    ``a``           amount     成交额（**美元**，与腾讯美股量纲一致，无需换算）
+    ==============  =========  =========================================
+
+    - 成交额若缺失/为 0，丢弃 ``amount`` 列交由上游 ``close*volume`` 兜底
+      （同 ``_fetch_tx_market_daily`` 的处理，避免整列 NaN 被归零）；
+    - 新浪**只提供不复权数据**，无 qfq/hfq 之分，故 ``adjust`` 参数被忽略——
+      对反向杠杆 ETF 而言复权本身也无意义（每日按倍数重置）；
+    - 接口对无效代码返回 HTTP 200 + 空数组，由调用方判定失败。
+    """
+    empty = pd.DataFrame(columns=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'])
+    symbol = _fetch_sina_symbol(code)
+    if not symbol:
+        return empty
+
+    URL = (
+        'https://stock.finance.sina.com.cn/usstock/api/json_v2.php/'
+        f'US_MinKService.getDailyK?symbol={symbol}'
+    )
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn/'}
+    try:
+        response = requests.get(URL, timeout=20, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return empty
+    if not isinstance(payload, list) or not payload:
+        return empty
+
+    # 腾讯按「最近 count 根」返回；**新浪不支持 end/count 参数，一次性返回全部历史**，
+    # 因此必须先按 end_date 截断「不晚于 end 的部分」，再取最近 count 根——
+    # 否则对历史窗口（如 2019-2021）会截到最新而非窗口末尾，导致取不到任何数据。
+    limit = max(1, min(int(count), _SINA_MAX_COUNT)) if count else None
+    end_bound = _sina_end_bound(end_date)
+    rows = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        day = str(item.get('d') or '').strip()[:10]
+        if not day:
+            continue
+        if end_bound and day > end_bound:
+            continue
+        rows.append([day, item.get('o'), item.get('c'), item.get('h'),
+                     item.get('l'), item.get('v'), item.get('a')])
+    if limit:
+        rows = rows[-limit:]
+
+    df = pd.DataFrame(rows, columns=['time', 'open', 'close', 'high', 'low', 'volume', 'amount'])
+    for col in ['open', 'high', 'low', 'close', 'volume', 'amount']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['time'])
+    df.time = pd.to_datetime(df.time, errors='coerce')
+    df = df.dropna(subset=['time']).set_index(['time'])
+    df.index.name = ''
+    df = df.sort_index()
+    if 'amount' in df.columns and df['amount'].isna().all():
+        df = df.drop(columns=['amount'])
+    return df
+
+
 def get_price_day_tx_hk(code, end_date='', count=10, frequency='1d', adjust='qfq'):
     """港股日线（腾讯 hkfqkline 通道）：``hk00700`` 形式；成交额为万元，需 ×1e4。"""
     return _fetch_tx_market_daily(
@@ -229,22 +341,42 @@ def get_price_day_tx_hk(code, end_date='', count=10, frequency='1d', adjust='qfq
 def get_price_day_tx_us(code, end_date='', count=10, frequency='1d', adjust='qfq'):
     """美股日线（腾讯 usfqkline 通道）：``usAAPL.OQ`` 形式，按交易所后缀回退。
 
-    美股接口对不存在的代码返回 200 + 空数组（不报错码），因此只能靠"依次尝试后缀 +
-    取首个有数据的候选"来定位代码；全部为空时抛 ValueError 交由上层记录可定位原因。
-    美股成交额为美元（``amount_unit=1``），与港股的万元不同。
+    **回退判据是「覆盖度」而非「非空」**：某些标的（如 ETF 类的 AGQ / SCO）
+    在首个候选后缀会返回 **200 + 非空数组，但只有当天 1 根**；若以「非空即返回」
+    判定，会在首个候选就命中并返回，**永远不会尝试其余交易所后缀**。
+    常规股（NTSK / GOOG）首个候选即可覆盖窗口，故不受影响。
+
+    因此这里要求候选至少返回 ``_US_MIN_COVERAGE_RATIO`` 比例的请求根数才算命中，
+    并在所有候选中取**行数最多**的结果；仅当全部候选覆盖度都达标才提前返回。
+    覆盖度阈值取 0.5：容忍节假日/停牌造成的少量缺口，又能排除「只有 1 根」的伪命中。
+
+    **注意（实测结论）**：对 ``AGQ``/``SCO`` 这类标的，腾讯接口 **``.OQ`` 与 ``.N``
+    均只返回当天 1 根、``.A`` 返回 0 根**，且 ``qfqday``/``hfqday`` 恒为空（仅有不复权
+    ``day``）——即腾讯侧**没有该标的的历史数据**，属数据源能力缺失而非本函数缺陷。
+    此时本函数返回当天这 1 根（保证下游仍有当日数据可用），覆盖度不足由调用方
+    ``_is_suspect_thin_kline`` 判定并回退东财；东财亦不可用时会在同步日志中如实告警。
     """
     unit = _tx_kline_unit(frequency)
     fq = adjust if adjust in ('qfq', 'hfq') else 'qfq'
-    last_symbol = ''
-    for candidate in _us_exchange_candidates(code):
-        last_symbol = candidate
+    expected = max(1, min(int(count), _TX_MAX_COUNT))
+    required = max(1, int(expected * _US_MIN_COVERAGE_RATIO))
+    best_df = None
+    candidates = _us_exchange_candidates(code)
+    for candidate in candidates:
         df = _fetch_tx_market_daily(
             f'{_US_TX_PREFIX}{candidate}', 'usfqkline',
             end_date=end_date, unit=unit, count=count, fq=fq, amount_unit=1.0,
         )
-        if not df.empty:
-            return df
-    raise ValueError(f'美股 {code} 在腾讯通道未取到数据（已尝试交易所后缀，最后尝试 {last_symbol}）')
+        if df is None or df.empty:
+            continue
+        if best_df is None or len(df) > len(best_df):
+            best_df = df
+        if len(best_df) >= required:
+            # 覆盖度已达标，无需再试其余后缀（省一次远端请求）
+            return best_df
+    if best_df is not None:
+        return best_df
+    raise ValueError(f'美股 {code} 在腾讯通道未取到数据（已尝试交易所后缀 {"/".join(candidates)}）')
 
 
 def get_price(code, end_date='',count=10, frequency='1d', fields=[]):        #对外暴露只有唯一函数，这样对用户才是最友好的

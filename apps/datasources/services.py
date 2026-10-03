@@ -387,6 +387,32 @@ def fetch_kline_from_ashare_tx(symbol, start_date, end_date, adjust='qfq'):
     return _normalize_ashare_kline_dataframe(df, symbol)
 
 
+def fetch_kline_from_sina_us(symbol, start_date, end_date, adjust='qfq'):
+    """美股日线：**新浪** ``US_MinKService.getDailyK`` 通道（第三级回退）。
+
+    定位：腾讯与东财对部分标的（实测 ``AGQ``/``SCO`` 等 ProShares 反向杠杆 ETF）
+    **都没有历史数据**——腾讯仅返回当天 1 根且无复权序列，东财需 ``107.`` 前缀。
+    新浪提供完整历史（实测 AGQ 自 2008-12-04 起 4483 根），故作为最后一级回退。
+
+    与腾讯通道共用 ``_tx_window_filter`` 做窗口裁剪：新浪返回全部历史，
+    必须按请求窗口裁剪，否则会把窗口外的历史行一并入库（污染分表与增量判断）。
+
+    新浪仅提供不复权数据，``adjust`` 被忽略——对反向杠杆 ETF 复权亦无意义。
+    """
+    if isinstance(start_date, str):
+        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    if isinstance(end_date, str):
+        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+
+    count = max(1, (end_date - start_date).days + 1)
+    label = f"{symbol.market}:{symbol.code}"
+    df = ashare_lib.get_price_day_sina_us(symbol.code, end_date=end_date, count=count, adjust=adjust)
+    df = _tx_window_filter(df, start_date, end_date, f'{label}(新浪)')
+    if df is None or df.empty:
+        raise ValueError(f"{label} 在新浪通道未查询到 {start_date}~{end_date} 的日线数据")
+    return _normalize_ashare_kline_dataframe(df, symbol)
+
+
 def _a_share_fetch_code(symbol):
     """A 股拉取用代码：修正 000xxx 二义段的指数语义。
 
@@ -411,6 +437,46 @@ def _fetch_kline_east_money(symbol, start_date, end_date, adjust):
     return fetch_kline_from_akshare_us(symbol, start_date, end_date, adjust)
 
 
+def _expected_trading_days(start_date, end_date):
+    """估算窗口内应有的交易日数量（粗略：自然日数×5/7，扣除周末即可）。
+
+    仅用于「返回行数是否明显残缺」的量级判断，不追求精确的节假日日历——
+    阈值本身留有余量（见 ``_SUSPECT_THIN_MIN_ROWS`` / ``_SUSPECT_THIN_RATIO``），
+    因此节假日差异不会造成误判。
+    """
+    days = (end_date - start_date).days + 1
+    return max(1, int(days * 5 / 7))
+
+
+# 「疑似残缺」判定阈值：
+# - 少于 ``_SUSPECT_THIN_MIN_ROWS`` 根绝对值：例如请求近 300 天却只回 1~2 根；
+# - 或返回根数不足期望交易日数的 ``_SUSPECT_THIN_RATIO`` 倍：例如请求 300 天只回 50 根。
+# 两者取「或」的关系，只要命中其一即视为残缺并触发东财通道补全。
+_SUSPECT_THIN_MIN_ROWS = 3
+_SUSPECT_THIN_RATIO = 0.6
+
+
+def _is_suspect_thin_kline(df, start_date, end_date):
+    """判断 K 线结果是否「非空但明显残缺」。
+
+    腾讯通道对部分标的（实测 ETF 类的 AGQ / SCO）会返回 **HTTP 200 + 非空数组、
+    但只有 1 根**，既不报错也不为空。若仅以「非空 / 是否抛异常」判定成功，
+    这类残缺数据会被直接入库，且**永不触发东财回退**——库内最终只有当天一条。
+
+    因此对「返回行数 vs 窗口应有交易日数」做量级校验，明显不成比例时判定为残缺。
+    短窗口（期望交易日数本就很少）不会误判：低于 ``_SUSPECT_THIN_MIN_ROWS``
+    的绝对下限才触发，而短窗口若真有数据，其行数本就接近期望值。
+    """
+    if df is None or df.empty:
+        return False
+    actual = len(df)
+    if actual >= _SUSPECT_THIN_MIN_ROWS:
+        expected = _expected_trading_days(start_date, end_date)
+        return actual < expected * _SUSPECT_THIN_RATIO
+    # 只有 1~2 根：仅当窗口本身明显长于它们时才判定为残缺
+    return _expected_trading_days(start_date, end_date) > _SUSPECT_THIN_MIN_ROWS
+
+
 def fetch_kline_from_ashare(symbol, start_date, end_date, adjust='qfq'):
     """按市场分派拉取日线数据，返回统一的规范化 DataFrame。
 
@@ -421,6 +487,14 @@ def fetch_kline_from_ashare(symbol, start_date, end_date, adjust='qfq'):
     港美股以腾讯为主源的理由：通道覆盖港美股全部市场、不依赖 akshare 可用性、
     实测无静默失败；东财整段不可达时仍能完成同步。东财保留为回退，用于补齐
     腾讯缺失的成交额等字段并提高整体成功率。
+
+    **回退判据不能只看「是否抛异常」**（见 ``_is_suspect_thin_kline``）：实测 ETF 类标的
+    （``AGQ``/``SCO`` 等 ProShares 反向杠杆 ETF）腾讯会返回 **HTTP 200 + 非空数组
+    但只有 1 根**，既不报错也不为空。若仅以「非空 / 未抛异常」判定成功，残缺数据会
+    被直接入库，且**东财通道永远不会被触发**，库内最终只有当天一条。
+    因此额外做「返回行数 vs 窗口应有交易日数」的量级校验：明显不成比例即判定残缺 →
+    回退东财并取行数更多的一方；东财也不可用时**保留腾讯结果**而非让整个同步失败。
+    短窗口（新股 / 当日同步）与空结果不会误判，分别沿用原有分支。
 
     两条通道都在失败时抛出可定位 ``ValueError``（含各自通道名），由上层记入同步日志。
 
@@ -433,18 +507,66 @@ def fetch_kline_from_ashare(symbol, start_date, end_date, adjust='qfq'):
         end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
 
     if symbol.market in ('HK', 'US'):
+        tx_df = None
+        tx_exc = None
         try:
-            return fetch_kline_from_ashare_tx(symbol, start_date, end_date, adjust)
-        except Exception as tx_exc:
-            # 腾讯主源失败 → 回退东财通道；两通道都失败时抛出带双通道原因的可定位错误
-            logger.warning(f"{symbol.code} 腾讯通道失败，回退东财通道：{tx_exc}")
+            tx_df = fetch_kline_from_ashare_tx(symbol, start_date, end_date, adjust)
+        except Exception as exc:
+            tx_exc = exc
+            logger.warning(f"{symbol.code} 腾讯通道失败：{exc}")
+
+        # 交叉校验：腾讯对部分标的（实测 ETF 类 AGQ / SCO）会「成功」返回
+        # **非空但只有 1 根**的数据（HTTP 200，不抛异常），因此「不抛错」不等于「数据完整」。
+        # 若返回行数显著少于窗口应有的交易日数，判定为疑似残缺并回退东财通道，
+        # 取行数更多的一方；若东财也不可用，至少保留腾讯结果而不是让整个同步失败。
+        if tx_df is not None and not tx_df.empty and _is_suspect_thin_kline(tx_df, start_date, end_date):
+            expected = _expected_trading_days(start_date, end_date)
+            logger.warning(
+                f"{symbol.code} 腾讯通道返回 {len(tx_df)} 根，窗口 {start_date}~{end_date} "
+                f"应有约 {expected} 根，判定为数据残缺，尝试东财通道补全"
+            )
             try:
-                return _fetch_kline_east_money(symbol, start_date, end_date, adjust)
+                em_df = _fetch_kline_east_money(symbol, start_date, end_date, adjust)
+                if em_df is not None and not em_df.empty and len(em_df) > len(tx_df):
+                    logger.info(
+                        f"{symbol.code} 采用东财通道结果 {len(em_df)} 根"
+                        f"（腾讯仅 {len(tx_df)} 根）"
+                    )
+                    return em_df
+                logger.warning(f"{symbol.code} 东财通道未取到更多数据，保留腾讯结果 {len(tx_df)} 根")
+                return tx_df
             except Exception as em_exc:
-                raise ValueError(
-                    f"{symbol.market} {symbol.code} 日线拉取失败"
-                    f"（腾讯通道：{tx_exc}；东财通道：{em_exc}）"
-                ) from em_exc
+                logger.info(f"{symbol.code} 东财通道补全失败（{em_exc}），尝试新浪通道")
+                try:
+                    sina_df = fetch_kline_from_sina_us(symbol, start_date, end_date, adjust)
+                    if sina_df is not None and not sina_df.empty and len(sina_df) > len(tx_df):
+                        logger.info(
+                            f"{symbol.code} 采用新浪通道结果 {len(sina_df)} 根"
+                            f"（腾讯仅 {len(tx_df)} 根）"
+                        )
+                        return sina_df
+                    logger.warning(
+                        f"{symbol.code} 新浪通道未取到更多数据，保留腾讯结果 {len(tx_df)} 根"
+                    )
+                    return tx_df
+                except Exception as sina_exc:
+                    logger.warning(
+                        f"{symbol.code} 新浪通道补全失败（{sina_exc}），保留腾讯结果 {len(tx_df)} 根"
+                        f"；注意：三个通道均未提供完整历史，疑似数据源缺失该标的的日线序列"
+                    )
+                    return tx_df
+
+        if tx_df is not None:
+            return tx_df
+
+        # 腾讯通道彻底失败 → 回退东财通道；两通道都失败时抛出带双通道原因的可定位错误
+        try:
+            return _fetch_kline_east_money(symbol, start_date, end_date, adjust)
+        except Exception as em_exc:
+            raise ValueError(
+                f"{symbol.market} {symbol.code} 日线拉取失败"
+                f"（腾讯通道：{tx_exc}；东财通道：{em_exc}）"
+            ) from em_exc
 
     if symbol.market == 'A' and hasattr(ak, 'stock_zh_a_hist'):
         df = ak.stock_zh_a_hist(
