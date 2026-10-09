@@ -210,6 +210,8 @@ export SETUP_ENABLED=0
 
 把既有系统以 **MCP（Model Context Protocol）** 工具形式暴露给 AI 助手 / 前端，用于查询标的、K 线、策略元数据、告警与分时监控。
 
+> **接入方（AI Agent / 智能体）请先读 [`MCP_AGENT_GUIDE.md`](MCP_AGENT_GUIDE.md)** ——含完整工具清单、只读/写分组、典型工作流、写操作纪律与错误契约。
+
 ### 启动
 
 ```powershell
