@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from apps.execution.fund_sync import (
     FundSyncError, ensure_funds_fresh, mask_account, normalize_cash,
-    sync_account_funds, sync_published_plan_accounts,
+    normalize_positions, sync_account_funds, sync_published_plan_accounts,
 )
 from apps.execution.models import AccountFundConfig
 from apps.plans.models import Plan
@@ -535,3 +535,133 @@ class SyncAccountFundsCommandTest(TestCase):
         with patch('runner.gm_adapter.GmBrokerAdapter', side_effect=RuntimeError('no token')):
             with self.assertRaisesRegex(CommandError, 'gm 账户查询通道'):
                 self._run(account_id=ACCOUNT)
+
+
+# ============ 预配置 gm user id：持仓快照与账户匹配（2026-10-09）============
+
+class _PositionBroker(_FakeBroker):
+    """带持仓的账户查询替身。"""
+
+    def __init__(self, cash=None, positions=None, positions_error=None):
+        super().__init__(cash=cash)
+        self.positions = positions or []
+        self.positions_error = positions_error
+
+    def get_positions(self):
+        if self.positions_error is not None:
+            raise self.positions_error
+        return self.positions
+
+
+class NormalizePositionsTest(TestCase):
+    """持仓归一：代码形态归一（gm 带交易所前缀）、空仓过滤、外部持仓判定。"""
+
+    def test_gm_prefix_matches_plain_code(self):
+        """gm 返回 SHSE.600000，系统存 600000 → 应判为纳管持仓（非外部）。"""
+        snap = normalize_positions(
+            [{'symbol': 'SHSE.600000', 'volume': 100, 'closep': 10.5, 'market_value': 1050}],
+            ACCOUNT, known_symbols={'600000'},
+        )
+        self.assertEqual(snap.external_symbols, [])
+        self.assertEqual(snap.positions[0]['is_external'], False)
+
+    def test_external_position_detected(self):
+        """不在系统纳管范围内的持仓 → 外部持仓（提示改用 cash 口径）。"""
+        snap = normalize_positions(
+            [{'symbol': 'HK.00700', 'volume': 50, 'value': 25000}],
+            ACCOUNT, known_symbols={'600000', '000426'},
+        )
+        self.assertEqual(snap.external_symbols, ['HK.00700'])
+        self.assertTrue(snap.as_dict()['has_external_position'])
+
+    def test_zero_volume_row_ignored(self):
+        """volume<=0 的空仓占位不算持仓。"""
+        snap = normalize_positions(
+            [{'symbol': 'SHSE.600519', 'volume': 0, 'closep': 1600}],
+            ACCOUNT, known_symbols={'600519'},
+        )
+        self.assertEqual(snap.positions, [])
+        self.assertEqual(snap.total_volume, Decimal('0'))
+
+    def test_market_value_falls_back_to_price_times_volume(self):
+        """缺 market_value 时用 价格×数量 推导（与 risk.py 字段回退一致）。"""
+        snap = normalize_positions(
+            [{'symbol': 'SHSE.600000', 'volume': 200, 'closep': 10}],
+            ACCOUNT, known_symbols={'600000'},
+        )
+        self.assertEqual(snap.total_market_value, Decimal('2000'))
+
+    def test_no_known_symbols_skips_external_judgement(self):
+        """known_symbols 为空 → 不做外部判定（无法判断纳管范围）。"""
+        snap = normalize_positions(
+            [{'symbol': 'SHSE.600000', 'volume': 100}], ACCOUNT, known_symbols=None)
+        self.assertEqual(snap.external_symbols, [])
+
+    def test_empty_and_malformed_input(self):
+        for raw in (None, [], 'x', [None, 'y', {}]):
+            snap = normalize_positions(raw, ACCOUNT, known_symbols={'1'})
+            self.assertEqual(snap.positions, [])
+
+
+class SyncWithPositionsTest(TestCase):
+    """持仓快照随资金同步一起写入账户配置行。"""
+
+    databases = ['default', 'kline']
+
+    def setUp(self):
+        from apps.watchlists.models import Symbol
+        Symbol.objects.get_or_create(code='600000', defaults={'name': '浦发', 'market': 'A', 'exchange': 'SSE'})
+
+    def test_positions_written_to_config(self):
+        broker = _PositionBroker(
+            cash=FULL_CASH,
+            positions=[{'symbol': 'SHSE.600000', 'volume': 100, 'closep': 10.5, 'market_value': 1050}],
+        )
+        sync_account_funds(ACCOUNT, broker)
+        cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
+        self.assertEqual(cfg.position_count, 1)
+        self.assertEqual(cfg.position_symbols, ['SHSE.600000'])
+        self.assertFalse(cfg.has_external_position)
+        self.assertIsNotNone(cfg.position_synced_at)
+
+    def test_external_position_sets_basis_suggestion(self):
+        """外部持仓 → 建议改 cash 口径（仅提示，不自动改用户选择）。"""
+        broker = _PositionBroker(
+            cash=FULL_CASH,
+            positions=[{'symbol': 'HK.00700', 'volume': 50, 'value': 25000}],
+        )
+        result = sync_account_funds(ACCOUNT, broker)
+        cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
+        self.assertTrue(cfg.has_external_position)
+        self.assertEqual(cfg.basis_suggestion, 'cash')
+        self.assertEqual(result.get('basis_suggestion'), 'cash')
+        # 不自动改用户已选口径
+        self.assertEqual(cfg.capital_basis, 'total')
+
+    def test_position_failure_does_not_block_fund_sync(self):
+        """持仓查询失败**不阻断**资金同步（资金是额度上限的主依据）。"""
+        broker = _PositionBroker(cash=FULL_CASH, positions_error=RuntimeError('gm 持仓接口异常'))
+        result = sync_account_funds(ACCOUNT, broker)
+        cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
+        self.assertEqual(str(cfg.total_capital), '100000.00')
+        self.assertIsNone(result['positions'])
+
+    def test_position_failure_keeps_previous_snapshot(self):
+        """持仓查询失败 → 保留上次快照（不误清空导致外部持仓提示消失）。"""
+        first = _PositionBroker(
+            cash=FULL_CASH,
+            positions=[{'symbol': 'HK.00700', 'volume': 50, 'value': 25000}],
+        )
+        sync_account_funds(ACCOUNT, first)
+        broker = _PositionBroker(cash=FULL_CASH, positions_error=RuntimeError('boom'))
+        sync_account_funds(ACCOUNT, broker)
+        cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
+        self.assertEqual(cfg.position_count, 1)
+        self.assertTrue(cfg.has_external_position)
+
+    def test_can_skip_positions(self):
+        broker = _PositionBroker(cash=FULL_CASH,
+                                 positions=[{'symbol': 'SHSE.600000', 'volume': 1}])
+        sync_account_funds(ACCOUNT, broker, with_positions=False)
+        cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
+        self.assertEqual(cfg.position_count, 0)

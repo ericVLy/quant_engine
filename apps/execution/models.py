@@ -1,8 +1,10 @@
 ﻿# pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
+from decimal import Decimal
 from django.db import models
 from django.conf import settings
 from apps.plans.models import Plan
 from apps.suites.models import Suite
+
 
 
 class SuiteRun(models.Model):
@@ -142,6 +144,10 @@ class ExecutionLog(models.Model):
 class AccountFundConfig(models.Model):
     """交易账户资金配置（单账户单行）：账户总资金是 Plan 占用资金的上限。
 
+    本表同时充当**gm user id 的预配置表**：``account_id`` 即 gm 终端的 user id，
+    部署时预先登记若干账户，Plan 的资金占用按该 id 匹配到本行（见
+    ``state_machine.validate_plan_capital``）。
+
     ``total_capital`` 是**账户总资产（权益）**，即"Plan 可占用资金"的总额上限：
 
     - ``source='manual'``：由管理员在后台手工维护；
@@ -156,6 +162,9 @@ class AccountFundConfig(models.Model):
     - ``total``（默认）：``balance + market_value``——账户总资产；
     - ``cash``：只取 ``balance``——忽略持仓市值（**存在外部持仓时推荐**）；
     - ``available``：只取 gm ``available``——最保守，只算当前真正可买。
+
+    同步时会按持仓快照判定是否存在**外部持仓**（``has_external_position``）并给出
+    口径建议，但不自动改动用户已选的 ``capital_basis``——改口径属于业务决策。
 
     另有一条不变式：同步得到的额度**不会低于该账户已分配额度之和**
     （见 ``fund_sync.sync_account_funds``），避免盘中波动追溯性地作废既有额度分配。
@@ -176,7 +185,13 @@ class AccountFundConfig(models.Model):
     ]
 
     account_id = models.CharField(max_length=64, blank=True, verbose_name='交易账户ID', unique=True)
-    total_capital = models.DecimalField(max_digits=18, decimal_places=2, verbose_name='账户总资金')
+    # 展示名/备注，便于运维区分多个 gm 账户
+    display_name = models.CharField(max_length=100, blank=True, verbose_name='账户名称')
+    remark = models.CharField(max_length=200, blank=True, verbose_name='备注')
+    # 未启用的账户不参与 Plan 资金匹配（保留配置但暂不投用）
+    is_active = models.BooleanField(default=True, verbose_name='启用')
+    total_capital = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal('0.00'), verbose_name='账户总资金')
     source = models.CharField(
         max_length=10, choices=SOURCE_CHOICES, default='manual', verbose_name='资金来源')
     capital_basis = models.CharField(
@@ -190,12 +205,46 @@ class AccountFundConfig(models.Model):
     synced_at = models.DateTimeField(
         null=True, blank=True, verbose_name='最近同步时间')
 
+    # ---- 持仓快照（2026-10-09：预配置 gm user id 后由同步写入）----
+    position_count = models.IntegerField(
+        default=0, verbose_name='持仓数量')
+    position_volume = models.DecimalField(
+        max_digits=20, decimal_places=2, default=0, verbose_name='持仓总股数')
+    # 逐笔持仓明细（symbol/volume/price/market_value），仅用于展示与排查；
+    # **不进入风控计算**，风控仍以实时账户快照为准。
+    positions = models.JSONField(default=list, blank=True, verbose_name='持仓明细快照')
+    position_symbols = models.JSONField(
+        default=list, blank=True, verbose_name='持仓标的代码列表')
+    # 存在"本项目未纳管"的持仓（标的不在系统 Symbol 范围内）。这类持仓市值盘中
+    # 波动会让 total 口径忽高忽低，故据此提示改用 cash 口径。
+    has_external_position = models.BooleanField(
+        default=False, verbose_name='存在外部持仓')
+    external_position_symbols = models.JSONField(
+        default=list, blank=True, verbose_name='外部持仓标的列表')
+    position_synced_at = models.DateTimeField(
+        null=True, blank=True, verbose_name='持仓最近同步时间')
+
     class Meta:
         verbose_name = '账户资金配置'
         verbose_name_plural = '账户资金配置'
+        ordering = ('account_id',)
 
     def __str__(self):
         return f'{self.account_id or "default"} total={self.total_capital} ({self.source})'
+
+    @property
+    def label(self):
+        """展示用名称：有 display_name 优先，否则用脱敏后的账户 ID。
+
+        ``mask_account`` 在函数内导入：``fund_sync`` 会（惰性）导入本模型，
+        模块级互导会形成循环导入。
+        """
+        if self.display_name:
+            return self.display_name
+        # 用redaction（只依赖标准库）而非 fund_sync：后者会惰性导入本模型，
+        # 从models 反向导入它会形成循环导入。
+        from .redaction import mask_account_id
+        return mask_account_id(self.account_id)
 
     @property
     def allocated_capital(self):
@@ -207,6 +256,11 @@ class AccountFundConfig(models.Model):
         return total or 0
 
     @property
+    def plan_count(self):
+        """引用该账户的 Plan 数量（停用账户前需确认已解除引用）。"""
+        return Plan.objects.filter(account_id=self.account_id).count()
+
+    @property
     def available_capital(self):
         """空闲资金 = 总资金 - 已占用。"""
         return self.total_capital - self.allocated_capital
@@ -215,6 +269,19 @@ class AccountFundConfig(models.Model):
     def is_stale(self):
         """是否从未同步过 gm 资金（``source='gm'`` 但无同步时间）。"""
         return self.source == 'gm' and self.synced_at is None
+
+    @property
+    def basis_suggestion(self) -> str:
+        """按持仓结构给出的口径建议（仅提示，不自动改用户选择）。
+
+        - 存在外部持仓 → 建议 ``cash``：外部持仓市值盘中波动会让 total 口径
+          的额度忽高忽低，甚至短暂低于已分配额度之和；
+        - 账户无任何持仓 → ``total`` 与 ``cash`` 等价，无需特别提示；
+        - 仅有本项目纳管持仓 → total 口径可用（持仓市值确属可部署资源）。
+        """
+        if self.has_external_position:
+            return 'cash'
+        return ''
 
 
 

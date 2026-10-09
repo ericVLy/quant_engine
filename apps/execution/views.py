@@ -8,12 +8,13 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel, NodeRun
+from .models import (SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation,
+                    Alert, AlertChannel, NodeRun, AccountFundConfig)
 from .serializers import (
     EventTypeRegistrySerializer, EventSerializer,
     SuiteRunSerializer, ExecutionLogSerializer, OrderSerializer,
     FundAllocationSerializer, AlertSerializer, AlertChannelSerializer, AlertActionSerializer,
-    NodeRunSerializer,
+    NodeRunSerializer, AccountFundConfigSerializer,
 )
 from .redaction import redact_text
 from .registry import EventRegistry
@@ -157,6 +158,76 @@ class ExecutionLogViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ExecutionLog.objects.select_related('plan').all().order_by('-trigger_time')
     serializer_class = ExecutionLogSerializer
     filterset_fields = ['symbol', 'plan', 'status']
+
+
+class AccountFundConfigViewSet(viewsets.ModelViewSet):
+    """gm 账户预配置（gm user id → 资金/持仓快照）。
+
+    Plan 的资金占用按 ``account_id``（即 gm user id）匹配到本表的一行；
+    资金与持仓字段只读，由 ``sync`` 动作从 gm 拉取后写入。
+
+    账户配置含账户 ID（半敏感），按 N-05 收敛为**管理员可写、登录用户只读**。
+    """
+
+    queryset = AccountFundConfig.objects.all().order_by('account_id')
+    serializer_class = AccountFundConfigSerializer
+    filterset_fields = ['is_active', 'source', 'capital_basis']
+
+    def get_permissions(self):
+        """写操作（增删改、立即同步）仅管理员；读取任意登录用户。"""
+        if self.action in {'create', 'update', 'partial_update', 'destroy', 'sync'}:
+            return [permissions.IsAdminUser()]
+        return [permissions.IsAuthenticated()]
+
+    @action(detail=True, methods=['post'], url_path='sync')
+    def sync(self, request, pk=None):
+        """立即从 gm 拉取该账户的资金与持仓并回写。
+
+        需要服务端配置 gm 通道（``GM_TOKEN`` 等）；未配置时返回 400 并给出可定位提示。
+        """
+        from .fund_sync import FundSyncError, sync_account_funds
+
+        account = self.get_object()
+        try:
+            broker = build_gm_broker_from_settings()
+        except Exception as exc:  # pylint: disable=broad-except
+            return Response(
+                {'detail': f'gm 通道不可用：{redact_text(str(exc))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            result = sync_account_funds(
+                account.account_id,
+                broker,
+                source='gm',
+                capital_basis=account.capital_basis,
+            )
+        except FundSyncError as exc:
+            # 同步失败保留上次成功值（绝不写 0），故返回 400 而非 500
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        account.refresh_from_db()
+        return Response({
+            'account': AccountFundConfigSerializer(account).data,
+            'sync': result,
+        })
+
+
+def build_gm_broker_from_settings():
+    """按服务端配置构造 gm 账户查询适配器（无 gm 令牌时抛异常）。
+
+    与 ``run_scheduler --funds-source gm`` 使用同一套环境变量口径，
+    避免"命令行能同步、页面不能同步"的两套配置。
+    """
+    import os
+
+    from django.conf import settings as django_settings
+
+    from runner.gm_adapter import GmBrokerAdapter
+
+    token = getattr(django_settings, 'GM_TOKEN', '') or os.getenv('GM_TOKEN', '')
+    if not token:
+        raise RuntimeError('未配置 GM_TOKEN，无法连接 gm 终端')
+    return GmBrokerAdapter(token)
 
 
 class FundAllocationViewSet(viewsets.ModelViewSet):

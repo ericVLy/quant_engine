@@ -104,6 +104,7 @@ def validate_risk_allowed_sessions(value):
 
 class PlanSerializer(serializers.ModelSerializer):
     available_capital = serializers.SerializerMethodField()
+    account_status = serializers.SerializerMethodField(help_text='账户匹配状态与提示，供前端提示用户')
 
     class Meta:
         model = Plan
@@ -119,6 +120,40 @@ class PlanSerializer(serializers.ModelSerializer):
         except AccountFundConfig.DoesNotExist:
             return None
         return str(cfg.available_capital)
+
+    def get_account_status(self, obj):
+        """该 Plan 绑定账户的匹配状态（供前端提示，不参与校验）。
+
+        返回 ``{configured, is_active, available_capital, basis_suggestion, warning}``；
+        ``warning`` 在"额度口径与外部持仓不匹配"时给出可读提示。
+        """
+        from apps.execution.models import AccountFundConfig
+
+        if not obj.account_id:
+            return {'configured': False, 'is_active': False, 'available_capital': None,
+                    'basis_suggestion': '', 'warning': ''}
+        cfg = AccountFundConfig.objects.filter(account_id=obj.account_id).first()
+        if cfg is None:
+            return {
+                'configured': False, 'is_active': False, 'available_capital': None,
+                'basis_suggestion': '',
+                'warning': '账户未预配置，无法校验占用资金',
+            }
+        warning = ''
+        if not cfg.is_active:
+            warning = '账户已停用，无法为其分配占用资金'
+        elif cfg.has_external_position and cfg.capital_basis == 'total':
+            warning = (
+                f'该账户存在外部持仓（{len(cfg.external_position_symbols)} 只，'
+                '市值随行情波动），建议将额度口径改为「账面资金」以免额度忽高忽低'
+            )
+        return {
+            'configured': True,
+            'is_active': cfg.is_active,
+            'available_capital': str(cfg.available_capital),
+            'basis_suggestion': cfg.basis_suggestion,
+            'warning': warning,
+        }
 
     def validate_allocated_capital(self, value):
         if value is None:

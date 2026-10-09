@@ -698,6 +698,14 @@ class AccountFundConfig(models.Model):
     # total_capital >= allocated_capital（同步不变式，见模块8「额度口径」）
     # available_capital  = total_capital - allocated_capital（属性，内部额度）
     # is_stale           = source == 'gm' and synced_at is None（属性）
+    # ---- 2026-10-09 新增：预配置与持仓快照 ----
+    # display_name / remark / is_active：账户展示名、备注、启用开关（停用后不参与 Plan 匹配）
+    # position_count / position_volume / positions / position_symbols：持仓快照（展示与口径判断）
+    # has_external_position / external_position_symbols：是否存在本项目未纳管的持仓
+    # position_synced_at：持仓最近同步时间
+    # plan_count   = 引用该账户的 Plan 数（属性；停用前校验，避免额度校验悬空）
+    # basis_suggestion = 按持仓结构给出的口径建议（属性；'' 表示无建议，仅提示不自动改）
+    # masked_account_id：响应中的脱敏账户 ID（N-05，序列化器字段）
     # 由 apps.execution.fund_sync 按 gm get_cash 同步（见模块8「账户资金总量管理」）
 
 class FundAllocation(models.Model):

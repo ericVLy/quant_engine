@@ -183,29 +183,44 @@ def complete_plan(plan):
 
 @transaction.atomic
 def validate_plan_capital(plan):
-    """Plan 创建/更新时校验：allocated_capital 必须 ≤ 账户空闲资金。
+    """Plan 创建/更新时校验：按 gm user id 匹配预配置账户，且占用 ≤ 账户空闲资金。
+
+    ``plan.account_id`` 存**预配置的 gm user id**，与 ``AccountFundConfig``（账户
+    预配置表）按 ``account_id`` 精确匹配：
+
+    - 未登记该 id → 提示先去账户管理里预配置；
+    - 已登记但停用（``is_active=False``）→ 拒绝，避免把额度分配到不投用的账户；
+    - 已同步 gm 资金但持仓里有**外部标的**且仍用 ``total`` 口径 → 给出提醒
+      （不阻断：改口径属业务决策，只提示外部持仓市值会令额度随行情波动）。
 
     使用 select_for_update 对 AccountFundConfig 行加锁，
     保证校验 + 占用在同一事务内原子完成，消除并发 race condition。
     """
     if not plan.account_id or not plan.allocated_capital:
         return
+    from .fund_sync import mask_account
     from .models import AccountFundConfig
+
+    masked = mask_account(plan.account_id)
     try:
         cfg = AccountFundConfig.objects.select_for_update().get(account_id=plan.account_id)
     except AccountFundConfig.DoesNotExist:
         # 缺配置记录是控制流信号，原异常（DoesNotExist）对使用者无信息量，
         # 显式抑制异常链，与 mcp_server/mutations.py 的同类处理保持一致。
         raise StateMachineError(
-            f'账户 {plan.account_id} 未配置资金，无法创建 Plan'
+            f'账户 {masked} 未预配置，无法占用资金；请先在「账户管理」中登记该 gm user id'
         ) from None
+
+    if not cfg.is_active:
+        raise StateMachineError(f'账户 {masked} 已停用，无法为其分配占用资金')
+
     used = Plan.objects.filter(account_id=plan.account_id).exclude(
         pk=plan.pk,
     ).aggregate(total=_sum('allocated_capital'))['total'] or Decimal('0')
     available = cfg.total_capital - used
     if plan.allocated_capital > available:
         raise StateMachineError(
-            f'Plan 占用资金 {plan.allocated_capital} 超过账户空闲资金 {available}'
+            f'Plan 占用资金 {plan.allocated_capital} 超过账户 {masked} 空闲资金 {available}'
             f'（总资金 {cfg.total_capital}，已占用 {used}）'
         )
 

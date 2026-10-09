@@ -64,10 +64,12 @@ logger = logging.getLogger(__name__)
 __all__ = [
     'CAPITAL_BASES',
     'AccountSnapshot',
+    'PositionSnapshot',
     'FundSyncError',
     'ensure_funds_fresh',
     'mask_account',
     'normalize_cash',
+    'normalize_positions',
     'sync_account_funds',
     'sync_published_plan_accounts',
 ]
@@ -191,6 +193,136 @@ def normalize_cash(raw, account_id='') -> AccountSnapshot:
     )
 
 
+@dataclass
+class PositionSnapshot:
+    """一次账户持仓查询的归一结果。
+
+    持仓明细仅用于**展示与外部持仓判定**，不参与风控计算（风控仍以实时账户
+    快照为准，见 ``runner.risk.RiskController``）。
+    """
+
+    account_id: str
+    positions: list[dict[str, Any]] = None  # type: ignore[assignment]
+    total_volume: Decimal = Decimal('0')
+    total_market_value: Decimal = Decimal('0')
+    external_symbols: list[str] = None  # type: ignore[assignment]
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON 安全表示（``Decimal`` → 字符串）。"""
+        return {
+            'account_id': self.account_id,
+            'positions': self.positions or [],
+            'position_count': len(self.positions or []),
+            'total_volume': str(self.total_volume),
+            'total_market_value': str(self.total_market_value),
+            'external_symbols': self.external_symbols or [],
+            'has_external_position': bool(self.external_symbols),
+        }
+
+
+def _position_market_value(item: dict[str, Any]) -> Decimal | None:
+    """取持仓市值：gm 返回 ``market_value``，部分版本给 ``value``。
+
+    与 ``runner.risk`` 的字段回退顺序保持一致，避免两处口径不同。
+    """
+    for key in ('market_value', 'value'):
+        if key in item:
+            got = _to_decimal(item.get(key))
+            if got is not None:
+                return got
+    return None
+
+
+def _position_price(item: dict[str, Any]) -> Decimal | None:
+    """取持仓价格：``closep`` / ``price`` / ``cost_price``（gm 各版本命名不一）。"""
+    for key in ('closep', 'price', 'cost_price'):
+        got = _to_decimal(item.get(key))
+        if got is not None:
+            return got
+    return None
+
+
+def _canonical_symbol(symbol: str) -> str:
+    """把标的代码归一为可比较的形式（用于外部持仓判定）。
+
+    gm 返回交易所前缀形式（``SHSE.600000`` / ``SZSE.000001``），而本系统
+    ``Symbol.code`` 存纯数字或``sh``/``sz`` 前缀形式（``600000`` / ``sh000001``），
+    两者直接比较会把**全部**持仓误判为外部持仓。故统一去掉交易所段与分隔符，
+    只保留数字部分再比较。
+    """
+    text = str(symbol or '').strip().upper()
+    if '.' in text:                      # SHSE.600000 → 600000
+        text = text.rsplit('.', 1)[-1]
+    for prefix in ('SH', 'SZ', 'BJ'):    # sh000001 → 000001
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return text.lstrip('.').strip()
+
+
+def normalize_positions(raw, account_id='', known_symbols=None) -> PositionSnapshot:
+    """把 gm 持仓列表归一为 :class:`PositionSnapshot`。
+
+    Args:
+        raw: gm ``get_position`` 返回的 list；``None`` 也可传入（视为空仓）。
+        account_id: 账户 ID（gm user id），用于回填。
+        known_symbols: **本系统已纳管**的标的代码集合。用于判定外部持仓——
+            不在其中的持仓即"本项目未管理"，其市值盘中波动会让 ``total`` 口径
+            额度忽高忽低，故据此提示改用 ``cash`` 口径。两侧代码会经
+            :func:`_canonical_symbol` 归一后再比较（gm 带 ``SHSE.`` 前缀而
+            系统存纯数字）。``None`` 或空集合表示跳过判定。
+
+    Returns:
+        PositionSnapshot: 归一后的持仓；``total_market_value`` 为 0 且明细为空
+        表示空仓或 gm 未返回持仓数据（两者对额度计算影响一致）。
+    """
+    items = raw if isinstance(raw, (list, tuple)) else []
+    known: set[str] = set()
+    if known_symbols:
+        known = {_canonical_symbol(s) for s in known_symbols if str(s).strip()}
+
+    normalized: list[dict[str, Any]] = []
+    total_volume = Decimal('0')
+    total_market_value = Decimal('0')
+    external: list[str] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get('symbol') or '').strip()
+        if not symbol:
+            continue
+        # 空仓占位（volume<=0）不算持仓
+        volume = _to_decimal(item.get('volume', item.get('quantity'))) or Decimal('0')
+        if volume <= 0:
+            continue
+        price = _position_price(item)
+        market_value = _position_market_value(item)
+        if market_value is None:
+            market_value = (price or Decimal('0')) * volume
+        total_volume += volume
+        total_market_value += market_value
+        # 无known 集合时不做外部判定（无法判断纳管范围）
+        is_external = bool(known) and _canonical_symbol(symbol) not in known
+        if is_external:
+            external.append(symbol)
+        normalized.append({
+            'symbol': symbol,
+            'volume': str(volume),
+            'price': None if price is None else str(price),
+            'market_value': str(market_value),
+            'is_external': is_external,
+        })
+
+    return PositionSnapshot(
+        account_id=str(account_id or ''),
+        positions=normalized,
+        total_volume=total_volume,
+        total_market_value=total_market_value,
+        external_symbols=sorted(set(external)),
+    )
+
+
 def _bind_account(broker, account_id) -> None:
     """把查询适配器绑定到目标账户（gm 要求先 ``set_account_id``）。
 
@@ -224,22 +356,40 @@ def _allocated_total(account_id) -> Decimal:
     return total or Decimal('0')
 
 
+def _resolve_capital(computed, allocated):
+    """按"额度不低于已分配额度之和"的不变式算出最终额度。
+
+    Returns:
+        tuple[Decimal, bool]: ``(total_capital, clamped)``；``clamped`` 表示口径值
+        被已分配额度托底（量化前比较，避免把"四舍五入"误报成托底）。
+    """
+    raw_total = max(computed, allocated)
+    clamped = raw_total != computed
+    # 量化到 2 位小数，与落库列（decimal_places=2）一致，使日志/页面展示完全相同
+    return raw_total.quantize(Decimal('0.01')), clamped
+
+
 @transaction.atomic
-def sync_account_funds(account_id, broker, source='gm', capital_basis='total') -> dict[str, Any]:
+def sync_account_funds(account_id, broker, source='gm', capital_basis='total',
+                       with_positions=True) -> dict[str, Any]:
     """按 gm 账户查询结果同步（upsert）``AccountFundConfig``。
 
     Args:
-        account_id: 交易账户 ID。
-        broker: 提供 ``get_account()`` 的适配器（``GmBrokerAdapter``）。
+        account_id: gm user id（交易账户 ID）。
+        broker: 提供 ``get_account()`` / ``get_positions()`` 的适配器
+            （``GmBrokerAdapter``）。
         source: 资金来源标记（``manual`` / ``gm``）。
         capital_basis: 额度口径（见 :data:`CAPITAL_BASES`）。账户存在
             **本项目未管理的持仓**时，盘中市值波动会让总资产口径忽高忽低，
             建议改用 ``cash``（只看账面资金）或 ``available``（最保守）。
+        with_positions: 是否同步持仓快照。持仓查询失败**不影响**资金同步
+            （资金是额度上限的主依据，持仓仅用于展示与口径提示）。
 
     Returns:
         dict: 同步结果摘要（``Decimal`` → 字符串），含实际生效的口径
         ``capital_basis``、口径原始值 ``computed_capital``、已分配额度
-        ``allocated_capital`` 与是否被下限托住 ``clamped``。
+        ``allocated_capital``、是否被下限托住 ``clamped``，以及
+        ``positions`` 持仓快照摘要。
 
     Raises:
         FundSyncError: 缺少账户 ID / 通道、口径非法，或 gm 未返回可推导的资金
@@ -267,6 +417,13 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total') -
             '（balance / market_value / nav 均为空），保持上次同步值'
         )
 
+    # ---- 持仓快照（失败不影响资金同步结果）----
+    # 注意：此处**不再**重复调_bind_account——上面查询资金时已绑定过，
+    # 同一账户重复绑定既多余（多一次 set_account_id 调用）又会让绑定计数类断言失真。
+    position_snapshot = None
+    if with_positions:
+        position_snapshot = _sync_positions_quietly(account_id, broker)
+
     # 口径取值；该口径字段缺失时回退到总资产口径
     computed = snapshot.capital_by_basis(capital_basis)
     effective_basis = capital_basis
@@ -290,14 +447,7 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total') -
     # 口径值可能短暂低于既有 Plan 的已分配额度；若照单全收，编辑既有 Plan 会
     # 误报"超过账户空闲资金"。取 max 保证同步不追溯性地作废既有额度分配。
     allocated = _allocated_total(account_id)
-    # 先在原始精度上判断"是否被已分配额度托底"，再量化到 2 位小数：
-    # gm 返回值普遍带小数位（如 997655.9999847412），若量化后再比较会把
-    # "四舍五入" 误报成 "托底"。
-    raw_total = max(computed, allocated)
-    clamped = raw_total != computed
-    # 量化到 2 位小数，与落库列（decimal_places=2）保持一致，
-    # 使命令/日志输出的额度与后台展示完全相同。
-    total_capital = raw_total.quantize(Decimal('0.01'))
+    total_capital, clamped = _resolve_capital(computed, allocated)
 
     config.total_capital = total_capital
     config.available_cash = snapshot.available_cash
@@ -306,6 +456,8 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total') -
     config.source = source
     config.capital_basis = effective_basis
     config.synced_at = now
+    if position_snapshot is not None:
+        _apply_positions(config, position_snapshot, now)
     config.save()
 
     if clamped:
@@ -318,18 +470,64 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total') -
         mask_account(account_id), total_capital, effective_basis, snapshot.available_cash,
         snapshot.market_value, snapshot.frozen_cash, '（新建配置行）' if created else '',
     )
+    return _build_result(snapshot, position_snapshot, created=created, synced_at=now,
+                         source=source, effective_basis=effective_basis,
+                         total_capital=total_capital, computed=computed,
+                         allocated=allocated, clamped=clamped)
+
+
+def _apply_positions(config, position_snapshot: PositionSnapshot, now) -> None:
+    """把持仓快照写入账户配置行（``config`` 由调用方save）。"""
+    config.position_count = len(position_snapshot.positions)
+    config.position_volume = position_snapshot.total_volume
+    config.positions = position_snapshot.positions
+    config.position_symbols = sorted({p['symbol'] for p in position_snapshot.positions})
+    config.has_external_position = bool(position_snapshot.external_symbols)
+    config.external_position_symbols = position_snapshot.external_symbols
+    config.position_synced_at = now
+
+
+def _build_result(snapshot, position_snapshot, *, created, synced_at, source,
+                  effective_basis, total_capital, computed, allocated, clamped):
+    """组装同步结果摘要（``Decimal`` → 字符串，可安全 JSON 化）。"""
     result = snapshot.as_dict()
     result.update({
         'created': created,
-        'synced_at': now.isoformat(),
+        'synced_at': synced_at.isoformat(),
         'source': source,
         'capital_basis': effective_basis,
         'total_capital': str(total_capital),
         'computed_capital': str(computed),
         'allocated_capital': str(allocated),
         'clamped': clamped,
+        'positions': position_snapshot.as_dict() if position_snapshot else None,
     })
+    if position_snapshot and position_snapshot.external_symbols:
+        # 外部持仓会让 total 口径额度随行情波动，提示改用 cash（仅提示，不自动改）
+        result['basis_suggestion'] = 'cash'
     return result
+
+
+def _sync_positions_quietly(account_id, broker) -> PositionSnapshot | None:
+    """查询并归一持仓；任何异常都降级为 ``None``（不阻断资金同步）。
+
+    调用方需已把broker 绑定到 ``account_id``（``sync_account_funds`` 在查资金时已绑定）。
+
+    持仓数据缺失时保留上一次快照——与资金"失败绝不写 0"的约定同源：
+    把持仓误清空会让"外部持仓"提示消失，诱导用户误用 ``total`` 口径。
+    """
+    try:
+        raw = broker.get_positions()
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning('账户 %s 持仓查询失败（保留上次快照）：%s',
+                       mask_account(account_id), exc)
+        return None
+    try:
+        from apps.watchlists.models import Symbol
+        known = set(Symbol.objects.values_list('code', flat=True))
+    except Exception:  # pylint: disable=broad-except  # pragma: no cover
+        known = set()
+    return normalize_positions(raw, account_id, known_symbols=known or None)
 
 
 def ensure_funds_fresh(account_id, broker, ttl_seconds=30, source='gm',

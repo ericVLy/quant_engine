@@ -1,6 +1,7 @@
 # pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
 from rest_framework import serializers
-from .models import SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation, Alert, AlertChannel, NodeRun
+from .models import (SuiteRun, Event, EventTypeRegistry, ExecutionLog, Order, FundAllocation,
+                    Alert, AlertChannel, NodeRun, AccountFundConfig)
 from .funds import FundError, allocate_funds
 from .registry import EventRegistry
 
@@ -98,6 +99,68 @@ class ExecutionLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExecutionLog
         fields = '__all__'
+
+
+class AccountFundConfigSerializer(serializers.ModelSerializer):
+    """gm 账户预配置：登记 gm user id、启用状态与额度口径，并回传资金/持仓快照。
+
+    写入侧（``account_id`` / ``display_name`` / ``is_active`` / ``capital_basis`` /
+    ``remark``）由管理员维护；资金与持仓字段全部**只读**——它们只能由
+    ``fund_sync.sync_account_funds`` 从 gm 同步写入，避免前端误改导致额度失真。
+    """
+
+    allocated_capital = serializers.SerializerMethodField()
+    available_capital = serializers.SerializerMethodField()
+    basis_suggestion = serializers.CharField(read_only=True)
+    label = serializers.CharField(read_only=True)
+    is_stale = serializers.BooleanField(read_only=True)
+    masked_account_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AccountFundConfig
+        fields = (
+            'id', 'account_id', 'display_name', 'remark', 'is_active', 'label',
+            'total_capital', 'source', 'capital_basis', 'basis_suggestion',
+            'available_cash', 'market_value', 'frozen_cash', 'synced_at', 'is_stale',
+            'position_count', 'position_volume', 'positions', 'position_symbols',
+            'has_external_position', 'external_position_symbols', 'position_synced_at',
+            'allocated_capital', 'available_capital', 'masked_account_id',
+        )
+        # 资金/持仓快照只能由 gm 同步写入，不接受前端写入
+        read_only_fields = (
+            'total_capital', 'source', 'available_cash', 'market_value', 'frozen_cash',
+            'synced_at', 'position_count', 'position_volume', 'positions',
+            'position_symbols', 'has_external_position', 'external_position_symbols',
+            'position_synced_at',
+        )
+
+    def get_allocated_capital(self, obj):
+        return str(obj.allocated_capital)
+
+    def get_available_capital(self, obj):
+        return str(obj.available_capital)
+
+    def get_masked_account_id(self, obj):
+        """账户 ID 脱敏（N-05：账户 ID 不进日志/普通响应明文）。"""
+        from .fund_sync import mask_account
+        return mask_account(obj.account_id)
+
+    def validate_account_id(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('gm user id 不能为空')
+        return value
+
+    def validate(self, attrs):
+        """停用账户前必须先解除其 Plan 占用，否则这些 Plan 的额度校验会悬空。"""
+        is_active = attrs.get('is_active', getattr(self.instance, 'is_active', True))
+        if self.instance is not None and is_active is False:
+            bound = self.instance.plan_count
+            if bound:
+                raise serializers.ValidationError(
+                    f'该账户仍被 {bound} 个 Plan 引用，请先调整这些 Plan 的账户或清空占用资金后再停用'
+                )
+        return attrs
 
 
 class FundAllocationSerializer(serializers.ModelSerializer):
