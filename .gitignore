@@ -367,15 +367,14 @@ vite.config.ts.timestamp-*
 /static
 
 
-# vscode
+# editor
 .vscode/
+.zed/
+.idea/
 
 # agent
 .claude/
 .agents/
 skills-lock.json
 .clinerules/
-
-
-# idea
-.idea/
+.workbuddy/

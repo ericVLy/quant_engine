@@ -3,6 +3,7 @@
 > 版本：v2.13
 > 日期：2026-09-21
 > 状态：实现基线已稳定 · API 统一分页已落地 · 以代码为准，文档已同步校正 · 多实例 Scheduler 治理按单机部署目标由 P1 降为 P4 · 分时监控模块9 全部完成（后端 54 个专项测试 + 前端 ECharts 分时监控页 · gm SDK 分时数据源 · 启动完整性回填） · 策略快速创建向导（模块10）全部完成（3 步向导一键生成 Case/Suite/Plan 并发布 · 前端编排既有 API · 后端零新增接口） · MCP 服务（模块11）已落地（`mcp_server` 包：**SSE（HTTP）为主传输** · 14 个工具 + 1 个概览资源 + `/health` · 默认只读 · 令牌鉴权与非回环绑定 fail-fast · 写操作支持 `MCP_ALLOW_TRIGGER=1` 或 `--allow-trigger` · **MCP-19 变量描述：14 个工具逐变量带 `inputSchema` 描述，CLI 参数与 `MCP_*` 配置项逐个带说明** · 46 个专项测试通过 · 全量回归 442 个测试通过）
+> - **2026-10-09 调整**：**性能与容量基线（N-02）由 P2 降为 P4**——用户明确「性能暂不做要求」，取消 `API < 500ms` 硬指标与容量/并发基准；剩余待办仅剩 P4 多实例 Scheduler 治理、P4 性能基线（暂缓）、P2 MCP 服务增强三项
 
 
 ## 一、项目概述
@@ -403,7 +404,8 @@ class Watchlist(models.Model):
 | D-05 | 港股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
 | D-06 | 美股 K线表：按标的编码创建独立分表，运行时建表 | `models.py`, `services.py` |
 | D-12 | **港股/美股数据通道打通（ashare 腾讯通道，2026-10-01）** | ✅ 完成（`ashare.get_price_day_tx_hk/us` + `services.fetch_kline_from_ashare_tx`；港美股日线**腾讯主源 → 东财回退**，不依赖 akshare 可用性；实测 HK/US 各落 105 行真实数据） | `ashare.py`, `services.py` |
-| D-07 | K线增量同步：按 symbol 生成表名并去重插入 | ✅ 完成（`services.sync_kline_for_symbol`；**2026-09-15 增量优化**：拉取前先查区间内已入库日期——区间首尾均已有数据则**跳过远端拉取**（0 流量）；头部已覆盖则拉取窗口收窄为 `(最新一条, end]`（ashare count 按缺口天数计算，减小流量）；头部可能缺口时保持全量拉取由逐行去重兜底，显式传入早于缺口的 start_date 可补历史；API 未传 `start_date` 时走增量语义，`KLineSyncLog` 仍记录完整请求窗口） |
+| D-07 | K线增量同步：按 symbol 生成表名并去重插入 | ✅ 完成（`services.sync_kline_for_symbol`；**2026-09-15 增量优化**：拉取前先查区间内已入库日期——区间首尾均已有数据则**跳过远端拉取**（0 流量）；头部已覆盖则拉取窗口收窄为 `(最新一条, end]`（ashare count 按缺口天数计算，减小流量）；头部可能缺口时保持全量拉取由逐行去重兜底，显式传入早于缺口的 start_date 可补历史；API 未传 `start_date` 时走增量语义，`KLineSyncLog` 仍记录完整请求窗口。**2026-10-09 修复「删除后重建标的 / 清空重建主库 → 重复拉取同一段K线」**：分表名按 `market + code` 命名（`kline_a_000001`）而表内行以 `symbol_id` 为准，`Symbol.code` 全局唯一但 `symbol_id` 是自增主键——标的删除后重加会拿到新 id 而分表名不变、旧行仍在，导致 `_fetch_existing_dates` 按新 id 查不到旧行而判定「未入库」整段重拉；写入时 `UNIQUE(symbol_id, date)` 因 symbol_id 不同也拦不住，同一交易日出现两条记录。新增 `_rebind_stale_rows()` 在增量判断前**认领陈旧行**（分表名已唯一确定表内行归属；主库已无该 id 或该 id 分表名不同→改挂；分表名相同→跳过并告警；改挂前先删撞日期的行以避开唯一约束），使写入口径与读取口径（`query_kline_table` 只按日期过滤）一致） |
+| D-13 | **K线分表陈旧行认领（2026-10-09）** | ✅ 完成（`services._rebind_stale_rows`，删除后重建标的 / 主库重建后不再重复拉取；同时收敛修复前已累积的重复行——同一交易日只留一条。配5 个专项用例，均不联网） |
 | D-08 | K线同步日志（记录每次拉取状态） | `models.py` (KLineSyncLog) |
 | D-09 | K线查询接口（按标的 + 日期范围查询对应分表） | `views.py`, `services.py` |
 | D-10 | K线同步触发接口（单标的 / 全部） | `views.py`, `services.py` |
@@ -1615,7 +1617,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | MCP 服务（`mcp_server` 包：**SSE（HTTP）为主传输**（`manage.py run_mcp_server` / `python -m mcp_server`，`--transport stdio` 保留）+ 14 个工具 + 1 个概览资源 + `/health` 健康检查；ASGI 装配（`build_http_app`）+ `BearerAuthMiddleware` 令牌鉴权 + DNS rebinding 保护 + 可选 CORS；`McpTransportConfig` 配置校验（非回环绑定必须令牌，否则 fail-fast）；默认只读，`trigger_plan_execution` 写操作需 `MCP_ALLOW_TRIGGER=1` 且只创建 `pending` SuiteRun；`to_jsonable` 统一 JSON 安全输出；MCP 服务进程不启动分时更新器；MCP-19 变量描述：工具入参逐个带 `inputSchema` 描述，门面 docstring 逐变量给 `Args`/`Returns`，CLI 参数与 `MCP_*` 配置变量逐个带说明；**MCP-20 配置写工具（2026-09-21）：新增 10 个 Case/Suite/Plan 增改删工具（含 `update_suite_topology`），复用 REST 同源校验与删除保护，默认禁用需 `MCP_ALLOW_MUTATE=1` 或 `--allow-mutate`，只改 draft 配置不发布不下单）** | `mcp_server`（入站适配器，复用 apps 模型与服务） | ✅ 已完成（2026-09-15 落地，2026-09-17 MCP-18、2026-09-21 MCP-19/MCP-20，见模块11；**57 个专项测试通过** + SSE 端到端握手与令牌鉴权实测；新增依赖 `mcp[cli]>=2.2.0`、`uvicorn>=0.31.1`、`starlette>=0.27`、`pydantic>=2.0`） | 模块11 设计、MCP-18、MCP-19、MCP-20 |
 | gm SDK 远程终端连接（`GM_SERV_ADDR` 配置 / 环境变量；`GmBrokerAdapter` 在 `set_token` 前调用 gm `set_serv_addr("远端IP:7001")`，空值保持本机终端缺省；`gm_live_link` 支持 `--serv-addr`） | `runner`, `execution`, `monitoring` | ✅ 已完成（2026-09-24；runner gm 适配 +2 专项测试；见模块8 说明） | R-07、EX-18 |
 | 一键启动开发栈（`manage.py run_dev_stack`：单命令启动 Django 服务 + MCP 服务（可选 `--with-scheduler`），`--web-host/port`、`--mcp-host/port/--mcp-auth-token/--allow-trigger/--allow-mutate` 可配；任一子进程退出 fail-fast 终止其余；SIGINT/SIGTERM 一键停止；Django 子进程内置 `RUN_MAIN=true` + `--noreload` 保证分时更新器单进程启动） | `execution`（管理命令） | ✅ 已完成（2026-09-24；`apps/execution/tests_dev_stack.py` 3 个专项测试；端到端实测启动/健康探测/一键停止） | 运维体验增强 |
-| SQLite 多进程并发调优（`quant_engine/db_tuning.py`：`connection_created` 信号为每个 SQLite 连接执行 `PRAGMA journal_mode=WAL` + `busy_timeout`（与 `OPTIONS['timeout']` 一致，默认 5s）；dev/local 两库（主库 + K 线库）配置 `transaction_mode=IMMEDIATE` + `timeout=30`；消除 `run_dev_stack` 下 web/mcp 双进程 updater 并发写引发的 `database is locked`；仅 SQLite 生效，生产 MariaDB 不受影响） | 全局 settings, `execution`（测试） | ✅ 已完成（2026-09-24；`apps/execution/tests_db_tuning.py` 3 个专项测试；dev_stack 端到端复验 0 lock 错误、启动回填无异常） | 运维体验增强（N-02 前置） |
+| SQLite 多进程并发调优（`quant_engine/db_tuning.py`：`connection_created` 信号为每个 SQLite 连接执行 `PRAGMA journal_mode=WAL` + `busy_timeout`（与 `OPTIONS['timeout']` 一致，默认 5s）；dev/local 两库（主库 + K 线库）配置 `transaction_mode=IMMEDIATE` + `timeout=30`；消除 `run_dev_stack` 下 web/mcp 双进程 updater 并发写引发的 `database is locked`；仅 SQLite 生效，生产 MariaDB 不受影响） | 全局 settings, `execution`（测试） | ✅ 已完成（2026-09-24；`apps/execution/tests_db_tuning.py` 3 个专项测试；dev_stack 端到端复验 0 lock 错误、启动回填无异常） | 运维体验增强（性能与容量基线 N-02 的前置，已随 N-02 降为 P4） |
 | MCP 端到端冒烟测试（`manage.py mcp_smoke_test`：用**真实 MCP 协议（SSE 客户端）**跑通「建夹具（Case×2 → Suite → 拓扑 → Plan）→ 发布 → 读侧回读校验 →（可选）受控触发 → 删除保护校验 → 清理」，覆盖 17 个 MCP 工具（写 / 读 / 触发 / 删除）；编排逻辑 `mcp_server/smoke.py`（**异步只走 MCP、同步只写库**，ORM 不进入事件循环；`SseMcpSession` 适配 + `McpSession` 协议便于无网络测试）；默认建完即清、`--keep` 保留、`--no-publish` 只建 draft；`--url/--auth-token/--account-id/--allocated-capital/--symbol/--trigger` 可配；失败打印已完成步骤与已创建主键，并按依赖逆序尽力清理；顺带修正客户端读取 `CallToolResult.is_error`（mcp 2.x 为 snake_case，此前误读 `isError` 会把工具失败静默当成功）） | `execution`（管理命令）, `mcp_server` | ✅ 已完成（2026-09-24；`mcp_server/tests_smoke.py` 29 个 + `apps/execution/tests_mcp_smoke_command.py` 11 个专项测试；实机对运行中的 MCP 服务跑通全链路，夹具 0 残留） | 模块11 验证（MCP-20 收尾） |
 | Case 发布逻辑收敛到服务层（`apps/cases/services.py::publish_case`：参数白名单校验 + 版本 +1 + 固化 `CaseVersion` 快照，事务内完成；`CaseViewSet.publish` 改为调用该服务，业务逻辑不再堆在 `views.py`，REST 与冒烟脚本共用同一入口） | `cases` | ✅ 已完成（行为不变，既有 cases 用例全通过） | C-03、代码组织规范 |
 | 账户资金总量管理（按 gm 账户信息同步）：`AccountFundConfig` 增 `source`/`capital_basis`/`available_cash`/`market_value`/`frozen_cash`/`synced_at`；**额度口径 `capital_basis`（total/cash/available）+ 不变式"额度不低于已分配额度之和"**（应对账户内**本项目未管理的持仓**导致市值盘中抖动、额度虚高与"误判超额"）；新增 `apps/execution/fund_sync.py`（`normalize_cash` 按 `balance + market_value` 推导总资产、`nav` 兜底；`sync_account_funds` upsert 且**失败绝不写 0**；`ensure_funds_fresh` TTL；`sync_published_plan_accounts` 批量失败隔离；`_bind_account` 先 `set_account_id`，否则 gm 报 status 1020「无效的ACCOUNT_ID」）；执行前按 TTL 刷新（`PlanExecutionService._refresh_funds`，失败只记日志不阻断交易）；调度器 `--funds-source gm --funds-refresh-interval` 周期同步；`manage.py sync_account_funds` 人工核对；**下单通道与资金通道独立**（可只读账户、不下单）；风控 `account_provider` 接入实时账户快照；账户 ID 日志/输出默认脱敏（N-05）；**顺带修复 `GmBrokerAdapter.get_positions` 只探测复数函数、而当前 SDK 暴露单数 `get_position`，导致持仓风控长期静默失效** | `execution`, `runner`, `plans` | ✅ 已完成（2026-09-28；`apps/execution/tests_fund_sync.py` 55 + `tests_run_scheduler.py` +4；实机对 gm 账户 `efd9…2aa6` 同步成功：额度 999912.00（total 口径）/ 券商可用 997705.80 / 持仓市值 2256.00 / 冻结 2284.20 / 内部可用 949912.00；`--capital-basis cash` → 额度 997656.00（忽略持仓市值）；失败路径亦实测（未绑定账户 → 报 1020 且保留原值、不写 0）） | R-08 |
@@ -1631,7 +1633,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | P1 | ~~分时监控模块~~ → ✅ **全部完成（2026-09-12，见模块9）**：多市场（A/HK/US）时区感知分时监控；分时数据为**临时数据**（开盘记录 → 收盘清空）；`IntradayPoint` + `sample_intraday`/`clear_intraday` 命令 + `/api/monitoring/intraday/` 与 `/realtime` + 前端 ECharts 分时监控页（`/monitoring`，盘中 15s 轮询增量追加）均已落地；2026-09-14 分时数据源替换为 **gm SDK**（A 股主源 + akshare 回退 HK/US） | `monitoring`, `quant-frontend` | 关联新模块（见模块9 设计文档） |
 | P1 | ~~策略快速创建向导~~ → ✅ **全部完成（2026-09-14，见模块10）**：3 步向导 `/quick-strategy`，模板化生成 Case/Suite/Plan 并一键「创建→发布→（可选）启动」；**全链路由前端编排既有 API（后端零新增接口）** | `quant-frontend`（`cases`/`suites`/`plans` API 复用） | 关联新模块（见模块10 设计文档） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
-| P2 | 性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms） | 全部 runner/API | N-02 |
+| P4 | ~~性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms）~~ → **降级为 P4（2026-10-09，用户决定「性能暂不做要求」）**：不设 API 响应时间硬指标，不做容量/并发基准与瓶颈记录；当前为单机单实例部署、SQLite 已调优（WAL + busy_timeout，见 5.1.1），实测无性能阻塞问题。仅在真实部署出现响应延迟/吞吐瓶颈时再恢复该任务 | 全部 runner/API | N-02（已降级 P4） |
 | P2 | MCP 服务增强（OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计日志、工具返回字段级白名单）——**边界**：当前为 SSE + 静态令牌，默认只读且 `trigger_plan_execution` 受 `MCP_ALLOW_TRIGGER=1` 保护，非回环绑定强制令牌，故不阻塞主线 | `mcp_server` | 模块11（已知边界与后续） |
 
 ##### 敏感配置保护设计（2026-09-15 定稿，覆盖 N-05）
@@ -1699,7 +1701,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 9 | P4 | 多实例 Scheduler 治理（原 P1，**单机部署目标下降级**） | `plans`, `runner` | 分布式任务去重、租约/领导者选举、任务幂等键 | ~~多个 Scheduler 实例只产生一个 `(Plan, Symbol, minute)` 任务；实例故障可恢复~~ → 降级为 **P4 储备**：单机单实例下进程内去重已满足；未来多机部署时再恢复本验收标准 |
 | 10 | P2 | 执行日志生命周期管理 | `execution`, `runner` | 30 天自动清理、归档策略、清理命令和监控 | 清理不影响未完成运行和订单；清理任务可重复执行且幂等 |
 | 11 | P2 | ~~画布编排与执行轨迹回放~~ → ✅ **已完成（2026-09-10，见 5.1.1）** | `quant-frontend`, `execution` | 拖拽节点、连线配置、NodeRun 轨迹和失败节点定位 | ✅ 前端拓扑与后端快照双向一致（`/designer` 拓扑读写/发布走 `GET|POST /api/suites/{id}/topology/`）；可按 SuiteRun 回放节点状态和事件顺序（`GET /api/execution/run/{run_id}/node-runs/` + Designer 页步进/自动播放回放，失败节点标红定位） |
-| 12 | P2 | 性能与容量基线 | 全部 runner/API | API、队列、数据查询和并发执行基准 | 建立基准数据；非外部调用 API 达到 500ms 目标；记录并发容量和瓶颈 |
+| 12 | P4 | ~~性能与容量基线~~ → **降级为 P4（2026-10-09）**：性能暂不做要求，`API < 500ms` 指标与容量基准均不再作为验收项（详见 5.1.2） | 全部 runner/API | —— | 仅在真实部署出现延迟/吞吐瓶颈时恢复：建立基准数据、定位瓶颈 |
 
 ##### 本轮依赖关系
 
@@ -1714,7 +1716,8 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
     ↓
 Suite 边条件操作符 → 拓扑完整性校验
     ↓
-分页 ✅（已完成）→ 配置保护 → 日志清理与性能基线
+分页 ✅（已完成）→ 配置保护 → 日志清理 ✅（已完成）
+（性能与容量基线已随「性能暂不做要求」降为 P4，见 5.1.2）
 （多实例 Scheduler 治理已降级 P4：单机部署下非必要，见 5.1.2）
     ↓
 画布编排与执行轨迹回放 ✅（已完成 2026-09-10，见 5.1.1 / 5.1.4 任务 11）
@@ -1769,7 +1772,7 @@ Suite 边条件操作符 → 拓扑完整性校验
 | 编号 | 需求描述 | 优先级 |
 |------|----------|--------|
 | N-01 | 所有 API 支持分页 | ✅ 已实现；P1；关联开发任务：API 统一分页（见 5.1.1）；关联测试任务：P1 阶段3 |
-| N-02 | API 响应时间 < 500ms（不含外部数据源调用） | P2 |
+| N-02 | ~~API 响应时间 < 500ms（不含外部数据源调用）~~ → **降级为 P4（2026-10-09）**：用户明确「性能暂不做要求」，取消 API 响应时间硬指标与容量/并发基准；单机单实例部署 + SQLite 已调优（WAL / busy_timeout）下无实测阻塞。恢复条件：真实部署出现响应延迟或吞吐瓶颈 | P4（暂不验收） |
 | N-03 | 策略配置变更支持热加载（无需重启服务） | ✅ 已实现；P0；关联开发任务：PlanRegistry/调度配置刷新；关联测试任务：5.2-4 |
 | N-04 | 执行日志保留 30 天（自动清理） | ✅ **已完成**（`apps/execution/retention.py` + `manage.py purge_execution_logs` 命令 + 调度器每日门禁，12 个测试）：仅清理**终态**运行（`completed`/`failed`/`stopped`）的事件与轨迹；含订单的 `ExecutionLog` 与全部 `Order` **永久保留**（`Order.log` 为 CASCADE，删日志会连带删交易明细）；可重复执行且幂等，支持 `--dry-run`；非终态运行（`pending`/`running`）一律不碰——由启动期恢复器（见 P0 重启恢复）负责收口。保留天数 `EXECUTION_LOG_RETENTION_DAYS` 默认 30 |
 | N-05 | ~~敏感信息加密存储（数据源 `auth_info`）~~ → **随 D-01/`DataSource` 模块移除而取消**（2026-09-15）：用户自配第三方数据源已删除，`auth_info` 字段不复存在；剩余范围收敛为 PII 与日志卫生（账户 ID / 联系方式 / 交易明细不进日志与通知明文） | ✅ **已完成**：走「脱敏 + 权限 + 日志卫生」而非加密。① `apps/execution/redaction.py` 提供 `mask_email` / `mask_phone` / `mask_account_id` / `strip_traceback` / `redact_text` + `RedactionLogFilter`（把 %-style args 折叠后统一脱敏，异常时静默放行不阻塞日志）；② 过滤器在 `settings/dev.py` 与 `settings/production.py` **全部 handler** 上挂载；③ 告警通知正文脱敏（不夹带完整异常栈）、`AlertChannel.email_recipients` 仅管理员（`AlertChannelPermissionTests` 3 例 + 未认证 403）；④ `AccountFundConfig` 无 REST/MCP 暴露面（仅 `fund_sync` 内部与 `sync_account_funds` 命令，输出默认脱敏、`--show-account-id` 才显全）；⑤ `User.phone`/`company` 无他人档案端点（仅 `/users/me`，`AllowAny` 只用于注册/登录），分级要求自动满足。测试：`apps/execution/tests_redaction.py` 24 例 + `tests_fund_sync.py` 账户 ID 脱敏用例。**单机单用户部署下无需再做增量工作**；后续新增 PII 路径时按「新增涉及 PII 的序列化器/视图/服务必须补 ≥1 个日志卫生测试」执行 |

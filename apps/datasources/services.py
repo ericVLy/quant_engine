@@ -13,7 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     from . import ashare as ashare_lib
 
-from django.db import connections
+from django.db import connections, transaction
 from apps.watchlists.models import Symbol
 from apps.watchlists.services import normalize_a_share_code, resolve_a_share_exchange
 from .models import (
@@ -618,12 +618,85 @@ def _fetch_existing_dates(symbol, table_name, db_alias, start_date, end_date):
         return [row[0] for row in cursor.fetchall()]
 
 
+def _rebind_stale_rows(symbol, table_name, db_alias):
+    """把本分表内指向陈旧 ``symbol_id`` 的历史行改挂到当前 symbol，返回 (改挂行数, 删重行数)。
+
+    分表名由 ``market + code`` 决定，而 ``Symbol.code`` 全局唯一，因此**本表内的行在
+    业务上一律属于 ``symbol``**；但行里记录的是写入当时的 ``symbol_id``。当标地被删除后
+    重新添加、或主库被清空重建（保留旧 K 线库）时，新旧 ``symbol_id`` 不同，旧行就成了
+    "孤儿"——同步按 id 去重时会认为这些日期尚未入库，从而把整段区间重新拉一遍，
+    并在 ``UNIQUE(symbol_id, date)`` 约束下与新写入行并存（同一交易日出现两条记录）。
+
+    故在去重判断之前先认领这些行，使写入口径与读取口径（``query_kline_table`` 只按
+    日期过滤、不按 symbol_id 过滤）一致。
+
+    仅改挂**可判定为陈旧**的行，避免猜测：
+
+    - 主库中已不存在该 id → 孤儿，必定陈旧；
+    - 该 id 仍存在、但其分表名与本表不符 → 说明这批行本属当前标的，只是挂在旧 id 下；
+    - 该 id 仍存在且其分表名恰好等于本表（代码归一化导致的极罕见碰撞）→ 保持不动并告警。
+    """
+    with connections[db_alias].cursor() as cursor:
+        cursor.execute(f"SELECT DISTINCT symbol_id FROM {table_name}")
+        stale_ids = [row[0] for row in cursor.fetchall() if row[0] != symbol.id]
+
+    if not stale_ids:
+        return 0, 0
+
+    live = {s.id: s for s in Symbol.objects.filter(id__in=stale_ids)}
+    rebindable, ambiguous = [], []
+    for stale_id in stale_ids:
+        other = live.get(stale_id)
+        if other is None:
+            rebindable.append(stale_id)
+        elif get_kline_table_name(other) != table_name:
+            rebindable.append(stale_id)
+        else:
+            ambiguous.append(stale_id)
+
+    if ambiguous:
+        logger.warning(
+            f"{symbol.code}分表 {table_name} 存在归属歧义的 symbol_id {ambiguous}"
+            f"（分表名与本表相同），已跳过改挂"
+        )
+    if not rebindable:
+        return 0, 0
+
+    rebinding, duplicates = 0, 0
+    with transaction.atomic(using=db_alias):
+        with connections[db_alias].cursor() as cursor:
+            for stale_id in rebindable:
+                # 先删掉与当前 symbol 现有行撞日期的陈旧行，避免改挂触发
+                # UNIQUE(symbol_id, date) 冲突（MySQL 不允许 DELETE 的子查询直接引用
+                # 目标表，故用派生表包一层）。
+                cursor.execute(
+                    f"DELETE FROM {table_name} WHERE symbol_id = %s AND date IN"
+                    f" (SELECT d FROM (SELECT date AS d FROM {table_name}"
+                    f" WHERE symbol_id = %s) AS existing_dates)",
+                    [stale_id, symbol.id],
+                )
+                duplicates += max(cursor.rowcount or 0, 0)
+                cursor.execute(
+                    f"UPDATE {table_name} SET symbol_id = %s WHERE symbol_id = %s",
+                    [symbol.id, stale_id],
+                )
+                rebinding += max(cursor.rowcount or 0, 0)
+
+    logger.info(
+        f"{symbol.code} 分表 {table_name} 认领陈旧 symbol_id {rebindable}："
+        f"改挂 {rebinding} 行，删除重复日期 {duplicates} 行"
+    )
+    return rebinding, duplicates
+
+
 def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=None, adjust='qfq'):
     """
     同步指定标的的 K 线数据
     返回: (records_added, records_skipped, error_msg)
 
     增量优化：拉取前先查区间内已入库日期——
+    - 先认领分表内指向陈旧 symbol_id 的历史行（删除后重建标的 / 主库重建场景），
+      否则去重会误判为「未入库」而重复拉取；
     - 已覆盖整个请求区间（首尾都已有数据）→ 直接跳过远端拉取，省流量；
     - 区间头部已覆盖（最早一条 <= start_date）→ 拉取窗口收窄为 (最新一条, end_date]；
     - 区间头部未覆盖（可能有头部缺口）→ 保持全量拉取，由逐行去重兜底
@@ -643,6 +716,9 @@ def sync_kline_for_symbol(symbol, sync_type='daily', start_date=None, end_date=N
 
     table_name = ensure_kline_table(symbol)
     db_alias = get_kline_database_alias()
+
+    # ---- 认领陈旧行：必须在增量判断之前，否则旧行会被误判为「未入库」 ----
+    _rebind_stale_rows(symbol, table_name, db_alias)
 
     # ---- 增量判断：避免重复拉取已入库日期 ----
     existing_dates = _fetch_existing_dates(symbol, table_name, db_alias, start_date, end_date)

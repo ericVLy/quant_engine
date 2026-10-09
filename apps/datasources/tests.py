@@ -464,6 +464,219 @@ class ServicesTest(TransactionTestCase):
         self.assertEqual(kwargs['end_date'], date(2024, 1, 10))
 
     @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_sync_kline_rebinds_orphan_rows_after_symbol_recreated(self, mock_hist):
+        """删除后重建同名标的（symbol_id 变化）→ 应认领旧行而非重复拉取。
+
+        复现场景：主库 Symbol 被删除后重新添加同一 code，新记录拿到新的 symbol_id；
+        而 K 线库按``market + code`` 命名分表并被保留，旧行的 symbol_id 仍是已删除的旧 id。
+        """
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        orphan_symbol_id = self.symbol_a.id
+        runtime_model.objects.using('kline').create(
+            symbol_id=orphan_symbol_id,
+            date=date(2024, 1, 1),
+            open=Decimal('10.0'),
+            high=Decimal('10.5'),
+            low=Decimal('9.8'),
+            close=Decimal('10.2'),
+            volume=1000000,
+            amount=Decimal('10200000'),
+            adj_factor=Decimal('1.0'),
+            turnover_rate=Decimal('0.5'),
+        )
+
+        # 模拟「删除 → 重新添加」：新 Symbol 拿到不同 id，但分表名不变（kline_a_000001）
+        self.symbol_a.delete()
+        recreated = Symbol.objects.create(
+            code='000001', name='平安银行', market='A', exchange='SZSE'
+        )
+        self.assertNotEqual(recreated.id, orphan_symbol_id)
+
+        df = pd.DataFrame({
+            '日期': ['2024-01-01'],
+            '开盘': [10.0],
+            '收盘': [10.2],
+            '最高': [10.5],
+            '最低': [9.8],
+            '成交量': [1000000],
+            '成交额': [10200000],
+            '涨跌幅': [0.02],
+            '涨跌额': [0.2],
+            '换手率': [0.5],
+        })
+        mock_hist.return_value = df
+
+        added, skipped, error = sync_kline_for_symbol(
+            recreated, start_date='2024-01-01', end_date='2024-01-05',
+        )
+
+        self.assertIsNone(error)
+        # 旧行已被认领 → 头部已覆盖 → 窗口收窄为 (max_existing, end] = 2024-01-02 起，
+        # 关键是不再把已入库的 01-01 重拉一遍。
+        kwargs = mock_hist.call_args.kwargs
+        self.assertEqual(kwargs['start_date'], date(2024, 1, 2))
+        self.assertEqual(added, 0)
+        self.assertEqual(skipped, 1)
+        # 旧行改挂到新 symbol_id，不产生重复行
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(symbol_id=recreated.id).count(), 1
+        )
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(symbol_id=orphan_symbol_id).count(), 0
+        )
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_sync_kline_rebuild_main_db_keeps_old_kline_db(self, mock_hist):
+        """主库重建后标的拿到不同 id（旧行成孤儿）→ 应认领全部旧行并正确收窄增量窗口。
+
+        SQLite 的 AUTOINCREMENT 不复用已删除的 id，因此「重建主库」与「删除后重加」
+        都会让新 Symbol 拿到不同的 id：分表名由 ``market + code`` 决定而保持不变，
+        表内旧行的 symbol_id 却指向一个已不存在的记录——这正是重复拉取的成因。
+        """
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        orphan_symbol_id = self.symbol_a.id
+        for day in ('2024-01-02', '2024-01-03'):
+            runtime_model.objects.using('kline').create(
+                symbol_id=orphan_symbol_id,
+                date=date.fromisoformat(day),
+                open=Decimal('10.0'),
+                high=Decimal('10.5'),
+                low=Decimal('9.8'),
+                close=Decimal('10.2'),
+                volume=1000000,
+                amount=Decimal('10200000'),
+                adj_factor=Decimal('1.0'),
+                turnover_rate=Decimal('0.5'),
+            )
+
+        self.symbol_a.delete()
+        recreated = Symbol.objects.create(
+            code='000001', name='平安银行', market='A', exchange='SZSE'
+        )
+        self.assertNotEqual(recreated.id, orphan_symbol_id)
+
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-08'],
+            '开盘': [10.0], '收盘': [10.3], '最高': [10.5], '最低': [9.8],
+            '成交量': [1000000], '成交额': [10200000],
+            '涨跌幅': [0.02], '涨跌额': [0.2], '换手率': [0.5],
+        })
+
+        added, skipped, error = sync_kline_for_symbol(
+            recreated, start_date='2024-01-01', end_date='2024-01-10',
+        )
+
+        self.assertIsNone(error)
+        # 旧行已认领（头部覆盖到 01-03，但请求起点 01-01 早于它→ 按既有规则走全量窗口，
+        # 逐行去重兜底）。关键断言：旧行没有被重复拉取/重复写入。
+        self.assertEqual(skipped, 0)
+        self.assertEqual(added, 1)
+        # 认领后共 3 行（01-02、01-03 旧行 + 01-08 新行），同一交易日不出现两条
+        self.assertEqual(len(query_kline_table(
+            recreated, date(2024, 1, 1), date(2024, 1, 10)
+        )), 3)
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(symbol_id=orphan_symbol_id).count(), 0
+        )
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_sync_kline_repairs_existing_duplicate_rows(self, mock_hist):
+        """修复前已累积重复行的库：认领时应删掉撞日期的旧行，同一交易日只留一条。
+
+        这是「重复拉取」缺陷的历史遗留现场——旧行（symbol_id=已删id）与新行并存，
+        仅靠 UNIQUE(symbol_id, date) 约束拦不住（symbol_id 不同即视为不同行）。
+        """
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        orphan_symbol_id = self.symbol_a.id
+        # 旧行（孤儿）
+        runtime_model.objects.using('kline').create(
+            symbol_id=orphan_symbol_id,
+            date=date(2024, 1, 2),
+            open=Decimal('10.0'), high=Decimal('10.5'), low=Decimal('9.8'),
+            close=Decimal('10.2'), volume=1000000, amount=Decimal('10200000'),
+            adj_factor=Decimal('1.0'), turnover_rate=Decimal('0.5'),
+        )
+
+        self.symbol_a.delete()
+        recreated = Symbol.objects.create(
+            code='000001', name='平安银行', market='A', exchange='SZSE'
+        )
+        self.assertNotEqual(recreated.id, orphan_symbol_id)
+
+        # 修复前的那次重复拉取，已经为新 symbol_id 写入了同一天的行
+        runtime_model.objects.using('kline').create(
+            symbol_id=recreated.id,
+            date=date(2024, 1, 2),
+            open=Decimal('10.0'), high=Decimal('10.5'), low=Decimal('9.8'),
+            close=Decimal('10.2'), volume=1000000, amount=Decimal('10200000'),
+            adj_factor=Decimal('1.0'), turnover_rate=Decimal('0.5'),
+        )
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(date=date(2024, 1, 2)).count(), 2
+        )
+
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-02'],
+            '开盘': [10.0], '收盘': [10.2], '最高': [10.5], '最低': [9.8],
+            '成交量': [1000000], '成交额': [10200000],
+            '涨跌幅': [0.02], '涨跌额': [0.2], '换手率': [0.5],
+        })
+
+        added, _, error = sync_kline_for_symbol(
+            recreated, start_date='2024-01-01', end_date='2024-01-05',
+        )
+
+        self.assertIsNone(error)
+        # 重复行已收敛为一条，且孤儿行被清空
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(date=date(2024, 1, 2)).count(), 1
+        )
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(symbol_id=orphan_symbol_id).count(), 0
+        )
+        self.assertEqual(added, 0)
+        self.assertEqual(len(query_kline_table(
+            recreated, date(2024, 1, 1), date(2024, 1, 5)
+        )), 1)
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
+    def test_sync_kline_does_not_rebind_rows_of_other_symbol(self, mock_hist):
+        """认领只针对本分表：不得改挂其他标的的表，也不应把本表的行挂到别处。"""
+        runtime_model = get_runtime_kline_model(self.symbol_a)
+        runtime_model.objects.using('kline').create(
+            symbol_id=self.symbol_a.id,
+            date=date(2024, 1, 2),
+            open=Decimal('10.0'), high=Decimal('10.5'), low=Decimal('9.8'),
+            close=Decimal('10.2'), volume=1000000, amount=Decimal('10200000'),
+            adj_factor=Decimal('1.0'), turnover_rate=Decimal('0.5'),
+        )
+
+        mock_hist.return_value = pd.DataFrame({
+            '日期': ['2024-01-03'],
+            '开盘': [10.0], '收盘': [10.3], '最高': [10.5], '最低': [9.8],
+            '成交量': [1000000], '成交额': [10200000],
+            '涨跌幅': [0.02], '涨跌额': [0.2], '换手率': [0.5],
+        })
+        added, _, error = sync_kline_for_symbol(
+            self.symbol_a, start_date='2024-01-01', end_date='2024-01-10',
+        )
+        self.assertIsNone(error)
+        self.assertEqual(added, 1)
+
+        # 另一标的（不同 code → 不同分表）不受本次同步影响
+        other = Symbol.objects.create(
+            code='600000', name='浦发银行', market='A', exchange='SSE'
+        )
+        other_model = get_runtime_kline_model(other)
+        self.assertEqual(
+            other_model.objects.using('kline').filter(symbol_id__isnull=False).count(), 0
+        )
+        # 本表原有行未被改挂到其他 symbol
+        self.assertEqual(
+            runtime_model.objects.using('kline').filter(symbol_id=self.symbol_a.id).count(), 2
+        )
+
+    @patch('apps.datasources.services.ak.stock_zh_a_hist')
     def test_sync_kline_head_gap_fetches_full_window(self, mock_hist):
         """库内最早一条晚于 start_date（头部可能缺口）→ 保持全量拉取，由逐行去重兜底。"""
         runtime_model = get_runtime_kline_model(self.symbol_a)
@@ -595,6 +808,12 @@ class MultiMarketKlineFetchTest(APITransactionTestCase):
         self.symbol_a_index = Symbol.objects.create(
             code='000300', name='沪深300', market='A', exchange='SSE'
         )
+        # 分表由运行期原生 SQL 创建（``kline_hk_00700`` 等），不属于任何 registered
+        # model，故 Django 的 flush 看不到它——若不显式清空，上一个用例写入的行会残留到
+        # 下一个用例。``sync_kline_for_symbol`` 现在会认领陈旧 symbol_id 的行，残留数据
+        # 不再被忽略，从而让本类用例的added/skipped 断言互相干扰。
+        for symbol in (self.symbol_hk, self.symbol_us, self.symbol_a_index):
+            get_runtime_kline_model(symbol).objects.using('kline').all().delete()
 
     @staticmethod
     def _akshare_hist_df():

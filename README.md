@@ -62,10 +62,13 @@
   - 真实下单务必先确认账户/风控与模拟环境：`.venv/bin/python manage.py run_scheduler --order-broker gm`
 - MCP 服务（SSE，Web 接入）：`.venv/bin/python manage.py run_mcp_server --port 8765`
 - MCP 专项测试：`.venv/bin/python manage.py test mcp_server`
-- 静态检查：`scripts/pylint.sh`（全仓）/ `scripts/pylint.sh <file>`（单文件）/ `scripts/pylint.sh --tests <file>`（测试文件，放宽豁免）
-  - `pylint-django` 是**必需**插件，缺失会让所有 `Model.objects` 误报 `E1101`
-  - 脚本已固定 `jobs=1` 并清理 astroid 缓存，规避 pylint 4.x 的 `F0002` 崩溃
-  - 脚本内已关掉分时更新器 / 基本面（静态检查不应发起外部请求或写库）
+- 静态检查（直接用 pylint 命令，`scripts/pylint.sh` 仅 Linux/bash 下的可选封装，非必须）：
+  - 全仓：`.venv/bin/python -m pylint --rcfile=pylint.conf apps runner mcp_server quant_engine`
+  - 单文件：`.venv/bin/python -m pylint --rcfile=pylint.conf <file>`
+  - 测试文件（放宽豁免，见下）：追加 `--disable=protected-access,import-outside-toplevel`
+  - 前置：`pylint-django` 是**必需**插件，缺失会让所有 `Model.objects` 误报 `E1101`
+  - 需固定 `jobs=1` 并清理 astroid 缓存（`rm -rf ~/.cache/pylint`），规避 pylint 4.x的 `F0002` 崩溃
+  - 须先`export MONITORING_UPDATER_ENABLED=0 FUNDAMENTALS_ENABLED=0`——静态检查会加载 Django `AppConfig`，否则分时更新器会真的发起外部请求并写库
   - 当前状态：**全仓 0 告警 / 10.00/10**
 
 ## 已知边界与限制（务必阅读）
