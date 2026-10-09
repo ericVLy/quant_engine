@@ -64,6 +64,10 @@ db.sqlite3-*
 kline.sqlite3
 kline.sqlite3-*
 quant_engine/settings/local.py
+
+# 本地数据库备份（迁移/修复前的人工快照，含业务数据，绝不入库）
+.backup/
+*.sqlite3.bak
 # Flask stuff:
 instance/
 .webassets-cache

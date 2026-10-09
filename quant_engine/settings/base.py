@@ -115,6 +115,11 @@ EXECUTION_PENDING_MAX_AGE_SECONDS = int(os.getenv('EXECUTION_PENDING_MAX_AGE_SEC
 EXECUTION_PENDING_SWEEP_MIN_AGE_SECONDS = int(
     os.getenv('EXECUTION_PENDING_SWEEP_MIN_AGE_SECONDS', '5'))
 
+# 部署初始化引导（首次部署创建超级管理员）：
+# 引导完成后由数据库 SetupState.completed 永久关闭，此开关只是额外的环境级总闸。
+# 生产环境完成初始化后建议置SETUP_ENABLED=0，使引导端点在代码层也不可达。
+SETUP_ENABLED = os.getenv('SETUP_ENABLED', '1').lower() in {'1', 'true', 'yes'}
+
 # DRF 全局配置
 REST_FRAMEWORK = {
     # N-01：所有列表接口统一分页

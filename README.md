@@ -121,6 +121,17 @@
 
 ### 环境
 
+- **迁移历史被压缩过，老库需补列**：本项目曾把各 app 迁移**压缩为每 app 一个 initial** 并重建数据库。
+  在此**之前**创建的旧库，模型有字段而实际表缺列，且 `makemigrations --check` 报「无差异」
+  （Django 认为 initial 已应用）——这是静默缺口。典型症状：`/api/execution/event-types/list-all/`
+  持续 500 `no such column: execution_event_type_registry.base_event_type`。
+  - 排查方法（introspection 比对模型与实际表，能一次列出所有缺列表）：
+    ```bash
+    .venv/bin/python manage.py migrate execution   # 应用 0003_restore_squashed_columns
+    ```
+  - `0003_restore_squashed_columns` 对**列已存在的新库幂等跳过**，可安全重复执行。
+  - 注意该迁移**不用标准 `AddField`**：SQLite 的 `_remake_table` 会把默认值填成列名字面量
+    （`capital_basis='capital_basis'`），故改为显式补列 + `RunPython` 纠正脏值。
 - **部署需安装 tzdata**：`zoneinfo` 依赖系统 tzdata，否则 `America/New_York` 等时区解析失败。
 - **secret / token 只经环境变量或 systemd `EnvironmentFile` 注入**，不落仓库、不入日志。
 - **PII 脱敏已落地**：`apps/execution/redaction.py` 的脱敏工具 + `RedactionLogFilter` 已在 dev/prod
@@ -136,6 +147,43 @@
 - **EX-18 真实回报验证属用户侧操作**：取决于 Plan 配置的账户是否为 gm 模拟账户，
   项目对此无感知，**不构成开发或测试的阻塞**。
 
+## 部署初始化（首次部署引导）
+
+新环境首次启动时需要创建第一个账号（系统最高权限）。前端会自动跳转到引导页 `/setup`。
+
+```bash
+# 1. 初始化数据库（首次部署）
+.venv/bin/python manage.py migrate
+
+# 2. 启动服务
+.venv/bin/python manage.py runserver
+```
+
+打开前端后会自动进入 `/setup`：
+
+- 填写用户名、密码（≥8 位、含字母与数字）、确认密码，邮箱与公司可选；
+- 提交后创建**超级管理员**（`is_superuser` + `is_staff` + `admin` 角色）并**自动登录**，直接进入系统。
+
+### 引导只开启一次，完成后永久关闭
+
+| 项 | 说明 |
+|---|---|
+| 状态载体 | `users_setup_state` 单行表（`users.SetupState`），**由迁移预建**（`users.0002_setupstate`） |
+| 关闭判定 | `completed=True` 即永久关闭；再次访问引导页会被导回登录页 |
+| **防后门** | 判定**不以「用户数是否为 0」为准**——否则管理员清空账号后引导会重开，任何能触达该端点的人都能再次抢占超级管理员。已完成初始化后即使 `User` 表被清空，引导也不会重新开放 |
+| 已有用户的库 | 即便状态行缺失，只要 `User` 表非空就视为已初始化（不暴露引导） |
+| 并发 | 事务 + `select_for_update` 行锁，多请求同时提交也只会有一个成功，其余返回 403 |
+| 额外总闸 | 生产环境完成初始化后建议设 `SETUP_ENABLED=0`，使引导端点在代码层也不可达 |
+
+接口（均无需认证，仅在未初始化时可用）：
+
+- `GET /api/users/setup/status/` → `{"setup_required": true|false}`
+- `POST /api/users/setup/` → 创建首个超级管理员；已完成返回 **403**
+
+```bash
+# 生产加固：初始化完成后关闭引导端点
+export SETUP_ENABLED=0
+```
 
 ## MCP 服务（AI 助手接入 · 模块11）
 

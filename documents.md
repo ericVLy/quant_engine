@@ -222,6 +222,7 @@ REST 路径 `apps.execution.services._event_condition_matches` 使用同一契�
 | U-02 | 用户信息管理（扩展字段：手机号、公司） |
 | U-03 | 权限分组（管理员/普通用户/只读用户） |
 | U-04 | 各模块资源的访问控制（如"仅管理员可同步全市场标的"） |
+| **U-05** | **部署初始化引导（2026-10-09 完成）**：新环境首次部署时引导创建第一个账号，该账号拥有系统最高权限；引导完成后**永久关闭**，不再启用 |
 
 #### API 端点
 
@@ -232,8 +233,40 @@ REST 路径 `apps.execution.services._event_condition_matches` 使用同一契�
 | POST | `/api/users/logout/` | 注销当前 Session |
 | GET/PUT/PATCH | `/api/users/profile/` | 当前用户信息查询/更新 |
 | POST | `/api/users/{user_id}/roles/` | 管理员调整用户角色 |
+| GET | `/api/users/setup/status/` | **部署初始化**：是否仍需引导（`{"setup_required": bool}`） |
+| POST | `/api/users/setup/` | **部署初始化**：创建首个超级管理员并自动登录；已完成返回 **403** |
 
 当前实现文件：`models.py`、`serializers.py`、`views.py`、`urls.py`、`admin.py`。角色使用 Django `Group`，注册用户默认加入 `user` 组，管理员可分配已存在的角色组。
+
+#### 部署初始化引导（U-05，2026-10-09）
+
+| 交付物 | 说明 |
+|--------|------|
+| `users.SetupState`（模型 + `users.0002_setupstate`） | 全局单行状态表 `users_setup_state`，**主键固定为 1**（非自增）；**由迁移预建首行**（`RunPython`） |
+| `apps/users/setup.py` | `is_setup_required()` 判定是否仍需引导；`complete_setup()` 在事务内创建超管并标记完成（keyword-only 参数） |
+| `SetupSerializer` | 入参校验：两次密码一致 + `validate_password` + **额外要求 ≥8 位、拒绝纯数字**（该账号是系统最高权限，弱密码等于交出整个平台） |
+| 前端 `views/Setup.vue` + 路由 `/setup` | 引导页；`router.beforeEach` 中未初始化时一律先跳转引导页，不进入任何业务页 |
+
+**核心设计：一次性开关而非「用户数是否为 0」**
+
+若以「用户表是否为空」判定是否需要引导，则管理员清空账号后引导会**重新打开**——任何能触达
+`POST /api/users/setup/` 的人都能再次抢占超级管理员。因此以持久化的 `SetupState.completed`
+为唯一判据：初始化完成后**即使 `User` 表被清空，引导也不会重新开放**。
+
+三重防护：
+
+1. **持久化关闭**：`completed=True` 即永久关闭，删号不重开；
+2. **已有用户即视为已初始化**：即便状态行缺失（如手工删库），只要 `User` 表非空就不暴露引导；
+3. **环境级总闸**：`SETUP_ENABLED=0` 可让引导端点在代码层不可达（生产完成后建议设置）。
+
+**并发安全**：事务 + `select_for_update` 行锁 + 事务内二次判定。**迁移预建单行是并发前提**——
+若首行留给运行时 `get_or_create`，并发请求会同时 INSERT 同一 pk，在 SQLite 上抛
+`database table is locked`（表现为 500 而非正确的 403）。视图额外把 `OperationalError`
+归一为 403。真实文件库（WAL + `busy_timeout=30`）6 线程实测：`[201, 403×5]`、超管 1 个、用户总数 1。
+
+**测试**：`apps/users/tests.py::SetupGuideTest` 11 例（含「删号后不重开」「已有用户不暴露」
+「弱密码拒绝」「并发只有一个成功」）。**刻意不做真并发线程压测**——与 `runner/tests_concurrency.py`
+同一取舍：Django 测试库是共享内存 SQLite，多线程写拿不到响应码，断言的是环境限制而非业务契约。
 
 #### 数据模型
 
