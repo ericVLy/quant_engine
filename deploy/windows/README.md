@@ -54,6 +54,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install.ps1
 | `-Port 8000` | Web 端口 |
 | `-Host_ 0.0.0.0` | 监听所有网卡（局域网访问）；`ALLOWED_HOSTS` 同步放宽 |
 | `-SkipMigrate` | 只重装服务，跳过数据库迁移 |
+| `-SyncDeps` | 按 `requirements.txt` **全量同步**依赖（默认只补装 waitress） |
+| `-NoUv` | 强制用 pip，不用 uv（见下节） |
+
+## uv 兼容
+
+安装脚本**优先使用 [uv](https://docs.astral.sh/uv/)**，找不到时自动回退 pip。
+
+本项目的 `.venv` 本身就是 uv 创建的（`.venv/pyvenv.cfg` 含 `uv = <版本>`），
+所以 uv 是"原生"工具链。已实测：
+
+- `uv pip compile requirements.txt` 能正确解析 **`requirements.txt`** ——
+  该文件是 **UTF-16LE + BOM** 编码（pip 可识别，**uv 同样可识别**，实测解析出 262 行依赖）；
+- `uv pip install --python .venv\Scripts\python.exe <包>` 可精确装进本项目虚拟环境；
+- `uv` 会自动发现仓库根的 `.venv`（`uv python find` 指向 `.venv\Scripts\python.exe`）。
+
+安装 uv（若尚未安装）：
+
+```powershell
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+常用等价命令：
+
+| 目的 | uv | pip |
+|---|---|---|
+| 装单个包 | `uv pip install waitress --python .venv\Scripts\python.exe` | `.venv\Scripts\python.exe -m pip install waitress` |
+| 按 requirements 同步 | `uv pip install -r requirements.txt --python .venv\Scripts\python.exe` | `.venv\Scripts\python.exe -m pip install -r requirements.txt` |
+| 看已装包 | `uv pip list --python .venv\Scripts\python.exe` | `.venv\Scripts\python.exe -m pip list` |
+| 解析依赖（不安装） | `uv pip compile requirements.txt` | — |
+| 找解释器 | `uv python find` | — |
+
+> 本项目**没有 `pyproject.toml` / `uv.lock`**，依赖仍以 `requirements.txt` 为唯一来源，
+> 因此用的是 `uv pip`（pip 兼容层）而非 `uv sync`（项目模式）。
+> 若将来要引入 `uv lock` 锁定传递依赖版本，需要先补 `pyproject.toml`，
+> 属于独立的一次变更。
+
 
 ## 启动与状态
 
@@ -96,6 +132,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\uninstall.ps1
 | `MONITORING_UPDATER_ENABLED` / `_INTERVAL` | 分时采样开关与间隔（秒） |
 | `GM_SERV_ADDR` | 远程 gm 终端地址，如 `192.168.1.10:7001`（留空=本机终端） |
 | `SETUP_ENABLED` | 初始化引导开关 |
+
+## 服务启动与 uv 的关系
+
+启动脚本一律直接调用 **`.venv\Scripts\python.exe`**（waitress / `manage.py`），
+**不经过 uv**。原因：
+
+- 计划任务需要调起一个**长驻前台进程**，而 `uv run` 会额外做一次依赖解析与
+  环境准备，对常驻服务是纯粹的启动开销；
+- 直接用 venv 里的解释器，行为与 `python manage.py ...` 完全一致，排障时最直观；
+- uv 只在**安装/同步依赖**环节发挥作用（安装脚本会自动选择 uv 或 pip）。
+
+若想手工前台调试，同样建议直接用 venv 解释器：
+
+```
+.venv\Scripts\python.exe manage.py runserver
+.venv\Scripts\python.exe -m waitress --listen=127.0.0.1:8000 quant_engine.wsgi:application
+```
 
 ## 注意事项
 

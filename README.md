@@ -244,7 +244,11 @@ Plan 的资金占用**按账户匹配**：部署时先在「账户管理」预�
   **不改 `local.py`**（`dev.py` / `production.py` 都 import 它，改了会把开发环境也切走）；
 - **口令不入库**：由安装脚本交互式询问并写入 `deploy/windows/env.local.cmd`（已 gitignore），
   脚本与文档里都没有明文口令；
-- `waitress` 取代 Gunicorn（Gunicorn 不支持 Windows），已登记进 `requirements.txt`。
+- `waitress` 取代 Gunicorn（Gunicorn 不支持 Windows），已登记进 `requirements.txt`；
+- **uv 兼容**：安装脚本优先用 [uv](https://docs.astral.sh/uv/) 装依赖（找不到时回退 pip），
+  支持 `-SyncDeps` 全量同步、`-NoUv` 强制 pip。本项目 `.venv` 即 uv 创建，
+  且 `requirements.txt`（UTF-16LE+BOM）经实测 uv 可正常解析；
+  但**启动服务仍直接调用 `.venv\Scripts\python.exe`**（长驻进程不需要 uv 的启动开销）。
 
 ## 部署初始化（首次部署引导）
 

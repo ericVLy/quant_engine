@@ -27,7 +27,13 @@ param(
     [string]$Host_ = '127.0.0.1',
 
     # 跳过 migrate（仅重装服务时用）
-    [switch]$SkipMigrate
+    [switch]$SkipMigrate,
+
+    # 装依赖时优先使用 uv（快很多）；-NoUv 强制走 pip
+    [switch]$NoUv,
+
+    # 按 requirements.txt 全量安装/校准依赖（默认只补装 waitress）
+    [switch]$SyncDeps
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,11 +42,57 @@ $projectDir = Resolve-Path (Join-Path $scriptDir '..\..')
 $venvPython = Join-Path $projectDir '.venv\Scripts\python.exe'
 $envFile    = Join-Path $scriptDir 'env.local.cmd'
 $logDir     = Join-Path $projectDir 'logs'
+$reqFile    = Join-Path $projectDir 'requirements.txt'
 
 function Write-Step($msg)  { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Ok($msg)    { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn2($msg) { Write-Host "  [!]  $msg" -ForegroundColor Yellow }
 function Write-Err($msg)   { Write-Host "  [X]  $msg" -ForegroundColor Red }
+
+# ------------------------------------------------------------ 依赖安装器
+# uv（若可用）比 pip 快一个数量级；本项目的 .venv 本身就是 uv 创建的
+# （pyvenv.cfg 含 uv = <version>），因此优先走 uv，找不到再回退 pip。
+function Resolve-UvPath {
+    if ($NoUv) { return $null }
+    $cmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($cand in @(
+            "$env:USERPROFILE\.local\bin\uv.exe",
+            "$env:APPDATA\Python\Scripts\uv.exe")) {
+        if (Test-Path $cand) { return $cand }
+    }
+    return $null
+}
+
+function Install-Deps {
+    <#
+        安装 Python 依赖。$packages 为空表示按 requirements.txt 全量同步。
+        uv 与 pip 的命令行不同（uv 用 --python 指定解释器；pip 用 -m pip），
+        因此参数分别构造，不要混用——混用会让 pip 把 --python 当成文件名。
+    #>
+    param([string[]]$packages)
+
+    $uv = Resolve-UvPath
+    $targets = if ($packages -and $packages.Count -gt 0) { $packages } else { @() }
+
+    if ($uv) {
+        $tool = 'uv'
+        $cmdArgs = @('pip', 'install')
+        if ($targets.Count -eq 0) { $cmdArgs += @('-r', $reqFile) }
+        else { $cmdArgs += $targets }
+        $cmdArgs += @('--python', $venvPython)   # uv 专有：精确装进目标解释器
+    } else {
+        $tool = 'python -m pip'
+        Write-Warn2 '未找到 uv，改用 pip（速度较慢但结果一致）'
+        $cmdArgs = @('-m', 'pip', 'install', '--disable-pip-version-check')
+        if ($targets.Count -eq 0) { $cmdArgs += @('-r', $reqFile) }
+        else { $cmdArgs += $targets }
+        # pip 不认 --python：已由 $venvPython 这个可执行文件本身决定目标环境
+    }
+
+    if ($tool -eq 'uv') { & $uv @cmdArgs } else { & $venvPython @cmdArgs }
+    return $LASTEXITCODE
+}
 
 # ---------------------------------------------------------------- 1. 自检
 Write-Step '1/6 环境自检'
@@ -129,14 +181,30 @@ set QUANT_SCHED_WORKERS=1
 Set-Content -Path $envFile -Value $envBody -Encoding Default
 Write-Ok "已写入 $envFile（GBK 编码，cmd 可正常显示中文注释）"
 
-# ---------------------------------------------------------- 3. 安装 waitress
-Write-Step '3/6 安装 WSGI 服务器（waitress）'
-& $venvPython -m pip install --quiet --disable-pip-version-check waitress
-if ($LASTEXITCODE -ne 0) {
-    Write-Err 'waitress 安装失败（网络问题？）可手动执行：.venv\Scripts\python.exe -m pip install waitress'
+# ------------------------------------------- 3. 安装 Python 依赖（uv 优先）
+Write-Step '3/6 安装 Python 依赖'
+
+$uvPath = Resolve-UvPath
+if ($uvPath) {
+    $uvVer = (& $uvPath --version) -join' '
+    Write-Ok "检测到 uv：$uvVer（安装器优先使用 uv，比 pip 快一个数量级）"
+} elseif ($NoUv) {
+    Write-Warn2 '按 -NoUv 要求跳过 uv，使用 pip'
+} else {
+    Write-Warn2 '未找到 uv，使用 pip。可安装：powershell -c "irm https://astral.sh/uv/install.ps1 | iex"'
+}
+
+if ($SyncDeps) {
+    Write-Ok '按 requirements.txt 全量同步依赖…'
+    $rc = Install-Deps -Packages @()
+} else {
+    $rc = Install-Deps -Packages @('waitress')
+}
+if ($rc -ne 0) {
+    Write-Err '依赖安装失败。可手工重试：uv pip install -r requirements.txt --python .venv\Scripts\python.exe'
     exit 1
 }
-Write-Ok 'waitress 已就绪（Windows 上 Gunicorn 不可用，故用 waitress）'
+Write-Ok 'WSGI 服务器 waitress 就绪（Windows 上 Gunicorn 不可用，故用 waitress）'
 
 # ------------------------------------------------------ 4. 建库 + migrate
 if (-not $SkipMigrate) {
