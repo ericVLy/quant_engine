@@ -218,7 +218,7 @@ def run_account_sync_in_subprocess(account_id, capital_basis='total'):
             capture_output=True, text=True, check=False,
         )
     except subprocess.TimeoutExpired:
-        logger.warning('账户 %s 同步子进程超时（%ss）已终止，Web 进程不受影响',
+        logger.warning('账户 %s 同步子进程超时（%ss）已终止',
                        mask_account(account_id), timeout)
         return {
             'ok': False,
