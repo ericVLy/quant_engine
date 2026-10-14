@@ -48,6 +48,8 @@ $venvPython = Join-Path $projectDir '.venv\Scripts\python.exe'
 $envFile    = Join-Path $scriptDir 'env.local.cmd'
 $logDir     = Join-Path $projectDir 'logs'
 $reqFile    = Join-Path $projectDir 'requirements.txt'
+# 隐藏窗口启动器（wscript 壳）；缺失则回退为直接调 cmd.exe
+$vbsLauncher = Join-Path $scriptDir 'run_hidden.vbs'
 
 function Write-Step($msg)  { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Ok($msg)    { Write-Host "  [OK] $msg" -ForegroundColor Green }
@@ -274,12 +276,31 @@ if (-not $isAdmin) {
     Write-Ok '当前为普通账户，使用 RunLevel=Limited（本项目无需管理员权限）'
 }
 
+# 隐藏窗口启动器自检：缺失则回退到 cmd.exe（会弹窗，但不至于注册出坏任务）
+$useVbs = $true
+if (-not (Test-Path $vbsLauncher)) {
+    Write-Warn2 "缺少 $vbsLauncher，自启时将弹出控制台窗口。"
+    Write-Warn2 '（该文件应随仓库一起提交；若丢失可从 git 恢复）'
+    $useVbs = $false
+} else {
+    Write-Ok '自启将以隐藏窗口方式运行（run_hidden.vbs）'
+}
+
 foreach ($t in $tasks) {
     $full = Join-Path $scriptDir $t.Script
     Unregister-ScheduledTask -TaskName $t.Name -Confirm:$false -ErrorAction SilentlyContinue
 
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
-        -Argument "/c `"$full`"" -WorkingDirectory $projectDir
+    # 用 run_hidden.vbs 以隐藏窗口方式启动，避免登录自启时弹出黑色控制台。
+    # 该 vbs 会**阻塞等待**子进程结束，任务状态因此保持「正在运行」，
+    # 任务设置里的「失败后重启」才会生效（若用异步启动，WScript 立即退出，
+    # 任务会被判定为已完成）。
+    if ($useVbs) {
+        $action = New-ScheduledTaskAction -Execute 'wscript.exe' `
+            -Argument "`"$vbsLauncher`" `"$full`"" -WorkingDirectory $projectDir
+    } else {
+        $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
+            -Argument "/c `"$full`"" -WorkingDirectory $projectDir
+    }
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
         -LogonType Interactive -RunLevel $RunLevel
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `

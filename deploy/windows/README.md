@@ -12,6 +12,45 @@
 | 分时采样 | 由 Web 进程自动拉起（`run_intraday_updater` 子进程） | 每 60s 采集分时数据 |
 | **nginx**（可选） | 计划任务 `QuantEngine-Nginx` | 反向代理：静态资源直出 + `/api` 回源 + SSE 缓冲策略 |
 
+## 隐藏自启窗口
+
+登录自启时**不会弹出黑色控制台窗口**。做法是给三个计划任务统一套一层
+`run_hidden.vbs`（WScript 壳）：
+
+```
+计划任务  ->wscript.exe run_hidden.vbs start_web.cmd
+                └─ WshShell.Run "cmd.exe /c <脚本>", 0, True
+                                                 ↑   ↑
+                                          0=隐藏窗口  阻塞等待
+```
+
+**为什么必须阻塞等待（`True`）**：若用异步启动，WScript 立刻退出，
+计划任务会认为「任务已完成」，状态变成 Ready 而非 Running，
+任务设置里的**「失败后重启 3 次」就完全不会生效**。
+阻塞等待才能让任务在整个服务运行期间保持「正在运行」。
+
+相关文件：
+
+| 文件 | 作用 |
+|---|---|
+| `run_hidden.vbs` | 隐藏窗口启动器（GBK + CRLF，VBScript 按 ANSI 读取） |
+| `start_nginx.cmd` | nginx 启动脚本，由 `install_nginx.ps1` 生成（内容含本机 NginxDir，故不入库） |
+
+脚本会**自检** `run_hidden.vbs` 是否存在：缺失时给出警告并回退为直接调
+`cmd.exe`（会弹窗，但不至于注册出坏任务）。
+
+### 调试提示
+
+因为窗口是隐藏的，出问题时**看不到界面**。排查方式：
+
+- 看日志：`logs\web.log`、`logs\scheduler.log`；
+- 手工前台运行：`deploy\windows\start_web.cmd`（会显示控制台）；
+- 查任务状态：
+  ```powershell
+  Get-ScheduledTask -TaskName 'QuantEngine*' | Get-ScheduledTaskInfo
+  ```
+  `LastTaskResult` 为 `0x41301`（267009）表示**正在运行**，属正常；`0` 表示已退出。
+
 ## 访问链路：两种模式
 
 nginx 是**可选**的。生产构建的 `VITE_API_BASE_URL = '/api'` 是相对路径，

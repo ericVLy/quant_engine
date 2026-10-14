@@ -186,8 +186,31 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
 $taskName = 'QuantEngine-Nginx'
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 
-$action = New-ScheduledTaskAction -Execute $nginxExe `
-    -Argument "-p `"$NginxDir/`" -c conf/nginx.conf" -WorkingDirectory $NginxDir
+# nginx.exe 是控制台程序，直接注册会弹黑窗；经 run_hidden.vbs 隐藏启动。
+# start_nginx.cmd 由本脚本生成（内容依赖 NginxDir，故不入库）。
+$vbsLauncher = Join-Path $scriptDir 'run_hidden.vbs'
+$targetScript = Join-Path $scriptDir 'start_nginx.cmd'
+
+$startBody = @(
+    '@echo off',
+    'rem 由 install_nginx.ps1 自动生成于 ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'),
+    'rem 以隐藏窗口方式启动 nginx（由计划任务 QuantEngine-Nginx 调用）。',
+    'setlocal',
+    "pushd `"$NginxDir`"",
+    'nginx.exe -p . -c conf/nginx.conf',
+    'popd'
+)
+Set-Content -Path $targetScript -Value $startBody -Encoding Default
+
+if (Test-Path $vbsLauncher) {
+    $action = New-ScheduledTaskAction -Execute 'wscript.exe' `
+        -Argument "`"$vbsLauncher`" `"$targetScript`"" -WorkingDirectory $NginxDir
+    Write-Ok '自启将隐藏窗口运行（经 run_hidden.vbs）'
+} else {
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
+        -Argument "/c `"$targetScript`"" -WorkingDirectory $NginxDir
+    Write-Warn2 '缺少 run_hidden.vbs，自启 nginx 时会弹出控制台窗口。'
+}
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)

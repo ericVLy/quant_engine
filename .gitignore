@@ -67,6 +67,8 @@ quant_engine/settings/local.py
 
 # Windows 生产部署的本机配置（含数据库口令），由 install.ps1 生成
 deploy/windows/env.local.cmd
+# nginx 启动脚本：内容含本机 NginxDir，由 install_nginx.ps1 生成
+deploy/windows/start_nginx.cmd
 
 # 本地数据库备份（迁移/修复前的人工快照，含业务数据，绝不入库）
 .backup/
@@ -385,4 +387,3 @@ vite.config.ts.timestamp-*
 skills-lock.json
 .clinerules/
 .workbuddy/
-deploy/windows/env.local.cmd
