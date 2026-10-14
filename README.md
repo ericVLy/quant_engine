@@ -228,6 +228,24 @@ Plan 的资金占用**按账户匹配**：部署时先在「账户管理」预�
 - **EX-18 真实回报验证属用户侧操作**：取决于 Plan 配置的账户是否为 gm 模拟账户，
   项目对此无感知，**不构成开发或测试的阻塞**。
 
+## Windows 单机生产部署
+
+生产模式（MariaDB + waitress + 开机自启）的完整说明见 **`deploy/windows/README.md`**，
+在仓库根目录执行 `deploy\windows\install.ps1` 即可一键完成（脚本会交互式询问数据库口令、
+建库迁移、并注册开机自启的计划任务）。
+
+要点：
+
+- **进程划分**：MariaDB（Windows 服务，Automatic）+ Web（waitress）+ 调度器（`run_scheduler`），
+  分时采样子进程由 Web 进程自动拉起。调度器**只能有一个实例**；
+- **用 MariaDB 而非 SQLite**：SQLite 是库级单写者（`transaction_mode=IMMEDIATE`），
+  长事务会让全站写请求阻塞到超时；InnoDB 行锁从根上消除该问题；
+- **配置位置**：新建 `quant_engine/settings/win_production.py` 专供本部署，
+  **不改 `local.py`**（`dev.py` / `production.py` 都 import 它，改了会把开发环境也切走）；
+- **口令不入库**：由安装脚本交互式询问并写入 `deploy/windows/env.local.cmd`（已 gitignore），
+  脚本与文档里都没有明文口令；
+- `waitress` 取代 Gunicorn（Gunicorn 不支持 Windows），已登记进 `requirements.txt`。
+
 ## 部署初始化（首次部署引导）
 
 新环境首次启动时需要创建第一个账号（系统最高权限）。前端会自动跳转到引导页 `/setup`。
