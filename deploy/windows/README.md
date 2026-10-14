@@ -166,8 +166,52 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install.ps1
 | `-Host_ 0.0.0.0` | 监听所有网卡（局域网访问）；`ALLOWED_HOSTS` 同步放宽 |
 | `-SkipMigrate` | 只重装服务，跳过数据库迁移 |
 | `-SkipStatic` | 跳过 `collectstatic`（默认会执行，见下） |
+| `-SkipFrontend` | 跳过前端构建（默认会执行，见下） |
 | `-SyncDeps` | 按 `requirements.txt` **全量同步**依赖（默认只补装 waitress） |
 | `-NoUv` | 强制用 pip，不用 uv（见下节） |
+
+### ⚠️ 部署前必须先构建前端（`static/` 不在版本控制里）
+
+`static/` 与 `staticfiles/` **都被 `.gitignore` 排除**（都是构建产物）。
+全新克隆的仓库里**没有任何前端文件**，直接启动会白屏。
+
+所以 `install.ps1` 的第 5 步会：
+
+1. 检查 `npm` 是否可用；
+2. `node_modules` 缺失时先 `npm ci`（失败回退 `npm install`）；
+3. `npx vite build`（只跑 vite，跳过 `vue-tsc` 类型检查——部署不应因类型报错中断）；
+4. **校验产物用的是绝对路径**。
+
+### ⚠️ 前端资源必须是绝对路径（history 路由的硬约束）
+
+本项目前端路由是 **history 模式**（`createWebHistory`），地址形如 `/plans/123`。
+若 `vite.config.ts` 的 `base` 是相对路径 `'./'`，`index.html` 里会写成：
+
+```html
+<script src="./assets/index-xxx.js">
+```
+
+浏览器按**当前 URL** 解析，在 `/plans/123` 页面上会解析成
+`/plans/assets/index-xxx.js`。该路径落进后端的 catch-all 路由
+（`re_path(r'^(?!api/|admin/|assets/).*$', serve_frontend_index)`），
+返回的是 **index.html**：
+
+| 请求 | Content-Type | 实际内容 |
+|---|---|---|
+| `/assets/index-xxx.js` | `text/javascript` | 真 JS ✓ |
+| `/plans/assets/index-xxx.js` | **`text/html`** | index.html ✗ |
+
+`<script>` 拿到 HTML 解析失败 → **白屏**，而且**不报 404**（状态码是 200），
+排查起来极其困难。
+
+正确做法：`base: '/'` → 引用变为 `/assets/index-xxx.js`，任意深度都解析正确，
+且与 `STATIC_URL`（`'assets/'`，Django 会自动补前导斜杠）及
+collectstatic 产物（落在 `staticfiles/` 根）完全一致。
+
+`install.ps1` 会在构建后做这项校验，发现 `./assets/` 直接**中止安装**并提示。
+
+> 排查这类问题的小技巧：直接看响应头。
+> 请求 JS 却拿到 `Content-Type: text/html`，就是被 SPA catch-all 吞了。
 
 ### collectstatic 是独立步骤，且失败即中止
 

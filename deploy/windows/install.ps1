@@ -8,9 +8,10 @@
       2. 生成 deploy\windows\env.local.cmd（**交互式询问数据库口令，口令不写入本脚本**）
       3. 安装 waitress（Gunicorn 不支持 Windows）
       4. 建库（若不存在）+ migrate
-      5. collectstatic（**独立于 migrate**，失败即中止）
-      6. 注册开机自启计划任务（Web + Scheduler / nginx 可选）
-      7. 输出后续步骤（初始化超级管理员）
+      5. 构建前端（static/ 被 gitignore，全新克隆必须先构建）
+      6. collectstatic
+      7. 注册开机自启计划任务（Web + Scheduler / nginx 可选）
+      8. 输出后续步骤（初始化超级管理员）
 
     幂等：重复执行安全；已注册的任务会先删除再重建。
 #>
@@ -32,6 +33,9 @@ param(
 
     # 跳过 collectstatic（默认会执行；它与 migrate 相互独立）
     [switch]$SkipStatic,
+
+    # 跳过前端构建（static/ 是构建产物且被 gitignore，全新克隆必须构建）
+    [switch]$SkipFrontend,
 
     # 装依赖时优先使用 uv（快很多）；-NoUv 强制走 pip
     [switch]$NoUv,
@@ -126,7 +130,7 @@ function Install-Deps {
 }
 
 # ---------------------------------------------------------------- 1. 自检
-Write-Step '1/7 环境自检'
+Write-Step '1/8 环境自检'
 
 if (-not (Test-Path $venvPython)) {
     Write-Err "找不到虚拟环境：$venvPython"
@@ -147,7 +151,7 @@ if ($mariaSvc.Status -ne 'Running') {
 Write-Ok "MariaDB 服务：$($mariaSvc.Status)（StartType=$($mariaSvc.StartType)）"
 
 # ------------------------------------------------------- 2. 生成环境变量文件
-Write-Step '2/7 生成 env.local.cmd'
+Write-Step '2/8 生成 env.local.cmd'
 
 $dbUser     = Read-Host 'MariaDB 用户名 [root]'
 if ([string]::IsNullOrWhiteSpace($dbUser)) { $dbUser = 'root' }
@@ -217,7 +221,7 @@ $envBodyCrlf = $envBody.Replace("`r`n", "`n").Replace("`n", "`r`n")
 Write-Ok "已写入 $envFile（GBK 编码 + CRLF 行尾）"
 
 # ------------------------------------------- 3. 安装 Python 依赖（uv 优先）
-Write-Step '3/7 安装 Python 依赖'
+Write-Step '3/8 安装 Python 依赖'
 
 $uvPath = Resolve-UvPath
 if ($uvPath) {
@@ -243,7 +247,7 @@ Write-Ok 'WSGI 服务器 waitress 就绪（Windows 上 Gunicorn 不可用，故�
 
 # ------------------------------------------------------ 4. 建库 + migrate
 if (-not $SkipMigrate) {
-    Write-Step '4/7 数据库迁移'
+    Write-Step '4/8 数据库迁移'
 
     $mariaBin = Get-ChildItem 'C:\Program Files\MariaDB*\bin\mariadb.exe' -ErrorAction SilentlyContinue |
                Select-Object -First 1
@@ -271,24 +275,90 @@ if (-not $SkipMigrate) {
     Write-Warn2 '已跳过 migrate（-SkipMigrate）'
 }
 
-# ------------------------------------------------- 5/7 收集静态资源
-# collectstatic **独立于 migrate**：修计划任务时用 -SkipMigrate 重跑，
-# 不应连带把静态资源也跳过（前端与 admin 样式都依赖它）。
+# ------------------------------------------------- 5/7 前端构建 + 静态资源
+# ⚠️ static/ 目录被 .gitignore 排除（构建产物），**全新克隆里根本没有前端**。
+# 不先构建，collectstatic 只能收集到 admin/DRF 的样式，前端会白屏。
+# 这一步与 migrate 相互独立：修计划任务时用 -SkipMigrate 重跑，
+# 不应连带把前端构建也跳过。
+if (-not $SkipFrontend) {
+    Write-Step '5/8 构建前端'
+
+    $frontDir = Join-Path $projectDir 'quant-frontend'
+    if (-not (Test-Path (Join-Path $frontDir 'package.json'))) {
+        Write-Err "未找到 quant-frontend\package.json：$frontDir"
+        exit 1
+    }
+
+    $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+    if (-not $npmCmd) {
+        Write-Err '未找到 npm。请安装 Node.js LTS 后重试，或手工在 quant-frontend 目录执行 npm run build。'
+        exit 1
+    }
+    Write-Ok "npm: $((& npm --version))"
+
+    if (-not (Test-Path (Join-Path $frontDir 'node_modules'))) {
+        Write-Ok '安装前端依赖（首次较慢）…'
+        Push-Location $frontDir
+        try {
+            & npm ci --no-audit --no-fund 2>&1 | Select-Object -Last 5
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn2 'npm ci 失败，回退到 npm install'
+                & npm install --no-audit --no-fund 2>&1 | Select-Object -Last 5
+            }
+        } finally { Pop-Location }
+        if (-not (Test-Path (Join-Path $frontDir 'node_modules'))) {
+            Write-Err '前端依赖安装失败，无法继续构建。'
+            exit 1
+        }
+    } else {
+        Write-Ok 'node_modules 已存在，跳过依赖安装'
+    }
+
+    Push-Location $frontDir
+    try {
+        # 只跑 vite build，跳过 vue-tsc 类型检查（部署不因类型报错而中断）
+        & npx vite build 2>&1 | Select-Object -Last 4
+        $buildRc = $LASTEXITCODE
+    } finally { Pop-Location }
+
+    $indexPath = Join-Path $projectDir 'static\index.html'
+    if ($buildRc -ne 0 -or -not (Test-Path $indexPath)) {
+        Write-Err '前端构建失败或未产出 static\index.html。'
+        Write-Err '生产环境缺少前端产物会导致页面白屏，不作为"可忽略的警告"处理。'
+        exit 1
+    }
+
+    # 关键校验：前端产物必须用**绝对路径**引用资源。
+    # 若 index.html 里出现 ./assets/（base:'./'），在 history 模式的深层路由
+    # （如 /plans/123）刷新时，浏览器会把 ./assets/x.js 解析成
+    # /plans/assets/x.js，落进后端 catch-all 拿到 index.html（Content-Type: text/html），
+    # 脚本解析失败 → 白屏，且**不报 404**，极难排查。
+    $indexHtml = Get-Content $indexPath -Raw -Encoding UTF8
+    if ($indexHtml -match '"\./assets/') {
+        Write-Err 'static\index.html 里出现相对路径 ./assets/ —— 与 history 路由不兼容。'
+        Write-Err '请检查 quant-frontend\vite.config.ts 的 base 是否为 '/'，然后重新构建。'
+        exit 1
+    }
+    Write-Ok "前端构建完成（已校验为绝对路径引用：/assets/…）"
+} else {
+    Write-Warn2 '已跳过前端构建（-SkipFrontend）'
+}
+
 if (-not $SkipStatic) {
-    Write-Step '5/7 收集静态资源（collectstatic）'
+    Write-Step '6/8 收集静态资源（collectstatic）'
     if (-not (Invoke-Django 'collectstatic --noinput')) {
         Write-Err 'collectstatic 失败。生产环境缺静态文件会导致前端与 admin 样式失效，'
         Write-Err '不作为"可忽略的警告"处理。请先修复再启动服务。'
         exit 1
     }
-    $collected = (Get-ChildItem (Join-Path $projectDir 'staticfiles') -Recurse -File -ErrorAction SilentlyContinue)
+    $collected = @(Get-ChildItem (Join-Path $projectDir 'staticfiles') -Recurse -File -ErrorAction SilentlyContinue)
     Write-Ok "collectstatic 完成（staticfiles 下共 $($collected.Count) 个文件）"
 } else {
     Write-Warn2 '已跳过 collectstatic（-SkipStatic）'
 }
 
 # ------------------------------------------------- 5. 注册开机自启计划任务
-Write-Step "6/7 注册开机自启计划任务（触发：$Trigger / 权限：$RunLevel）"
+Write-Step "7/8 注册开机自启计划任务（触发：$Trigger / 权限：$RunLevel）"
 
 $tasks = @(
     @{ Name = 'QuantEngine-Web';      Script = 'start_web.cmd';      Desc = '量化引擎 Web 服务（waitress）' },
@@ -362,7 +432,7 @@ foreach ($t in $tasks) {
 }
 
 # ------------------------------------------------------------ 6. 收尾提示
-Write-Step '7/7 完成'
+Write-Step '8/8 完成'
 Write-Host @"
 
   立即启动（不必等下次登录）：
