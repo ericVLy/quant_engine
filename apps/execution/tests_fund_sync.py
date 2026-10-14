@@ -11,9 +11,10 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
+from apps.execution import fund_sync as fund_sync_module
 from apps.execution.fund_sync import (
     FundSyncError, ensure_funds_fresh, mask_account, normalize_cash,
     normalize_positions, sync_account_funds, sync_published_plan_accounts,
@@ -665,3 +666,107 @@ class SyncWithPositionsTest(TestCase):
         sync_account_funds(ACCOUNT, broker, with_positions=False)
         cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
         self.assertEqual(cfg.position_count, 0)
+
+
+# ============ 网络 I/O 与事务分离（2026-10-14 修复）============
+
+class _LockProbeBroker(_FakeBroker):
+    """记录调用 gm 时刻的数据库事务状态。"""
+
+    def __init__(self, cash=None, error=None, positions=None):
+        super().__init__(cash=cash, error=error)
+        self.positions = positions or []
+        self.atomic_during_call = []
+        self.in_atomic_during_positions = []
+
+    def get_account(self):
+        from django.db import connection
+        self.atomic_during_call.append(connection.in_atomic_block)
+        return super().get_account()
+
+    def get_positions(self):
+        from django.db import connection
+        self.in_atomic_during_positions.append(connection.in_atomic_block)
+        return self.positions
+
+
+class NetworkIoOutsideTransactionTest(TransactionTestCase):
+    """回归：gm 网络 I/O 必须在数据库事务之外。
+
+    背景：``dev`` 的 SQLite 用 ``transaction_mode=IMMEDIATE``，事务入口即抢占
+    库级写锁。若把 gm 网络往返放在事务内，一次卡住的同步会占着写锁不放，
+    全站写请求阻塞至 ``timeout``，表现为"同步失败时整站打不开"。
+
+    **必须用 TransactionTestCase**：普通 ``TestCase`` 会把整个用例包在一个
+    外层事务里，此时 ``connection.in_atomic_block`` 恒为 True，
+    断言测的是测试脚手架而非被测代码。
+    """
+
+    databases = ['default', 'kline']
+
+    def test_get_account_not_called_inside_atomic_block(self):
+        broker = _LockProbeBroker(cash=FULL_CASH)
+        sync_account_funds(ACCOUNT, broker)
+        self.assertEqual(broker.atomic_during_call, [False],
+                         'get_account 必须在事务外调用（事务内会长期占用 SQLite 写锁）')
+
+    def test_get_positions_not_called_inside_atomic_block(self):
+        broker = _LockProbeBroker(cash=FULL_CASH,
+                                  positions=[{'symbol': 'SHSE.600000', 'volume': 100}])
+        sync_account_funds(ACCOUNT, broker)
+        self.assertEqual(broker.in_atomic_during_positions, [False],
+                         'get_positions 必须在事务外调用')
+
+    def test_failed_query_still_holds_no_lock(self):
+        """gm 查询失败时同样不持锁——失败路径最容易被忽略。"""
+        broker = _LockProbeBroker(error=RuntimeError('gm 终端无响应'))
+        with self.assertRaises(FundSyncError):
+            sync_account_funds(ACCOUNT, broker)
+        self.assertEqual(broker.atomic_during_call, [False])
+
+    def test_persist_stage_is_inside_transaction(self):
+        """反向对照（阳性对照）：落库阶段**确实**在事务内。
+
+        没有这条，上面几条"网络不在事务内"的断言可能是探针失灵导致的假通过。
+        """
+        from unittest.mock import patch
+
+        from django.db import connection
+
+        observed = []
+        real = fund_sync_module._allocated_total
+
+        def spy(account_id):
+            observed.append(connection.in_atomic_block)
+            return real(account_id)
+
+        with patch.object(fund_sync_module, '_allocated_total', side_effect=spy):
+            sync_account_funds(ACCOUNT, _FakeBroker(cash=FULL_CASH))
+        self.assertEqual(observed, [True], '落库阶段应在事务内（探针必须能测到 True）')
+
+    def test_result_shape_unchanged_after_refactor(self):
+        """重构后返回结构保持不变（调用方依赖这些键）。"""
+        broker = _PositionBroker(cash=FULL_CASH,
+                                 positions=[{'symbol': 'SHSE.600000', 'volume': 100,
+                                             'closep': 10.5, 'market_value': 1050}])
+        result = sync_account_funds(ACCOUNT, broker)
+        for key in ('created', 'synced_at', 'source', 'capital_basis', 'total_capital',
+                    'computed_capital', 'allocated_capital', 'clamped', 'positions'):
+            self.assertIn(key, result)
+        cfg = AccountFundConfig.objects.get(account_id=ACCOUNT)
+        self.assertEqual(str(cfg.total_capital), '100000.00')
+        self.assertEqual(cfg.position_count, 1)
+
+    def test_quantity_clamp_invariant_still_holds(self):
+        """额度不低于已分配额度之和的不变式在重构后必须保留。"""
+        AccountFundConfig.objects.create(
+            account_id=ACCOUNT, total_capital=Decimal('100000'))
+        Plan.objects.filter(account_id=ACCOUNT).delete()
+        Plan.objects.create(name='p1', account_id=ACCOUNT,
+                            root_suite=Suite.objects.create(name='s'),
+                            allocated_capital=Decimal('99999'))
+        # gm 返回的口径值远低于已分配额度 → 应被托底
+        broker = _FakeBroker(cash={'balance': 1000, 'market_value': 0})
+        result = sync_account_funds(ACCOUNT, broker)
+        self.assertTrue(result['clamped'])
+        self.assertEqual(result['total_capital'], '99999.00')

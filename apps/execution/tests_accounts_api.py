@@ -4,11 +4,14 @@
 资金字段只读、停用前置校验，以及 Plan 资金占用按预配置账户匹配的失败路径。
 """
 # pylint: disable=import-outside-toplevel  # 延迟导入以规避循环依赖/加载期副作用
+import os
+import subprocess
+import time
 from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -87,34 +90,39 @@ class AccountApiTest(TestCase):
         self.assertTrue(cfg.is_active)
 
     def test_sync_requires_gm_channel(self):
-        """未配置 GM_TOKEN 时给出可定位提示，而非 500。"""
+        """未配置 GM_TOKEN 时给出可定位提示，而非 500（不必起子进程）。"""
         cfg = AccountFundConfig.objects.create(
             account_id=ACCOUNT, total_capital=Decimal('100000'))
         self.client.force_login(user=self.admin)
-        with patch('apps.execution.views.build_gm_broker_from_settings',
-                   side_effect=RuntimeError('未配置 GM_TOKEN，无法连接 gm 终端')):
-            resp = self.client.post(f'/api/execution/accounts/{cfg.id}/sync/')
+        with override_settings(GM_TOKEN=''):
+            with patch.dict('os.environ', {}, clear=False):
+                os.environ.pop('GM_TOKEN', None)
+                resp = self.client.post(f'/api/execution/accounts/{cfg.id}/sync/')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('GM_TOKEN', str(resp.data))
 
-    def test_sync_uses_channel_and_persists_snapshot(self):
+    def test_sync_delegates_to_subprocess_and_returns_fresh_snapshot(self):
+        """同步经子进程执行，成功后回读数据库返回最新快照。"""
         cfg = AccountFundConfig.objects.create(
             account_id=ACCOUNT, total_capital=Decimal('1'))
-        broker = type('B', (), {
-            'account_id': None,
-            'get_account': lambda self: {
-                'balance': 80000, 'market_value': 20000, 'available': 75000},
-            'get_positions': lambda self: [
-                {'symbol': 'SHSE.600000', 'volume': 100, 'closep': 10.5,
-                 'market_value': 1050}],
-        })()
         self.client.force_login(user=self.admin)
-        with patch('apps.execution.views.build_gm_broker_from_settings', return_value=broker):
-            resp = self.client.post(f'/api/execution/accounts/{cfg.id}/sync/')
+        seen = {}
+
+        def fake_sync(account_id, capital_basis='total'):
+            seen['account_id'] = account_id
+            seen['capital_basis'] = capital_basis
+            AccountFundConfig.objects.filter(pk=cfg.pk).update(
+                total_capital=Decimal('100000.00'), position_count=1)
+            return {'ok': True, 'detail': ''}
+
+        with override_settings(GM_TOKEN='fake-token'):
+            with patch('apps.execution.views.run_account_sync_in_subprocess',
+                       side_effect=fake_sync):
+                resp = self.client.post(f'/api/execution/accounts/{cfg.id}/sync/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        cfg.refresh_from_db()
-        self.assertEqual(str(cfg.total_capital), '100000.00')
-        self.assertEqual(cfg.position_count, 1)
+        self.assertEqual(seen['account_id'], ACCOUNT)
+        self.assertEqual(str(resp.data['account']['total_capital']), '100000.00')
+        self.assertEqual(resp.data['account']['position_count'], 1)
 
     def test_account_id_is_masked_in_response(self):
         """N-05：响应里的账户 ID 走脱敏字段，不回显完整值。"""
@@ -175,3 +183,71 @@ class PlanMatchesPreconfiguredAccountTest(TestCase):
         self.assertTrue(status_info['is_active'])
         # available_capital =总额 − 已占用；本用例新建的 Plan 占用 1000
         self.assertEqual(status_info['available_capital'], '99000.00')
+
+
+class SyncEndpointNeverHangsTest(TestCase):
+    """端到端保证：gm 终端关闭时，同步接口**必定快速返回 4xx**，不会挂住。
+
+    实测（真实 gm SDK + 本地黑洞端口，终端不可达）：
+    - ``GmBrokerAdapter`` 构造（``set_serv_addr`` + ``set_token`` + ``set_account_id``）约 0.15s；
+    - 而 ``get_cash()`` **持有 GIL 一直阻塞**，同进程内的心跳线程完全停摆，
+      主线程连 ``join(timeout)`` 的超时逻辑都执行不到——
+      即**任何"同进程加超时"的方案都无效**，整个 Web 进程会被冻结。
+
+    因此同步必须经**子进程**隔离：卡住时 ``kill()`` 掉子进程即可，
+    Web 进程毫发无损。这组用例把该约束钉死。
+    """
+
+    databases = ['default', 'kline']
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser('hang_admin', password='Admin-Strong-123')
+        self.client = APIClient()
+        self.client.force_login(user=self.admin)
+        self.cfg = AccountFundConfig.objects.create(
+            account_id=ACCOUNT, total_capital=Decimal('100000'))
+
+    def test_sync_returns_400_instead_of_hanging(self):
+        """子进程被kill 后，接口必须快速返回可读的 4xx。"""
+        started = time.monotonic()
+        with override_settings(GM_TOKEN='fake-token'):
+            with patch('apps.execution.views.subprocess.run',
+                       side_effect=subprocess.TimeoutExpired(cmd='sync', timeout=35)):
+                resp = self.client.post(f'/api/execution/accounts/{self.cfg.id}/sync/')
+        elapsed = time.monotonic() - started
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('gm 终端无响应', str(resp.data.get('detail', '')))
+        self.assertLess(elapsed, 15, '同步接口必须在超时内返回，不能挂住')
+
+    def test_sync_must_not_call_gm_inline(self):
+        """回归：sync 动作**绝不能**在 Web 进程内直接调用 gm SDK。
+
+        gm SDK 阻塞时持有 GIL，内联调用会冻结整个进程（整站打不开），
+        同进程内的超时保护根本不会被执行到。
+        """
+        import inspect
+
+        from apps.execution import views as execution_views
+
+        src = inspect.getsource(execution_views.AccountFundConfigViewSet.sync)
+        self.assertNotIn('sync_account_funds(', src,
+                         'sync 动作不得内联调用 sync_account_funds')
+        self.assertNotIn('GmBrokerAdapter(', src,
+                         'sync 动作不得在 Web 进程内构造 gm 适配器')
+        self.assertIn('run_account_sync_in_subprocess', src)
+
+    def test_site_still_usable_after_failed_sync(self):
+        """同步失败后，其它接口必须照常可用（这是本次的核心诉求）。"""
+        with override_settings(GM_TOKEN='fake-token'):
+            with patch('apps.execution.views.subprocess.run',
+                       side_effect=subprocess.TimeoutExpired(cmd='sync', timeout=35)):
+                self.client.post(f'/api/execution/accounts/{self.cfg.id}/sync/')
+        # 失败后：列表可读、可再写、原有数据未被清零
+        self.assertEqual(self.client.get('/api/execution/accounts/').status_code,
+                         status.HTTP_200_OK)
+        create = self.client.post('/api/execution/accounts/',
+                                  {'account_id': 'still-usable'}, format='json')
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        self.cfg.refresh_from_db()
+        self.assertEqual(str(self.cfg.total_capital), '100000.00',
+                         '失败绝不写 0：额度应保持上次成功值')

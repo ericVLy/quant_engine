@@ -1,6 +1,13 @@
 ﻿# pylint: disable=import-outside-toplevel,too-many-ancestors  # 延迟导入以规避循环依赖/加载期副作用；DRF ModelViewSet 混入多个 mixin，继承链天然深
 import json
+import logging
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
+from django.conf import settings as django_settings
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
@@ -16,9 +23,12 @@ from .serializers import (
     FundAllocationSerializer, AlertSerializer, AlertChannelSerializer, AlertActionSerializer,
     NodeRunSerializer, AccountFundConfigSerializer,
 )
+from .fund_sync import mask_account
 from .redaction import redact_text
 from .registry import EventRegistry
 from .services import ExecutionError, process_next_event, start_suite_run, trigger_plan as create_plan_runs
+
+logger = logging.getLogger(__name__)
 
 
 # ============ 占位视图（临时） ============
@@ -160,6 +170,79 @@ class ExecutionLogViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['symbol', 'plan', 'status']
 
 
+def _sync_timeout_seconds():
+    """同步子进程的超时（秒）。取 ``ACCOUNT_SYNC_TIMEOUT_SECONDS`` 并留出启动余量。"""
+    base = getattr(django_settings, 'ACCOUNT_SYNC_TIMEOUT_SECONDS', None)
+    if base is None:
+        base = int(os.getenv('ACCOUNT_SYNC_TIMEOUT_SECONDS', '20'))
+    # 子进程还要完成 Django 启动与数据库连接，多留 15s
+    return int(base) + 15
+
+
+def run_account_sync_in_subprocess(account_id, capital_basis='total'):
+    """在**独立子进程**里执行 gm 同步，超时即杀掉。
+
+    ⚠️ 为什么必须进程隔离（本项目踩过的最隐蔽的坑）：
+
+    实测（真实 gm SDK + 本地黑洞端口）：终端关闭时 ``gm.api.get_cash()``
+    会**持有 GIL 一直阻塞**——同进程内的心跳线程完全停摆，主线程连
+    ``join(timeout)`` 的超时逻辑都执行不到。也就是说**任何"同进程加超时"的
+    方案都是无效的**：整个 Web 进程被冻结，表现为「浏览器一直转圈、整站打不开」。
+
+    子进程被卡住时只影响它自己；``subprocess.run(timeout=...)`` 会 ``kill()``
+    掉它（SIGKILL 由操作系统处理，不依赖目标进程能响应），Web 进程毫发无损，
+    连接也能正常释放。
+
+    Args:
+        account_id: gm user id。
+        capital_basis: 额度口径。
+
+    Returns:
+        dict: ``{'ok': bool, 'detail': str}``；``ok=False`` 时 ``detail`` 可直接展示。
+    """
+    base_dir = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    # 子进程是非 Web 命令：显式关闭分时更新器，避免重复外部请求与写库
+    env.setdefault('MONITORING_UPDATER_ENABLED', '0')
+    env.setdefault('DJANGO_SETTINGS_MODULE', 'quant_engine.settings.dev')
+    cmd = [
+        sys.executable, str(base_dir / 'manage.py'), 'sync_account_funds',
+        '--account-id', account_id, '--capital-basis', capital_basis,
+    ]
+    timeout = _sync_timeout_seconds()
+    logger.info('账户 %s 同步：启动子进程（超时 %ss）', mask_account(account_id), timeout)
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(  # 固定参数列表，无 shell 注入面
+            cmd, cwd=str(base_dir), env=env, timeout=timeout,
+            capture_output=True, text=True, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning('账户 %s 同步子进程超时（%ss）已终止，Web 进程不受影响',
+                       mask_account(account_id), timeout)
+        return {
+            'ok': False,
+            'detail': f'gm 终端无响应（{timeout}s 内未返回），已终止同步；'
+                      '请确认掘金终端已启动并登录后再试',
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error('账户 %s 同步子进程异常：%s', mask_account(account_id), exc)
+        return {'ok': False, 'detail': f'同步进程异常：{redact_text(str(exc))}'}
+
+    elapsed = time.monotonic() - started
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or '').strip().splitlines()[-1:]
+        logger.warning('账户 %s 同步失败（rc=%s，耗时 %.1fs）：%s',
+                       mask_account(account_id), proc.returncode, elapsed,
+                       tail[0] if tail else '')
+        return {
+            'ok': False,
+            'detail': redact_text(tail[0]) if tail else f'同步失败（退出码 {proc.returncode}）',
+        }
+    logger.info('账户 %s 同步子进程完成，耗时 %.1fs', mask_account(account_id), elapsed)
+    return {'ok': True, 'detail': ''}
+
+
 class AccountFundConfigViewSet(viewsets.ModelViewSet):
     """gm 账户预配置（gm user id → 资金/持仓快照）。
 
@@ -178,56 +261,51 @@ class AccountFundConfigViewSet(viewsets.ModelViewSet):
         if self.action in {'create', 'update', 'partial_update', 'destroy', 'sync'}:
             return [permissions.IsAdminUser()]
         return [permissions.IsAuthenticated()]
-
     @action(detail=True, methods=['post'], url_path='sync')
     def sync(self, request, pk=None):
         """立即从 gm 拉取该账户的资金与持仓并回写。
 
-        需要服务端配置 gm 通道（``GM_TOKEN`` 等）；未配置时返回 400 并给出可定位提示。
+        **在独立子进程中执行**：实测 gm SDK 在终端不可达时 ``get_cash()``
+        会持有 GIL 无限阻塞，把整个 Web 进程冻住（整站打不开）。同进程内的
+        任何超时方案都救不回来——主线程根本执行不到超时逻辑。故必须用子进程
+        隔离，卡住时 ``kill()`` 即可，Web 进程不受影响。
+        详见 :func:`run_account_sync_in_subprocess`。
+
+        失败一律转成可读的 4xx（gm 不可用/终端无响应 400、回读繁忙 409），
+        不让 500 冒到前端——一次同步失败不应表现为整站故障。
         """
-        from .fund_sync import FundSyncError, sync_account_funds
+        from django.db import OperationalError
 
         account = self.get_object()
-        try:
-            broker = build_gm_broker_from_settings()
-        except Exception as exc:  # pylint: disable=broad-except
+        masked = mask_account(account.account_id)
+        # 起止日志：访问日志只在**响应完成**时记录，一旦子进程卡住，
+        # 整条请求不会在日志里留下痕迹（曾因此无法判断同步是否真的进来过）。
+        logger.info('开始同步账户 %s（资金口径 %s）', masked, account.capital_basis)
+        started = time.monotonic()
+
+        # 先确认通道可用（缺令牌等快速失败，不必白起一个子进程）
+        if not (getattr(django_settings, 'GM_TOKEN', '') or os.getenv('GM_TOKEN', '')):
             return Response(
-                {'detail': f'gm 通道不可用：{redact_text(str(exc))}'},
+                {'detail': '未配置 GM_TOKEN，无法连接 gm 终端'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        outcome = run_account_sync_in_subprocess(
+            account.account_id, capital_basis=account.capital_basis)
+        if not outcome['ok']:
+            logger.info('账户 %s 同步未成功（耗时 %.1fs）：%s',
+                        masked, time.monotonic() - started, outcome['detail'])
+            return Response({'detail': outcome['detail']},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            result = sync_account_funds(
-                account.account_id,
-                broker,
-                source='gm',
-                capital_basis=account.capital_basis,
-            )
-        except FundSyncError as exc:
-            # 同步失败保留上次成功值（绝不写 0），故返回 400 而非 500
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        account.refresh_from_db()
-        return Response({
-            'account': AccountFundConfigSerializer(account).data,
-            'sync': result,
-        })
-
-
-def build_gm_broker_from_settings():
-    """按服务端配置构造 gm 账户查询适配器（无 gm 令牌时抛异常）。
-
-    与 ``run_scheduler --funds-source gm`` 使用同一套环境变量口径，
-    避免"命令行能同步、页面不能同步"的两套配置。
-    """
-    import os
-
-    from django.conf import settings as django_settings
-
-    from runner.gm_adapter import GmBrokerAdapter
-
-    token = getattr(django_settings, 'GM_TOKEN', '') or os.getenv('GM_TOKEN', '')
-    if not token:
-        raise RuntimeError('未配置 GM_TOKEN，无法连接 gm 终端')
-    return GmBrokerAdapter(token)
+            account.refresh_from_db()
+        except OperationalError:
+            logger.warning('账户 %s 回读同步结果遇到写锁竞争', masked, exc_info=True)
+            return Response({'detail': '同步已完成，但结果回读繁忙，请稍后刷新'},
+                            status=status.HTTP_409_CONFLICT)
+        logger.info('账户 %s 同步完成，耗时 %.2fs', masked, time.monotonic() - started)
+        return Response({'account': AccountFundConfigSerializer(account).data})
 
 
 class FundAllocationViewSet(viewsets.ModelViewSet):

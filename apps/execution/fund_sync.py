@@ -52,10 +52,13 @@ gm 账户查询契约（``GmBrokerAdapter.get_account`` → ``gm.api.get_cash``�
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -323,6 +326,60 @@ def normalize_positions(raw, account_id='', known_symbols=None) -> PositionSnaps
     )
 
 
+def _sync_timeout_seconds():
+    """单账户同步的**总超时**（秒）。超过即放弃本次 gm 调用并按失败处理。
+
+    为什么需要：gm 终端/网络异常时 ``get_cash`` / ``get_position`` 可能长时间
+    不返回（SDK 未暴露超时参数）。
+
+    ⚠️ 本函数**不能**替代进程隔离：实测 gm SDK 阻塞时**持有 GIL**，同进程内的
+    主线程连 ``join`` 的超时逻辑都执行不到。Web 请求路径必须走子进程
+    （见 ``apps.execution.views.run_account_sync_in_subprocess``）；
+    此处的超时仅用于调度器等非 Web 进程，或作为 gm 释放 GIL 时的额外兜底。
+    """
+    configured = getattr(settings, 'ACCOUNT_SYNC_TIMEOUT_SECONDS', None)
+    if configured is not None:
+        return int(configured)
+    return int(os.getenv('ACCOUNT_SYNC_TIMEOUT_SECONDS', '20'))
+
+
+def _call_with_timeout(func, timeout, label, account_id):
+    """在守护线程里执行 ``func``，超时则放弃并抛 :class:`FundSyncError`。
+
+    Args:
+        func: 无参可调用（如 ``broker.get_account``）。
+        timeout: 等待秒数；``<= 0`` 表示不限制（不推荐）。
+        label: 日志/报错用的操作名。
+        account_id: 账户 ID（报错脱敏用）。
+
+    Returns:
+        func 的返回值。
+
+    Raises:
+        FundSyncError: 超时，或 func 自身抛出的异常（统一包装）。
+    """
+    box = {}
+
+    def runner():
+        try:
+            box['value'] = func()
+        except BaseException as exc:  # pylint: disable=broad-except
+            box['error'] = exc
+
+    worker = threading.Thread(target=runner, daemon=True,
+                              name=f'gm-sync-{mask_account(account_id)}')
+    worker.start()
+    worker.join(timeout if timeout and timeout > 0 else None)
+    if worker.is_alive():
+        raise FundSyncError(
+            f'账户 {mask_account(account_id)} {label} 超过 {timeout}s 未返回，已放弃'
+            '（请检查 gm 终端连接与网络）'
+        )
+    if 'error' in box:
+        raise box['error']
+    return box.get('value')
+
+
 def _bind_account(broker, account_id) -> None:
     """把查询适配器绑定到目标账户（gm 要求先 ``set_account_id``）。
 
@@ -369,44 +426,38 @@ def _resolve_capital(computed, allocated):
     return raw_total.quantize(Decimal('0.01')), clamped
 
 
-@transaction.atomic
-def sync_account_funds(account_id, broker, source='gm', capital_basis='total',
-                       with_positions=True) -> dict[str, Any]:
-    """按 gm 账户查询结果同步（upsert）``AccountFundConfig``。
+def _fetch_remote_snapshot(account_id, broker, capital_basis, with_positions):
+    """执行**全部 gm 网络 I/O**并返回归一结果。
+
+    ⚠️ 必须在本函数返回后才允许开启数据库事务。
+
+    原因：``dev`` 配置的 SQLite 使用 ``transaction_mode=IMMEDIATE``，
+    ``BEGIN IMMEDIATE`` 会在事务**入口**就抢占**库级写锁**。若把
+    ``broker.get_account()`` / ``get_positions()`` 放在事务内，这个写锁会被
+    整个网络往返时长（gm 终端无响应时可达数十秒）一直占着；由于 SQLite
+    全库只有一个写者，**任何其它用户的写请求都会阻塞到``timeout``（默认 30s）
+    甚至直接报``database is locked``**，表现为"同步一失败/卡住，整站都打不开"。
+    把网络 I/O 与事务拆开，写锁只在真正落库的那几毫秒内被持有。
 
     Args:
-        account_id: gm user id（交易账户 ID）。
-        broker: 提供 ``get_account()`` / ``get_positions()`` 的适配器
-            （``GmBrokerAdapter``）。
-        source: 资金来源标记（``manual`` / ``gm``）。
-        capital_basis: 额度口径（见 :data:`CAPITAL_BASES`）。账户存在
-            **本项目未管理的持仓**时，盘中市值波动会让总资产口径忽高忽低，
-            建议改用 ``cash``（只看账面资金）或 ``available``（最保守）。
-        with_positions: 是否同步持仓快照。持仓查询失败**不影响**资金同步
-            （资金是额度上限的主依据，持仓仅用于展示与口径提示）。
+        account_id: gm user id。
+        broker: 账户查询适配器。
+        capital_basis: 额度口径。
+        with_positions: 是否一并拉取持仓。
 
     Returns:
-        dict: 同步结果摘要（``Decimal`` → 字符串），含实际生效的口径
-        ``capital_basis``、口径原始值 ``computed_capital``、已分配额度
-        ``allocated_capital``、是否被下限托住 ``clamped``，以及
-        ``positions`` 持仓快照摘要。
+        tuple: ``(snapshot, position_snapshot, computed, effective_basis)``；
+        ``position_snapshot`` 为 ``None`` 表示持仓不可用（不影响资金）。
 
     Raises:
-        FundSyncError: 缺少账户 ID / 通道、口径非法，或 gm 未返回可推导的资金
-            数据（此时**不会**修改已有配置行）。
+        FundSyncError: gm 查询失败或未返回可推导的资金数据。
     """
-    from .models import AccountFundConfig
-
-    if not account_id:
-        raise FundSyncError('缺少账户 ID，无法同步资金')
-    if broker is None:
-        raise FundSyncError('未配置账户查询通道，无法同步资金')
-    if capital_basis not in CAPITAL_BASES:
-        raise FundSyncError(f'capital_basis 必须是 {sorted(CAPITAL_BASES)} 之一')
-
     _bind_account(broker, account_id)
     try:
-        raw = broker.get_account()
+        raw = _call_with_timeout(broker.get_account, _sync_timeout_seconds(),
+                                 '资金查询', account_id)
+    except FundSyncError:
+        raise
     except Exception as exc:  # pylint: disable=broad-except
         raise FundSyncError(f'账户 {mask_account(account_id)} 查询失败: {exc}') from exc
 
@@ -417,12 +468,10 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total',
             '（balance / market_value / nav 均为空），保持上次同步值'
         )
 
-    # ---- 持仓快照（失败不影响资金同步结果）----
+    # 持仓快照（失败不影响资金同步结果）
     # 注意：此处**不再**重复调_bind_account——上面查询资金时已绑定过，
     # 同一账户重复绑定既多余（多一次 set_account_id 调用）又会让绑定计数类断言失真。
-    position_snapshot = None
-    if with_positions:
-        position_snapshot = _sync_positions_quietly(account_id, broker)
+    position_snapshot = _sync_positions_quietly(account_id, broker) if with_positions else None
 
     # 口径取值；该口径字段缺失时回退到总资产口径
     computed = snapshot.capital_by_basis(capital_basis)
@@ -434,6 +483,14 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total',
             f'账户 {mask_account(account_id)} 无法按口径 {capital_basis} 得到额度'
             '（且总资产同样不可得），保持上次同步值'
         )
+    return snapshot, position_snapshot, computed, effective_basis
+
+
+@transaction.atomic
+def _persist_account_funds(*, account_id, snapshot, position_snapshot, computed,
+                           effective_basis, source):
+    """把已取到的资金/持仓快照落库。**纯写库，不做任何网络 I/O。**"""
+    from .models import AccountFundConfig
 
     now = timezone.now()
     try:
@@ -459,6 +516,58 @@ def sync_account_funds(account_id, broker, source='gm', capital_basis='total',
     if position_snapshot is not None:
         _apply_positions(config, position_snapshot, now)
     config.save()
+
+    return created, allocated, total_capital, clamped, now
+
+
+def sync_account_funds(account_id, broker, source='gm', capital_basis='total',
+                       with_positions=True) -> dict[str, Any]:
+    """按 gm 账户查询结果同步（upsert）``AccountFundConfig``。
+
+    **结构约束**：网络 I/O（:func:`_fetch_remote_snapshot`）与数据库事务
+    （:func:`_persist_account_funds`）必须分离——SQLite 在
+    ``transaction_mode=IMMEDIATE`` 下会在事务入口抢占库级写锁，若把 gm
+    网络往返放进事务，一次卡住的同步会让**全站写请求**阻塞至超时，
+    表现为"同步失败时整站打不开"。详见 :func:`_fetch_remote_snapshot`。
+
+    Args:
+        account_id: gm user id（交易账户 ID）。
+        broker: 提供 ``get_account()`` / ``get_positions()`` 的适配器
+            （``GmBrokerAdapter``）。
+        source: 资金来源标记（``manual`` / ``gm``）。
+        capital_basis: 额度口径（见 :data:`CAPITAL_BASES`）。账户存在
+            **本项目未管理的持仓**时，盘中市值波动会让总资产口径忽高忽低，
+            建议改用 ``cash``（只看账面资金）或 ``available``（最保守）。
+        with_positions: 是否同步持仓快照。持仓查询失败**不影响**资金同步
+            （资金是额度上限的主依据，持仓仅用于展示与口径提示）。
+
+    Returns:
+        dict: 同步结果摘要（``Decimal`` → 字符串），含实际生效的口径
+        ``capital_basis``、口径原始值 ``computed_capital``、已分配额度
+        ``allocated_capital``、是否被下限托住 ``clamped``，以及
+        ``positions`` 持仓快照摘要。
+
+    Raises:
+        FundSyncError: 缺少账户 ID / 通道、口径非法，或 gm 未返回可推导的资金
+            数据（此时**不会**修改已有配置行）。
+        OperationalError: 落库阶段遇到数据库锁竞争（调用方应归一为可读错误，
+            而不是 500）。
+    """
+    if not account_id:
+        raise FundSyncError('缺少账户 ID，无法同步资金')
+    if broker is None:
+        raise FundSyncError('未配置账户查询通道，无法同步资金')
+    if capital_basis not in CAPITAL_BASES:
+        raise FundSyncError(f'capital_basis 必须是 {sorted(CAPITAL_BASES)} 之一')
+
+    # ① 网络 I/O —— 事务外，此时**不持有**任何数据库锁
+    snapshot, position_snapshot, computed, effective_basis = _fetch_remote_snapshot(
+        account_id, broker, capital_basis, with_positions)
+
+    # ② 落库 —— 短事务，只包住这几毫秒的读写
+    created, allocated, total_capital, clamped, now = _persist_account_funds(
+        account_id=account_id, snapshot=snapshot, position_snapshot=position_snapshot,
+        computed=computed, effective_basis=effective_basis, source=source)
 
     if clamped:
         logger.info(
@@ -517,7 +626,8 @@ def _sync_positions_quietly(account_id, broker) -> PositionSnapshot | None:
     把持仓误清空会让"外部持仓"提示消失，诱导用户误用 ``total`` 口径。
     """
     try:
-        raw = broker.get_positions()
+        raw = _call_with_timeout(broker.get_positions, _sync_timeout_seconds(),
+                                 '持仓查询', account_id)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning('账户 %s 持仓查询失败（保留上次快照）：%s',
                        mask_account(account_id), exc)

@@ -1,0 +1,1 @@
+﻿.\.venv\Scripts\python.exe .\manage.py run_mcp_server --port 8765 --allow-trigger
