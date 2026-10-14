@@ -10,6 +10,70 @@
 | **Web** | 计划任务 `QuantEngine-Web` → `start_web.cmd` → **waitress** | HTTP/WSGI；同时是分时采样子进程的**父进程** |
 | **Scheduler** | 计划任务 `QuantEngine-Scheduler` → `start_scheduler.cmd` | 到点触发已发布 Plan → SuiteRun → 下单 |
 | 分时采样 | 由 Web 进程自动拉起（`run_intraday_updater` 子进程） | 每 60s 采集分时数据 |
+| **nginx**（可选） | 计划任务 `QuantEngine-Nginx` | 反向代理：静态资源直出 + `/api` 回源 + SSE 缓冲策略 |
+
+## 访问链路：两种模式
+
+nginx 是**可选**的。生产构建的 `VITE_API_BASE_URL = '/api'` 是相对路径，
+因此**不装 nginx 时 waitress 单端口也能同时供前端与 API**（实测 `/` 与
+`/api/monitoring/intraday/realtime/` 同端口正常）。
+
+```
+模式 A（默认，无 nginx）        模式 B（装了 nginx）
+浏览器 ──:8000/ ──> waitress    浏览器 ──:8080/ ──> nginx
+                                       ├─ /assets/ 直出（不回源）
+                                       └─ 其余 ──> waitress:8000
+```
+
+装 nginx 的收益：静态资源不经 Django、便于对外只暴露一个端口、
+以及 **SSE 有独立的缓冲策略**（见下）。
+
+### 安装 nginx（可选）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install_nginx.ps1
+```
+
+默认装到 `%ProgramFiles%\nginx`，监听 **8080**（避开 80 这个需管理员的低端口），
+反代到 `127.0.0.1:8000`。脚本会下载官方 Windows 版 → 渲染配置 → `nginx -t` 校验 →
+注册计划任务 `QuantEngine-Nginx`。与 `install.ps1` **相互独立**，可单独执行。
+
+### ⚠️ SSE 必须关闭代理缓冲
+
+`/api/monitoring/intraday/stream/` 是 SSE 长连接。nginx 默认会缓冲上游响应，
+把推送帧攒在缓冲区里，直到缓冲满或连接结束才吐出来——前端表现为
+「推送已暂停」并自动降级为轮询，实时性丢失且**不报错**。
+
+模板里已为该路径单开一个 `location`：
+
+```nginx
+location = /api/monitoring/intraday/stream/ {
+    proxy_buffering  off;          # ← 关键
+    proxy_cache      off;
+    chunked_transfer_encoding on;
+    proxy_read_timeout 3600s;
+}
+```
+
+实测（真实 SSE 端点，首字节耗时）：**直连 812ms / 经 nginx 13ms**，
+`Content-Type: text/event-stream` 且 `event: snapshot` 帧立即到达。
+
+> 仓库内 `nginx/quant_engine_nginx.conf`（Docker/Linux 路径）**缺这段 SSE 配置**，
+> 若将来用 Docker 部署分时监控，需要补上同样的 `proxy_buffering off`。
+
+### 局域网访问要额外配两项
+
+从域名或局域网 IP 访问时，浏览器发出的 `Origin` 与后端不同源，
+POST 会被 CSRF 判为跨站而拒绝。改 `env.local.cmd`：
+
+```bat
+set ALLOWED_HOSTS=127.0.0.1,localhost,192.168.1.20
+set CSRF_TRUSTED_ORIGINS=http://192.168.1.20:8080
+```
+
+`win_production.py` 还会信任 nginx 的 `X-Forwarded-*` 头
+（`USE_X_FORWARDED_HOST` / `SECURE_PROXY_SSL_HEADER`），
+使 Django 在反代后仍识别真实域名与协议。默认开启，可用 `TRUST_PROXY_HEADERS=0` 关闭。
 
 > **为什么用子进程跑采样**：gm SDK 在终端"可连接但不响应"时会**持有 GIL 一直阻塞**，
 > 同进程内的线程与 asyncio 循环全部停摆，`join(timeout)` / `wait_for` 的超时逻辑

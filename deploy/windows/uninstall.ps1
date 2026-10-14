@@ -17,7 +17,7 @@ $projectDir = Resolve-Path (Join-Path $scriptDir '..\..')
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 Write-Step '停止并移除计划任务'
-foreach ($name in @('QuantEngine-Web', 'QuantEngine-Scheduler')) {
+foreach ($name in @('QuantEngine-Web', 'QuantEngine-Scheduler', 'QuantEngine-Nginx')) {
     $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     if ($task) {
         Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -26,6 +26,15 @@ foreach ($name in @('QuantEngine-Web', 'QuantEngine-Scheduler')) {
     } else {
         Write-Host "  [跳过] $name（不存在）"
     }
+}
+
+# nginx 不会随任务停止而自行退出（它是常驻 master 进程），需显式 quit
+$nginxExe = Join-Path ${env:ProgramFiles} 'nginx\nginx.exe'
+if (Test-Path $nginxExe) {
+    & $nginxExe -p "${env:ProgramFiles}\nginx\" -c 'conf/nginx.conf' -s quit 2>&1 | Out-Null
+    Get-Process -Name nginx -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like '*nginx*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Host '  [已停止] nginx'
 }
 
 # 兜底：清理可能残留的 python/cmd 进程（仅匹配本项目的命令行特征）

@@ -1,0 +1,93 @@
+# ============================================================================
+# nginx 反向代理（Windows 单机生产部署）
+#
+# 由 deploy/windows/install_nginx.ps1 生成到 nginx 安装目录的 conf\ 下。
+# 路径按本机实际情况渲染，不要手工改动 nginx 安装目录里的那份——
+# 重新执行 install_nginx.ps1 会覆盖。
+#
+# 与仓库内 nginx/quant_engine_nginx.conf（Docker/Linux）的差异：
+#   1. 日志与 alias 路径改为 Windows 本机路径；
+#   2. **新增 /api/monitoring/intraday/stream/ 的 SSE 专用 location**——
+#      nginx 默认会缓冲上游响应，SSE 推送会被攒住直到缓冲区满，
+#      表现为前端「推送已暂停」并退化为轮询；
+#   3. 去掉 `= /` 跳转到 /static/index.html 的 302：
+#      本部署的 SPA 入口由 Django 的 serve_frontend_index 统一处理，
+#      直接反代给后端即可，跳转会造成前端路由 base 对不上。
+# ============================================================================
+
+worker_processes  1;
+error_log  logs/error.log  warn;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    # 上游保持连接，减少每请求的 TCP 握手开销
+    upstream quant_backend {
+        server 127.0.0.1:__BACKEND_PORT__ fail_timeout=10s;
+        keepalive 16;
+    }
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    # 统一访问日志格式（含上游耗时，便于排查慢接口）
+    log_format  qe  '$remote_addr - $remote_user [$time_local] "$request" '
+                     '$status $body_bytes_sent "$http_referer" '
+                     '"$http_user_agent" upstream=$upstream_addr '
+                     'rt=$request_time urt=$upstream_response_time';
+    access_log  logs/access.log  qe;
+
+    server {
+        listen       __LISTEN_PORT__;
+        server_name  localhost;
+
+        client_max_body_size 32m;
+
+        # ---------------------------------------------------------------
+        # SSE：分时实时推送（/api/monitoring/intraday/stream/）
+        # 必须关闭缓冲并放长读超时，否则事件会被攒在缓冲区里推不出去。
+        # 前端在连续 3 次错误或久未收到消息时会自动降级为轮询。
+        # ---------------------------------------------------------------
+        location = /api/monitoring/intraday/stream/ {
+            proxy_pass http://quant_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Host              $http_host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection        '';   # 保持到上游的长连接
+
+            proxy_buffering    off;          # ← SSE 关键：不要缓冲
+            proxy_cache        off;
+            chunked_transfer_encoding on;
+            proxy_read_timeout 3600s;         # 长连接：1 小时
+            proxy_send_timeout 3600s;
+        }
+
+        # Django admin / DRF 静态资源（collectstatic → STATIC_ROOT）
+        location /assets/ {
+            alias __PROJECT_STATICFILES__/;
+            access_log off;
+            expires 30d;
+            add_header Cache-Control "public";
+        }
+
+        # 其余全部反代给后端（SPA 入口 + /api + /admin）
+        location / {
+            proxy_pass http://quant_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Host              $http_host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection        "";
+            proxy_read_timeout 120s;
+        }
+    }
+}
