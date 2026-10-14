@@ -1354,6 +1354,45 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | 验证 | `vue-tsc -b` 0 错误 + `vite build` 通过（Monitoring 产物分块已生成） |
 
 
+#### 子进程隔离与已知边界（2026-10-14）
+
+**背景**：分时采样经 `GmSnapshotProvider` 调用 gm SDK 的 `api.history`。实测该调用在终端
+**「可连接但不响应」**时**持有 GIL 一直阻塞**——同进程内的心跳线程与 asyncio 事件循环全部停摆，
+`thread.join(timeout)` / `asyncio.wait_for` 的超时逻辑**根本执行不到**，整个 Web 进程被冻结
+（浏览器一直转圈、整站打不开）。
+
+> 实测对照（本地黑洞 socket，真SDK）：
+> - `asyncio.to_thread` + `wait_for(2s)` → 超时从未触发，进程仍被 SIGKILL 才结束；
+> - `socket.setdefaulttimeout(3)` → SDK 自建 socket，不生效，仍卡死；
+> - 进程隔离 → 子进程被 `kill()`，父进程始终可调度。**故只能进程隔离。**
+
+另实测 gm 在**终端真正关闭**时并不会卡：连接被拒（端口无人监听）约 2.0s、远程关机（SYN 超时）
+约 2.1s 都会抛 `GmError:无法连接到终端服务` 并返回。故冻结只发生在「已连接但无响应」。
+
+**实现**：
+
+```
+Web 进程 (MonitoringConfig.ready)
+  └─ SubprocessIntradayUpdater（只做守护，不碰 gm）
+       ├─ 子进程: manage.py run_intraday_updater → IntradayUpdater（真正的 gm 采样）
+       ├─ 子进程退出 → 自动重启
+       └─ 心跳停滞 > max(3×间隔, 180s) → kill() + 重启（覆盖「子进程活着但卡在 gm 里」）
+```
+
+- `IntradayUpdater` 新增 `heartbeat_path` / `_touch_heartbeat`（**置于 `try` 之外**：
+  单轮抛异常也要刷新，否则父进程误判卡死而反复重启）；
+- `run_intraday_updater` 进程内置 `MONITORING_UPDATER_ENABLED=0`，避免递归拉起自己；
+- 顺带修复：`IntradayUpdater.stop()` 后无法重启（`start()` 未清 `_stop_event`）；
+- `MonitoringConfig.ready()` 改启子进程守护器，原`get_updater` 入口保留供测试/其它调用方。
+
+**已知边界 / 后续任务**：
+
+| 项 | 现状 | 后续方案 |
+|---|---|---|
+| **Gunicorn 多worker 重复采样**（P2） | 每个 worker 都会拉起一个采样子进程 → 同一批标的被重复采样、重复外部请求与写库。当前按**单机单worker** 部署，故不影响使用 | 二选一：① 用文件锁/心跳独占选主，只有一个 worker 真正采样（与 `MultiProcessLock` 思路一致）；② 约定单 worker 部署并在启动日志打印显式告警。**本次仅记录，暂不实施** |
+| gm SDK 无查询超时参数 | 依赖子进程隔离 + 心跳看门狗兜底 | 若 SDK 后续暴露超时参数，可在子进程内改为原生超时 |
+| 终端不可达时的采样空转 | 每轮每标的约 2s 失败（连接被拒），标的较多时首轮耗时可观 | 可加"连续失败 N 轮后本轮跳过"的退避 |
+
 ### 模块10：`quick-strategy`（策略快速创建向导）✅ 全部完成
 
 | 属性 | 说明 |
@@ -1675,6 +1714,7 @@ manage.py clear_intraday [--before=YYYY-MM-DD]
 | P1 | ~~策略快速创建向导~~ → ✅ **全部完成（2026-09-14，见模块10）**：3 步向导 `/quick-strategy`，模板化生成 Case/Suite/Plan 并一键「创建→发布→（可选）启动」；**全链路由前端编排既有 API（后端零新增接口）** | `quant-frontend`（`cases`/`suites`/`plans` API 复用） | 关联新模块（见模块10 设计文档） |
 | P2 | 执行日志生命周期管理（30 天自动清理、归档、清理命令、监控） | `execution`, `runner` | N-04 |
 | P4 | ~~性能与容量基线（API/队列/查询/并发基准；非外部调用 API < 500ms）~~ → **降级为 P4（2026-10-09，用户决定「性能暂不做要求」）**：不设 API 响应时间硬指标，不做容量/并发基准与瓶颈记录；当前为单机单实例部署、SQLite 已调优（WAL + busy_timeout，见 5.1.1），实测无性能阻塞问题。仅在真实部署出现响应延迟/吞吐瓶颈时再恢复该任务 | 全部 runner/API | N-02（已降级 P4） |
+| P2 | 分时监控多 worker 去重（Gunicorn `--workers N` 下每个 worker 都会拉起采样子进程 → 重复采样）——**边界**：采样已移入子进程（2026-10-14，gm 阻塞不再冻结 Web 进程），当前按**单机单 worker** 部署故不影响使用；多 worker 部署前需解决 | `monitoring` | 模块9（子进程隔离与已知边界） |
 | P2 | MCP 服务增强（OAuth2 / 多用户与令牌轮换、`streamable-http` 传输、写操作审计日志、工具返回字段级白名单）——**边界**：当前为 SSE + 静态令牌，默认只读且 `trigger_plan_execution` 受 `MCP_ALLOW_TRIGGER=1` 保护，非回环绑定强制令牌，故不阻塞主线 | `mcp_server` | 模块11（已知边界与后续） |
 
 ##### 敏感配置保护设计（2026-09-15 定稿，覆盖 N-05）

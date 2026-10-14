@@ -97,8 +97,9 @@ Web 进程 (MonitoringConfig.ready)
   需要前台调试时：`manage.py run_intraday_updater`；
 - 终端**真正关闭**时 gm 会在约 2s 内抛 `GmError`（不卡死），故采样会记录失败并等下一轮；
 - 手动跑本命令时进程会置 `MONITORING_UPDATER_ENABLED=0`，避免递归拉起自己；
-- Gunicorn 多 worker 部署时，每个 worker 都会拉一个采样子进程（重复采样），
-  应改为单 worker 或只在一个 worker 上启用。
+- ⚠️ **已知未修复**：Gunicorn 多 worker 部署时，每个 worker 都会拉一个采样子进程（重复采样）。
+  当前按**单机单 worker** 部署故不影响使用；多 worker 部署前需解决。
+  已登记为 P2 后续任务（见 `documents.md` 模块9「子进程隔离与已知边界」）。
 
 ### 标的名称解析（按 symbol code 补名称）
 
