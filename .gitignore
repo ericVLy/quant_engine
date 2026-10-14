@@ -65,6 +65,10 @@ kline.sqlite3
 kline.sqlite3-*
 quant_engine/settings/local.py
 
+# Django STATIC_ROOT：由 collectstatic 生成，纯构建产物，不入库。
+# （历史上曾误提交 200+ 个文件，已在 e16b724 之后的提交中移除。）
+staticfiles/
+
 # Windows 生产部署的本机配置（含数据库口令），由 install.ps1 生成
 deploy/windows/env.local.cmd
 # nginx 启动脚本：内容含本机 NginxDir，由 install_nginx.ps1 生成

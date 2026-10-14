@@ -1,1 +1,0 @@
-import{i as e}from"./index-BP0R11YE.js";var t={snapshots(t){return e.get(`/datasources/snapshots/`,{params:{page_size:500,...t}})},syncLogs(t){return e.get(`/datasources/sync-logs/`,{params:{page_size:500,...t}})},queryKline(t){return e.get(`/datasources/kline/query/`,{params:{page_size:500,...t}})},syncKline(t){return e.post(`/datasources/kline/sync/`,t)}};export{t};
