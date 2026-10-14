@@ -79,6 +79,48 @@ function Resolve-UvPath {
     return $null
 }
 
+function Invoke-Native {
+    <#
+        调用外部命令并返回其退出码。
+
+        为什么需要它：PowerShell 会把**子进程的 stderr 行**包装成
+        NativeCommandError 记录；而 nginx / vite / npm 这类工具**把正常的
+        进度与警告也写到 stderr**。在 $ErrorActionPreference='Stop'（本脚本
+        顶部设定）下，那会被当成致命错误直接终止脚本——即使命令本身成功。
+
+        实测踩过两次：
+          - nginx -t 成功时输出 "syntax is ok"（走 stderr）→ 被中断；
+          - vite build 成功（rc=0），但 chunk>500kB 的警告走 stderr → 被中断。
+
+        因此这里临时把错误策略放宽为 Continue，用退出码判断成败，
+        执行完在 finally 中恢复。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory,
+        [switch]$PassThruOutput
+    )
+
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        Push-Location -LiteralPath $WorkingDirectory -ErrorAction SilentlyContinue
+        try {
+            if ($PassThruOutput) {
+                & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host "    $_" }
+            } else {
+                & $FilePath @Arguments 2>&1 | Out-Null
+            }
+        } finally {
+            Pop-Location -ErrorAction SilentlyContinue
+        }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
+}
+
 function Invoke-Django {
     <#
         在载入生产环境变量后执行一条 Django 管理命令，返回是否成功。
@@ -125,8 +167,16 @@ function Install-Deps {
         # pip 不认 --python：已由 $venvPython 这个可执行文件本身决定目标环境
     }
 
-    if ($tool -eq 'uv') { & $uv @cmdArgs } else { & $venvPython @cmdArgs }
-    return $LASTEXITCODE
+    # uv 与 pip 都可能把进度/警告写到 stderr，同样按退出码判断，
+    # 不能让$ErrorActionPreference='Stop' 把它们当成错误。
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($tool -eq 'uv') { & $uv @cmdArgs } else { & $venvPython @cmdArgs }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
 }
 
 # ---------------------------------------------------------------- 1. 自检
@@ -255,8 +305,8 @@ if (-not $SkipMigrate) {
         foreach ($db in @('quant_engine', 'quant_kline')) {
             $sql = "CREATE DATABASE IF NOT EXISTS ``$db`` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
             $env:MYSQL_PWD = $dbPassword
-            & $mariaBin.FullName -u $dbUser -e $sql 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) { Write-Ok "数据库 $db 就绪" }
+            $rc = Invoke-Native -FilePath $mariaBin.FullName -Arguments @('-u', $dbUser, '-e', $sql)
+            if ($rc -eq 0) { Write-Ok "数据库 $db 就绪" }
             else { Write-Warn2 "数据库 $db 可能已存在或创建失败（继续）" }
         }
         Remove-Item Env:\MYSQL_PWD -ErrorAction SilentlyContinue
@@ -298,14 +348,13 @@ if (-not $SkipFrontend) {
 
     if (-not (Test-Path (Join-Path $frontDir 'node_modules'))) {
         Write-Ok '安装前端依赖（首次较慢）…'
-        Push-Location $frontDir
-        try {
-            & npm ci --no-audit --no-fund 2>&1 | Select-Object -Last 5
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn2 'npm ci 失败，回退到 npm install'
-                & npm install --no-audit --no-fund 2>&1 | Select-Object -Last 5
-            }
-        } finally { Pop-Location }
+        $rc = Invoke-Native -FilePath 'npm.cmd' -Arguments @('ci', '--no-audit', '--no-fund') `
+                            -WorkingDirectory $frontDir -PassThruOutput
+        if ($rc -ne 0) {
+            Write-Warn2 'npm ci 失败，回退到 npm install'
+            $rc = Invoke-Native -FilePath 'npm.cmd' -Arguments @('install', '--no-audit', '--no-fund') `
+                                -WorkingDirectory $frontDir -PassThruOutput
+        }
         if (-not (Test-Path (Join-Path $frontDir 'node_modules'))) {
             Write-Err '前端依赖安装失败，无法继续构建。'
             exit 1
@@ -314,12 +363,11 @@ if (-not $SkipFrontend) {
         Write-Ok 'node_modules 已存在，跳过依赖安装'
     }
 
-    Push-Location $frontDir
-    try {
-        # 只跑 vite build，跳过 vue-tsc 类型检查（部署不因类型报错而中断）
-        & npx vite build 2>&1 | Select-Object -Last 4
-        $buildRc = $LASTEXITCODE
-    } finally { Pop-Location }
+    # 只跑 vite build，跳过 vue-tsc 类型检查（部署不因类型报错而中断）。
+    # 注意：vite 会把chunk 体积警告写到 stderr，必须走 Invoke-Native，
+    # 否则成功构建会被误判为致命错误（见 Invoke-Native 注释）。
+    $buildRc = Invoke-Native -FilePath 'npx.cmd' -Arguments @('vite', 'build') `
+                             -WorkingDirectory $frontDir -PassThruOutput
 
     $indexPath = Join-Path $projectDir 'static\index.html'
     if ($buildRc -ne 0 -or -not (Test-Path $indexPath)) {

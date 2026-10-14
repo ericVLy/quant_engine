@@ -213,6 +213,28 @@ collectstatic 产物（落在 `staticfiles/` 根）完全一致。
 > 排查这类问题的小技巧：直接看响应头。
 > 请求 JS 却拿到 `Content-Type: text/html`，就是被 SPA catch-all 吞了。
 
+### ⚠️ 原生命令的 stderr 不是错误
+
+PowerShell 会把子进程的 stderr 行包装成 `NativeCommandError`，而
+`nginx` / `vite` / `npm` / `uv` 这类工具**把正常的进度与警告也写到 stderr**。
+脚本顶部设了 `$ErrorActionPreference = 'Stop'`，于是"成功消息"被当成致命错误
+**直接终止脚本**——即使命令本身成功。
+
+实测踩过三次：
+
+| 命令 | 走 stderr 的内容 | 实际结果 |
+|---|---|---|
+| `nginx -t` | `syntax is ok` | 成功却被中断 |
+| `vite build` | `(!) Some chunks are larger than 500 kB` | **rc=0 成功却被中断** |
+| `uv pip install` | 进度信息 | 同上风险 |
+
+因此所有原生命令都经 `Invoke-Native` 调用：临时把 `ErrorActionPreference`
+放宽为 `Continue`，**按 `$LASTEXITCODE` 判断成败**，finally 中恢复。
+
+> 若你看到 `node.exe : [plugin builtin:vite-reporter]` 或
+> `nginx.exe : nginx: ... syntax is ok` 后脚本直接停住，
+> 就是这个原因——不是构建/校验失败。
+
 ### collectstatic 是独立步骤，且失败即中止
 
 `collectstatic` 把前端构建产物（`static/assets`）与 Django admin 样式
@@ -365,8 +387,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\uninstall.ps1
 - **编码约定（均为实测踩坑，修改时请保持）**：
   - `.cmd` 用 **GBK + CRLF** —— cmd 的多行续行 `^` 依赖 CRLF，纯 LF 会把
     `--listen=127.0.0.1:8000` 拆成两条命令而报"不是内部或外部命令"；
-  - `.ps1` 用 **UTF-8 + BOM** —— PowerShell 5.1 没有 BOM 会按 ANSI(GBK) 读，
-    中文注释变乱码并直接导致**语法解析失败**；
   - `env.local.cmd` 由 `install.ps1` 以 **GBK + CRLF** 写出 —— 两者缺一不可：
     here-string 内部换行是 LF，直接 `Set-Content` 会写出 LF-only 的 `.cmd`，
     而 cmd 对 LF-only 批处理解析不可靠（`start_web.cmd` 就栽在这里）；
