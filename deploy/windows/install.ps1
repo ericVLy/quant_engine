@@ -7,9 +7,10 @@
       1. 环境自检（venv / MariaDB 服务 / Node 可选）
       2. 生成 deploy\windows\env.local.cmd（**交互式询问数据库口令，口令不写入本脚本**）
       3. 安装 waitress（Gunicorn 不支持 Windows）
-      4. 建库（若不存在）+ migrate + collectstatic
-      5. 注册开机自启计划任务（Web + Scheduler）
-      6. 输出后续步骤（初始化超级管理员）
+      4. 建库（若不存在）+ migrate
+      5. collectstatic（**独立于 migrate**，失败即中止）
+      6. 注册开机自启计划任务（Web + Scheduler / nginx 可选）
+      7. 输出后续步骤（初始化超级管理员）
 
     幂等：重复执行安全；已注册的任务会先删除再重建。
 #>
@@ -28,6 +29,9 @@ param(
 
     # 跳过 migrate（仅重装服务时用）
     [switch]$SkipMigrate,
+
+    # 跳过 collectstatic（默认会执行；它与 migrate 相互独立）
+    [switch]$SkipStatic,
 
     # 装依赖时优先使用 uv（快很多）；-NoUv 强制走 pip
     [switch]$NoUv,
@@ -71,6 +75,26 @@ function Resolve-UvPath {
     return $null
 }
 
+function Invoke-Django {
+    <#
+        在载入生产环境变量后执行一条 Django 管理命令，返回是否成功。
+        直接 call 真正的 env.local.cmd —— 不再生成临时 .cmd：
+        早前版本用 `Get-Content | -join "`n" | Set-Content` 复制一份，
+        既会写出 LF 行尾（cmd 解析不可靠），又会因ASCII 编码毁掉中文注释。
+    #>
+    param([string]$DjangoArgs)
+
+    $errPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & cmd.exe /c "call `"$envFile`" && cd /d `"$projectDir`" && `"$venvPython`" manage.py $DjangoArgs"
+        $rc = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $errPref
+    }
+    return ($rc -eq 0)
+}
+
 function Install-Deps {
     <#
         安装 Python 依赖。$packages 为空表示按 requirements.txt 全量同步。
@@ -102,7 +126,7 @@ function Install-Deps {
 }
 
 # ---------------------------------------------------------------- 1. 自检
-Write-Step '1/6 环境自检'
+Write-Step '1/7 环境自检'
 
 if (-not (Test-Path $venvPython)) {
     Write-Err "找不到虚拟环境：$venvPython"
@@ -123,7 +147,7 @@ if ($mariaSvc.Status -ne 'Running') {
 Write-Ok "MariaDB 服务：$($mariaSvc.Status)（StartType=$($mariaSvc.StartType)）"
 
 # ------------------------------------------------------- 2. 生成环境变量文件
-Write-Step '2/6 生成 env.local.cmd'
+Write-Step '2/7 生成 env.local.cmd'
 
 $dbUser     = Read-Host 'MariaDB 用户名 [root]'
 if ([string]::IsNullOrWhiteSpace($dbUser)) { $dbUser = 'root' }
@@ -184,12 +208,16 @@ set QUANT_THREADS=8
 set QUANT_SCHED_INTERVAL=60
 set QUANT_SCHED_WORKERS=1
 "@
-# 用系统 ANSI 代码页（中文 Windows = GBK/936）写出，避免 cmd 里中文注释乱码
-Set-Content -Path $envFile -Value $envBody -Encoding Default
-Write-Ok "已写入 $envFile（GBK 编码，cmd 可正常显示中文注释）"
+# ⚠️ 必须显式指定 **GBK 编码 + CRLF 行尾**：
+#   - 编码：文件里有中文注释，需按 ANSI(GBK) 写出，否则 cmd 里显示乱码；
+#   - 行尾：here-string 内部换行是 LF，直接 Set-Content 会写出 **LF-only** 的
+#     .cmd，而 cmd 对 LF-only 批处理的解析不可靠（start_web.cmd 就栽在这里）。
+$envBodyCrlf = $envBody.Replace("`r`n", "`n").Replace("`n", "`r`n")
+[System.IO.File]::WriteAllText($envFile, $envBodyCrlf, [System.Text.Encoding]::GetEncoding(936))
+Write-Ok "已写入 $envFile（GBK 编码 + CRLF 行尾）"
 
 # ------------------------------------------- 3. 安装 Python 依赖（uv 优先）
-Write-Step '3/6 安装 Python 依赖'
+Write-Step '3/7 安装 Python 依赖'
 
 $uvPath = Resolve-UvPath
 if ($uvPath) {
@@ -215,7 +243,7 @@ Write-Ok 'WSGI 服务器 waitress 就绪（Windows 上 Gunicorn 不可用，故�
 
 # ------------------------------------------------------ 4. 建库 + migrate
 if (-not $SkipMigrate) {
-    Write-Step '4/6 数据库迁移与静态资源'
+    Write-Step '4/7 数据库迁移'
 
     $mariaBin = Get-ChildItem 'C:\Program Files\MariaDB*\bin\mariadb.exe' -ErrorAction SilentlyContinue |
                Select-Object -First 1
@@ -234,26 +262,33 @@ if (-not $SkipMigrate) {
 
     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
-    # migrate 需要生产环境变量
-    $tmpEnv = Join-Path $env:TEMP 'quant_env_probe.cmd'
-    $probe  = (Get-Content $envFile -Encoding Default) -join "`n"
-    Set-Content -Path $tmpEnv -Value $probe -Encoding ASCII
-
-    cmd /c "call `"$tmpEnv`" && cd /d `"$projectDir`" && `"$venvPython`" manage.py migrate --noinput"
-    if ($LASTEXITCODE -ne 0) { Write-Err 'migrate 失败，请检查数据库连接配置'; exit 1 }
+    if (-not (Invoke-Django 'migrate --noinput')) {
+        Write-Err 'migrate 失败，请检查数据库连接配置（口令 / 库名 / 服务是否启动）'
+        exit 1
+    }
     Write-Ok 'migrate 完成'
-
-    cmd /c "call `"$tmpEnv`" && cd /d `"$projectDir`" && `"$venvPython`" manage.py collectstatic --noinput"
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'collectstatic 完成' }
-    else { Write-Warn2 'collectstatic 失败（前端仍可由 static/ 提供）' }
-
-    Remove-Item $tmpEnv -ErrorAction SilentlyContinue
 } else {
     Write-Warn2 '已跳过 migrate（-SkipMigrate）'
 }
 
+# ------------------------------------------------- 5/7 收集静态资源
+# collectstatic **独立于 migrate**：修计划任务时用 -SkipMigrate 重跑，
+# 不应连带把静态资源也跳过（前端与 admin 样式都依赖它）。
+if (-not $SkipStatic) {
+    Write-Step '5/7 收集静态资源（collectstatic）'
+    if (-not (Invoke-Django 'collectstatic --noinput')) {
+        Write-Err 'collectstatic 失败。生产环境缺静态文件会导致前端与 admin 样式失效，'
+        Write-Err '不作为"可忽略的警告"处理。请先修复再启动服务。'
+        exit 1
+    }
+    $collected = (Get-ChildItem (Join-Path $projectDir 'staticfiles') -Recurse -File -ErrorAction SilentlyContinue)
+    Write-Ok "collectstatic 完成（staticfiles 下共 $($collected.Count) 个文件）"
+} else {
+    Write-Warn2 '已跳过 collectstatic（-SkipStatic）'
+}
+
 # ------------------------------------------------- 5. 注册开机自启计划任务
-Write-Step "5/6 注册开机自启计划任务（触发：$Trigger / 权限：$RunLevel）"
+Write-Step "6/7 注册开机自启计划任务（触发：$Trigger / 权限：$RunLevel）"
 
 $tasks = @(
     @{ Name = 'QuantEngine-Web';      Script = 'start_web.cmd';      Desc = '量化引擎 Web 服务（waitress）' },
@@ -327,7 +362,7 @@ foreach ($t in $tasks) {
 }
 
 # ------------------------------------------------------------ 6. 收尾提示
-Write-Step '6/6 完成'
+Write-Step '7/7 完成'
 Write-Host @"
 
   立即启动（不必等下次登录）：

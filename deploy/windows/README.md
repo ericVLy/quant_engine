@@ -165,8 +165,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install.ps1
 | `-Port 8000` | Web 端口 |
 | `-Host_ 0.0.0.0` | 监听所有网卡（局域网访问）；`ALLOWED_HOSTS` 同步放宽 |
 | `-SkipMigrate` | 只重装服务，跳过数据库迁移 |
+| `-SkipStatic` | 跳过 `collectstatic`（默认会执行，见下） |
 | `-SyncDeps` | 按 `requirements.txt` **全量同步**依赖（默认只补装 waitress） |
 | `-NoUv` | 强制用 pip，不用 uv（见下节） |
+
+### collectstatic 是独立步骤，且失败即中止
+
+`collectstatic` 把前端构建产物（`static/assets`）与 Django admin 样式
+收集到 `staticfiles/`（即 `STATIC_ROOT`），nginx 的 `/assets/` 直接从这里直出。
+
+两条设计取舍：
+
+1. **独立于 migrate**：修计划任务时用 `-SkipMigrate` 重跑时，
+   不应连带把静态资源也跳过（前端与 admin 样式都依赖它）。
+   故单独提供 `-SkipStatic`；
+2. **失败即中止，不只是警告**：静态资源缺失会让前端白屏、admin 无样式。
+   安装脚本会打印实际收集到的文件数，便于确认：
+
+```
+=== 5/7 收集静态资源（collectstatic） ===
+  [OK] collectstatic 完成（staticfiles 下共 213 个文件）
+```
+
+> 校验方法：`staticfiles` 下只有 1 个文件就说明 collectstatic 没生效
+> （正常应有两三百个）。手工执行：
+> `.venv\Scripts\python.exe manage.py collectstatic --noinput`
 
 ### 权限说明（重要）
 
@@ -300,7 +323,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\uninstall.ps1
     `--listen=127.0.0.1:8000` 拆成两条命令而报"不是内部或外部命令"；
   - `.ps1` 用 **UTF-8 + BOM** —— PowerShell 5.1 没有 BOM 会按 ANSI(GBK) 读，
     中文注释变乱码并直接导致**语法解析失败**；
-  - `env.local.cmd` 由 `install.ps1` 以系统 ANSI（GBK）写出；
+  - `env.local.cmd` 由 `install.ps1` 以 **GBK + CRLF** 写出 —— 两者缺一不可：
+    here-string 内部换行是 LF，直接 `Set-Content` 会写出 LF-only 的 `.cmd`，
+    而 cmd 对 LF-only 批处理解析不可靠（`start_web.cmd` 就栽在这里）；
   - **nginx 配置用 UTF-8 无 BOM** —— 这是**反方向**的坑：PowerShell 5.1 的
     `Set-Content -Encoding UTF8` 会**写入 BOM**，nginx 解析到会报
     `unknown directive "锘?"`（同一个 BOM 在不同控制台代码页下显示不同）。
