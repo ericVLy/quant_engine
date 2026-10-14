@@ -142,9 +142,14 @@ $conf = $conf.Replace('__PROJECT_STATICFILES__', $staticfilesPosix)
 
 $confDir  = Join-Path $NginxDir 'conf'
 $confPath = Join-Path $confDir 'quant_engine.conf'
-Set-Content -Path $confPath -Value $conf -Encoding UTF8
+# ⚠️ 必须写成 **UTF-8 无 BOM**：
+#   - `Set-Content -Encoding UTF8` 在 PowerShell 5.1 下会写入 BOM；
+#   - nginx 解析到 BOM 会报 `unknown directive "锘?"`（BOM 被当 GBK 解码后的产物）。
+# 因此这里直接用 .NET 的 UTF8Encoding($false)。
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($confPath, $conf, $utf8NoBom)
 # nginx.conf 只 include 我们这份，避免与发行版默认站点冲突（默认监听 80 端口）
-Set-Content -Path (Join-Path $confDir 'nginx.conf') -Value 'include quant_engine.conf;' -Encoding ASCII
+[System.IO.File]::WriteAllText((Join-Path $confDir 'nginx.conf'), "include quant_engine.conf;`r`n", $utf8NoBom)
 Write-Ok "已写入 $confPath"
 Write-Ok "监听端口 $ListenPort → 后端 127.0.0.1:$BackendPort"
 Write-Ok "静态目录 $staticfilesPosix"

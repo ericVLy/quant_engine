@@ -261,4 +261,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\uninstall.ps1
     `--listen=127.0.0.1:8000` 拆成两条命令而报"不是内部或外部命令"；
   - `.ps1` 用 **UTF-8 + BOM** —— PowerShell 5.1 没有 BOM 会按 ANSI(GBK) 读，
     中文注释变乱码并直接导致**语法解析失败**；
-  - `env.local.cmd` 由 `install.ps1` 以系统 ANSI（GBK）写出。
+  - `env.local.cmd` 由 `install.ps1` 以系统 ANSI（GBK）写出；
+  - **nginx 配置用 UTF-8 无 BOM** —— 这是**反方向**的坑：PowerShell 5.1 的
+    `Set-Content -Encoding UTF8` 会**写入 BOM**，nginx 解析到会报
+    `unknown directive "锘?"`（同一个 BOM 在不同控制台代码页下显示不同）。
+    故 `install_nginx.ps1` 改用
+    `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`。
