@@ -156,8 +156,20 @@ Write-Ok "静态目录 $staticfilesPosix"
 
 # --------------------------------------------------------- 4/5 语法校验
 Write-Step '4/5 校验配置语法'
-$testOut = & $nginxExe -t -p "$NginxDir/" -c 'conf/nginx.conf' 2>&1
-if ($LASTEXITCODE -ne 0) {
+# ⚠️ nginx 把**所有**输出（含 "syntax is ok"）都写到 stderr。PowerShell 会把
+# stderr 行包装成 NativeCommandError，在 $ErrorActionPreference='Stop' 下
+# **直接抛异常终止脚本**——即使 nginx 校验成功。
+# 因此这里临时放宽错误策略，改用退出码判断成败（nginx 成功返回 0）。
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $testOut = & $nginxExe -t -p "$NginxDir/" -c 'conf/nginx.conf' 2>&1
+    $testRc = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevPref
+}
+$testOut = @($testOut | ForEach-Object { $_.ToString() })
+if ($testRc -ne 0) {
     $testOut | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
     Write-Err 'nginx 配置校验失败，未注册自启。'
     exit 1
