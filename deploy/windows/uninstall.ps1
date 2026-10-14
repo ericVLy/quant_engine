@@ -28,13 +28,21 @@ foreach ($name in @('QuantEngine-Web', 'QuantEngine-Scheduler', 'QuantEngine-Ngi
     }
 }
 
-# nginx 不会随任务停止而自行退出（它是常驻 master 进程），需显式 quit
-$nginxExe = Join-Path ${env:ProgramFiles} 'nginx\nginx.exe'
-if (Test-Path $nginxExe) {
-    & $nginxExe -p "${env:ProgramFiles}\nginx\" -c 'conf/nginx.conf' -s quit 2>&1 | Out-Null
-    Get-Process -Name nginx -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -like '*nginx*' } | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Host '  [已停止] nginx'
+# nginx 不会随任务停止而自行退出（它是常驻 master 进程），需显式 quit。
+# 安装目录与 install_nginx.ps1 的默认一致（用户可写位置）。
+$nginxCandidates = @(
+    (Join-Path ${env:LOCALAPPDATA} 'nginx'),
+    (Join-Path ${env:ProgramFiles} 'nginx'),
+    (Join-Path ${env:ProgramData} 'nginx')
+)
+foreach ($dir in $nginxCandidates) {
+    $exe = Join-Path $dir 'nginx.exe'
+    if (Test-Path $exe) {
+        & $exe -p "$dir\" -c 'conf/nginx.conf' -s quit 2>&1 | Out-Null
+        Get-Process -Name nginx -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -like '*nginx*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-Host "  [已停止] nginx（$dir）"
+    }
 }
 
 # 兜底：清理可能残留的 python/cmd 进程（仅匹配本项目的命令行特征）

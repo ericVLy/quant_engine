@@ -34,9 +34,15 @@ nginx 是**可选**的。生产构建的 `VITE_API_BASE_URL = '/api'` 是相对�
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install_nginx.ps1
 ```
 
-默认装到 `%ProgramFiles%\nginx`，监听 **8080**（避开 80 这个需管理员的低端口），
+默认装到 `%LOCALAPPDATA%\nginx`，监听 **8080**（避开 80 这个需管理员的低端口），
 反代到 `127.0.0.1:8000`。脚本会下载官方 Windows 版 → 渲染配置 → `nginx -t` 校验 →
 注册计划任务 `QuantEngine-Nginx`。与 `install.ps1` **相互独立**，可单独执行。
+
+> **为什么不用 `C:\Program Files`**：该目录需要管理员权限，普通账户会在
+> 解压搬运时报 `Move-Item : Access to the path 'nginx' is denied`。
+> 若你偏好在 `%Program Files%`，用管理员 PowerShell 跑，或显式指定：
+> `-NginxDir "C:\Program Files\nginx"`。
+> 其他可选位置：项目内 `deploy\windows\nginx`、任意用户可写目录。
 
 ### ⚠️ SSE 必须关闭代理缓冲
 

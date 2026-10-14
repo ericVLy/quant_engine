@@ -19,8 +19,9 @@
     nginx 在 Windows 上不是真正的系统服务，因此同样用计划任务在登录时拉起。
 #>
 param(
-    # nginx 安装目录（官方 zip 解压后的根）
-    [string]$NginxDir = "$env:ProgramFiles\nginx",
+    # nginx 安装目录。默认用**用户可写**的位置：C:\Program Files 需要管理员，
+    # 普通账户会在解压搬运时报 "Access to the path 'nginx' is denied"。
+    [string]$NginxDir = "$env:LOCALAPPDATA\nginx",
 
     # nginx 对外监听端口
     [int]$ListenPort = 8080,
@@ -55,6 +56,26 @@ $nginxExe = Join-Path $NginxDir 'nginx.exe'
 Write-Ok "项目目录：$projectDir"
 Write-Ok "nginx 目录：$NginxDir"
 
+# 可写性前置检查（放在下载之前，避免白下一份才开始失败）。
+# 注意：这里**只警告不阻断**——探针可能因临时占用等原因误报，
+# 真正不可写时由后面的解压/搬运给出带指引的错误。
+# （上次用户失败在 C:\Program Files：Move-Item "Access to the path 'nginx' is denied"。）
+if (-not (Test-Path $NginxExe)) {
+    $probeDir = $NginxDir
+    if (-not (Test-Path $probeDir)) { $probeDir = Split-Path -Parent $NginxDir }
+    try {
+        $probe = Join-Path $probeDir '.nginx_write_probe.tmp'
+        Set-Content -Path $probe -Value 'probe' -Encoding ASCII -ErrorAction Stop
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        Write-Ok '目录可写'
+    } catch {
+        Write-Warn2 "目录可能不可写：$probeDir"
+        Write-Host "        $probeDir 若需要管理员权限（如 C:\Program Files），建议改用：" -ForegroundColor Yellow
+        Write-Host '          -NginxDir "$env:LOCALAPPDATA\nginx"' -ForegroundColor Yellow
+        Write-Host '        先继续尝试，若搬运失败会给出明确提示。' -ForegroundColor Yellow
+    }
+}
+
 # --------------------------------------------- 2/5 下载并解压（不存在时）
 if (-not (Test-Path $nginxExe)) {
     if ($SkipDownload) {
@@ -82,10 +103,23 @@ if (-not (Test-Path $nginxExe)) {
     if (-not $extracted) { Write-Err '解压结果异常，未找到 nginx 目录'; exit 1 }
 
     $parent = Split-Path -Parent $NginxDir
-    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    if (Test-Path $NginxDir) { Remove-Item $NginxDir -Recurse -Force }
-    Move-Item $extracted.FullName $NginxDir
-    Remove-Item $stage -Recurse -Force
+    if (-not (Test-Path $parent)) {
+        try { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        catch { Write-Err "无法创建上级目录 $parent：$($_.Exception.Message)"; exit 1 }
+    }
+    if (Test-Path $NginxDir) {
+        try { Remove-Item $NginxDir -Recurse -Force }
+        catch { Write-Err "无法清理已存在的 $NginxDir：$($_.Exception.Message)"; exit 1 }
+    }
+    try {
+        Move-Item $extracted.FullName $NginxDir
+    } catch {
+        Write-Err "搬运到 $NginxDir 失败：$($_.Exception.Message)"
+        Write-Host '        多为目录权限问题。改用用户可写目录重试：' -ForegroundColor Yellow
+        Write-Host "          -NginxDir `"`$env:LOCALAPPDATA\nginx`"" -ForegroundColor Yellow
+        exit 1
+    }
+    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     Write-Ok "已解压到 $NginxDir"
 } else {
     Write-Warn2 "已存在 nginx，跳过下载：$nginxExe"
