@@ -49,13 +49,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install.ps1
 
 | 参数 | 说明 |
 |---|---|
-| `-Trigger OnStart` | 改为**系统启动**时以 SYSTEM 身份运行（未登录也起）。**注意**：gm 终端是用户会话里的桌面应用，SYSTEM 身份通常访问不到 |
+| `-Trigger OnStart` | 改为**系统启动**时以 SYSTEM 身份运行（未登录也起）。**需要管理员权限**；且 gm 终端是用户会话里的桌面应用，SYSTEM 身份通常访问不到 |
 | `-Trigger OnLogon` | **默认**。用户登录即启动，gm 终端可正常访问 |
+| `-RunLevel Limited` | **默认**。普通账户即可注册，**无需管理员** |
+| `-RunLevel Highest` | 以最高权限运行，**需管理员账户**（本项目服务本身不需要） |
 | `-Port 8000` | Web 端口 |
 | `-Host_ 0.0.0.0` | 监听所有网卡（局域网访问）；`ALLOWED_HOSTS` 同步放宽 |
 | `-SkipMigrate` | 只重装服务，跳过数据库迁移 |
 | `-SyncDeps` | 按 `requirements.txt` **全量同步**依赖（默认只补装 waitress） |
 | `-NoUv` | 强制用 pip，不用 uv（见下节） |
+
+### 权限说明（重要）
+
+注册计划任务时若报 **`Access is denied`（HRESULT 0x80070005）**，原因是：
+
+- `-RunLevel Highest`，或
+- `-Trigger OnStart`（以 SYSTEM 运行）
+
+两者**都需要管理员权限**。本项目服务（读自己的代码目录、连本机 MariaDB、写自己的日志）
+**不需要任何管理员权限**，所以默认是 `-RunLevel Limited -Trigger OnLogon`，普通账户即可完成安装。
+
+若确实要用最高权限或开机（未登录）启动，请**以管理员身份重开 PowerShell** 后重跑：
+
+```
+# 管理员 PowerShell
+.\deploy\windows\install.ps1 -Trigger OnStart -RunLevel Highest
+```
+
+脚本会在注册前做提权自检：权限不足时直接给出可执行的提示并退出，而不是抛一个天书般的 CIM 异常。
+
+> 实测：普通账户下 `RunLevel=Limited` + `OnLogon` 注册**成功**，
+> 且 `Start-ScheduledTask` 能正常拉起 waitress（`LastTaskResult 0x41301`
+> 表示 SCHED_S_TASK_RUNNING，长驻任务的正常状态）。
+
 
 ## uv 兼容
 
@@ -153,6 +179,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\uninstall.ps1
 ## 注意事项
 
 - **调度器只能有一个实例**：多开会重复触发 Plan（单机部署约束）。
+- **默认不需要管理员权限**：`-RunLevel Limited -Trigger OnLogon` 普通账户即可注册自启。
+  只有 `-RunLevel Highest` 或 `-Trigger OnStart` 才需要管理员。
 - **不要**手工再跑 `manage.py run_intraday_updater`——采样已由 Web 进程自动拉起，重复启动会重复采样。
 - **Gunicorn 多 worker 去重**：`waitress` 是单进程，没有多 worker 问题；
   若将来改用 Gunicorn `--workers N`，每个 worker 都会拉一个采样子进程（已登记为 P2 后续任务）。

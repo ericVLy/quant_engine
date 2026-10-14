@@ -33,7 +33,12 @@ param(
     [switch]$NoUv,
 
     # 按 requirements.txt 全量安装/校准依赖（默认只补装 waitress）
-    [switch]$SyncDeps
+    [switch]$SyncDeps,
+
+    # 计划任务的权限级别：Limited（**默认**，普通账户即可，无需管理员）
+    #                     Highest（需管理员；本项目服务本身不需要）
+    [ValidateSet('Limited', 'Highest')]
+    [string]$RunLevel = 'Limited'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -246,12 +251,28 @@ if (-not $SkipMigrate) {
 }
 
 # ------------------------------------------------- 5. 注册开机自启计划任务
-Write-Step "5/6 注册开机自启计划任务（触发：$Trigger）"
+Write-Step "5/6 注册开机自启计划任务（触发：$Trigger / 权限：$RunLevel）"
 
 $tasks = @(
     @{ Name = 'QuantEngine-Web';      Script = 'start_web.cmd';      Desc = '量化引擎 Web 服务（waitress）' },
     @{ Name = 'QuantEngine-Scheduler'; Script = 'start_scheduler.cmd'; Desc = '量化引擎 策略调度器' }
 )
+
+# 提权自检：RunLevel=Highest（或 OnStart 的 SYSTEM）需要管理员权限，
+# 普通账户会抛 0x80070005 Access is denied。先探测，好提前给出可执行的提示。
+$isAdmin = ([Security.Principal.WindowsPrincipal] `
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$needAdmin = ($RunLevel -eq 'Highest' -or $Trigger -eq 'OnStart')
+if ($needAdmin -and -not $isAdmin) {
+    Write-Warn2 "当前账户不是管理员，而「$RunLevel + $Trigger」需要管理员权限。"
+    Write-Host "        请用**管理员身份**重开 PowerShell 后重跑本脚本，或改用：" -ForegroundColor Yellow
+    Write-Host "          .\install.ps1 -RunLevel Limited -Trigger OnLogon" -ForegroundColor Yellow
+    exit 1
+}
+if (-not $isAdmin) {
+    Write-Ok '当前为普通账户，使用 RunLevel=Limited（本项目无需管理员权限）'
+}
 
 foreach ($t in $tasks) {
     $full = Join-Path $scriptDir $t.Script
@@ -260,19 +281,27 @@ foreach ($t in $tasks) {
     $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
         -Argument "/c `"$full`"" -WorkingDirectory $projectDir
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
-        -LogonType Interactive -RunLevel Highest
+        -LogonType Interactive -RunLevel $RunLevel
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     if ($Trigger -eq 'OnLogon') {
         $triggerObj = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     } else {
         $triggerObj = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+            -LogonType ServiceAccount -RunLevel Highest
     }
 
-    Register-ScheduledTask -TaskName $t.Name `
-        -Action $action -Trigger $triggerObj -Settings $settings -Principal $principal `
-        -Description $t.Desc -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName $t.Name `
+            -Action $action -Trigger $triggerObj -Settings $settings -Principal $principal `
+            -Description $t.Desc -Force | Out-Null
+    } catch {
+        Write-Err "注册 $($t.Name) 失败：$($_.Exception.Message)"
+        Write-Host "        多数情况是权限不足（0x80070005）。请用管理员身份重开 PowerShell 后重跑，" -ForegroundColor Yellow
+        Write-Host "        或加 -RunLevel Limited -Trigger OnLogon 以普通权限注册。" -ForegroundColor Yellow
+        exit 1
+    }
     Write-Ok "已注册：$($t.Name)"
 }
 
