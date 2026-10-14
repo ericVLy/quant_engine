@@ -735,9 +735,9 @@ class McpServiceProcessGateTest(TestCase):
         app_config = django_apps.get_app_config('monitoring')
         with mock.patch.object(settings, 'MONITORING_UPDATER_ENABLED', enabled), \
                 mock.patch.object(sys, 'argv', argv), \
-                mock.patch('apps.monitoring.updater.get_updater') as get_updater:
+                mock.patch('apps.monitoring.updater.SubprocessIntradayUpdater') as supervisor:
             app_config.ready()
-        return get_updater
+        return supervisor
 
     def test_mcp_service_process_skips_updater(self):
         """`run_mcp_server` 管理命令进程不启动分时更新器。
@@ -750,8 +750,8 @@ class McpServiceProcessGateTest(TestCase):
             ['manage.py', 'run_mcp_server', '--port', '9100'],
             ['manage.py', 'run_mcp_server', '--transport', 'sse'],
         ):
-            get_updater = self._ready(argv)
-            get_updater.assert_not_called()
+            supervisor = self._ready(argv)
+            supervisor.assert_not_called()
 
     def test_disabled_setting_and_reloader_parent_skip_updater(self):
         self._ready(['manage.py', 'runserver'], enabled=True).assert_not_called()
@@ -759,9 +759,9 @@ class McpServiceProcessGateTest(TestCase):
 
     def test_runserver_child_process_starts_updater(self):
         with mock.patch.dict(os.environ, {'RUN_MAIN': 'true'}):
-            get_updater = self._ready(['manage.py', 'runserver', '127.0.0.1:8000'])
-        get_updater.assert_called_once()
-        get_updater.return_value.start.assert_called_once()
+            supervisor = self._ready(['manage.py', 'runserver', '127.0.0.1:8000'])
+        supervisor.assert_called_once()
+        supervisor.return_value.start.assert_called_once()
 
 
 class McpMutationsTest(TestCase):

@@ -76,6 +76,30 @@
 
 以下为**有意为之的设计取舍**或**当前尚未闭环**的部分，改动相关代码前请先确认约束。
 
+### 分时监控（子进程隔离）
+
+分时采样通过 gm SDK 的 `api.history` 获取数据。该调用在**终端「可连接但不响应」时会持有 GIL 一直阻塞**——
+同进程内的心跳线程与 asyncio 事件循环全部停摆，`join(timeout)` / `wait_for` 的超时逻辑
+根本执行不到，**整个 Web 进程被冻结**（浏览器一直转圈、整站打不开）。
+
+因此采样放在**独立子进程**中运行，Web 进程只做守护：
+
+```
+Web 进程 (MonitoringConfig.ready)
+  └─ SubprocessIntradayUpdater（守护线程）
+       ├─ 子进程: manage.py run_intraday_updater → IntradayUpdater（真正的 gm 采样）
+       ├─ 子进程退出 → 自动重启
+       └─ 心跳停滞 > max(3×间隔, 180s) → kill() 并重启（应对卡在 gm 调用里）
+```
+
+- 心跳文件：`%TEMP%/quant-intraday-updater.heartbeat`，每轮循环刷新；
+- 正常情况下**无需手工启动**，`MonitoringConfig.ready()` 会自动拉起；
+  需要前台调试时：`manage.py run_intraday_updater`；
+- 终端**真正关闭**时 gm 会在约 2s 内抛 `GmError`（不卡死），故采样会记录失败并等下一轮；
+- 手动跑本命令时进程会置 `MONITORING_UPDATER_ENABLED=0`，避免递归拉起自己；
+- Gunicorn 多 worker 部署时，每个 worker 都会拉一个采样子进程（重复采样），
+  应改为单 worker 或只在一个 worker 上启用。
+
 ### 标的名称解析（按 symbol code 补名称）
 
 创建标的（`POST /api/watchlists/symbols/`）时若只给 `code` + `market` 而不给 `name`，

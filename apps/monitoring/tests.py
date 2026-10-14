@@ -1119,9 +1119,9 @@ class MonitoringUpdaterProcessGateTest(TestCase):
         with patch.object(django_settings, 'MONITORING_UPDATER_ENABLED', enabled), \
                 patch('sys.argv', argv), \
                 patch.dict(os.environ, env, clear=False), \
-                patch('apps.monitoring.updater.get_updater') as get_updater:
+                patch('apps.monitoring.updater.SubprocessIntradayUpdater') as supervisor:
             app_config.ready()
-        return get_updater
+        return supervisor
 
     def test_non_web_service_commands_skip_updater(self):
         for command in ('run_scheduler', 'run_dev_stack', 'run_mcp_server',
@@ -1134,9 +1134,15 @@ class MonitoringUpdaterProcessGateTest(TestCase):
                      '--workers', '2']).assert_not_called()
 
     def test_runserver_child_starts_updater(self):
-        get_updater = self._ready(['manage.py', 'runserver'], run_main='true')
-        get_updater.assert_called_once()
-        get_updater.return_value.start.assert_called_once()   # ready() 调用的是 get_updater().start()
+        # 采样跑在子进程里（2026-10-14）：ready() 启动的是子进程守护器而非进程内更新器，
+        # 否则 gm SDK 阻塞时持有 GIL，会冻结整个 Web 进程。
+        supervisor = self._ready(['manage.py', 'runserver'], run_main='true')
+        supervisor.assert_called_once()
+        supervisor.return_value.start.assert_called_once()
+
+    def test_sampling_subprocess_command_skips_updater(self):
+        """采样子进程自身不得再拉子进程（否则无限递归）。"""
+        self._ready(['manage.py', 'run_intraday_updater'], run_main='true').assert_not_called()
 
     def test_runserver_reloader_parent_skips_updater(self):
         self._ready(['manage.py', 'runserver']).assert_not_called()

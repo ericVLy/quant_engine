@@ -12,9 +12,15 @@
   5. UTC 23:00 触发 ``clear_intraday`` 收盘兜底清理（每自然日最多一次，幂等）。
 """
 import logging
+import os
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 from datetime import timedelta
 from datetime import timezone as dt_timezone
+from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
@@ -27,12 +33,17 @@ logger = logging.getLogger(__name__)
 # UTC 23:00 收盘清理触发小时（美股收盘后、A股开盘前）
 CLEANUP_UTC_HOUR = 23
 
+#: 子进程心跳文件（父进程据此判断采样进程是否卡死）
+DEFAULT_HEARTBEAT_PATH = Path(tempfile.gettempdir()) / 'quant-intraday-updater.heartbeat'
+
 
 class IntradayUpdater:
     """进程内分时数据更新器；``run_once`` 可脱离线程单独测试。"""
 
-    def __init__(self, interval=None):
+    def __init__(self, interval=None, heartbeat_path=None):
         self.interval = interval or getattr(settings, 'MONITORING_UPDATER_INTERVAL', 60)
+        # 每轮循环触碰该文件，供父进程判断子进程是否卡死
+        self.heartbeat_path = heartbeat_path or DEFAULT_HEARTBEAT_PATH
         self._stop_event = threading.Event()
         self._thread = None
         self._backfill_complete = False
@@ -45,6 +56,8 @@ class IntradayUpdater:
     def start(self):
         if self._thread is not None and self._thread.is_alive():
             return self._thread
+        # 清停止标志：否则 stop() 之后无法再次启动（守护/测试会复用同一实例）
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, name='monitoring-updater', daemon=True)
         self._thread.start()
         logger.info('[monitoring-updater] 已启动，采样间隔 %ss', self.interval)
@@ -71,7 +84,18 @@ class IntradayUpdater:
                 self._maybe_cleanup()
             except Exception:  # pylint: disable=broad-except
                 logger.exception('[monitoring-updater] 单轮更新异常，下一轮重试')
+            # 心跳放在 try 之外：即使本轮抛异常也要刷新，
+            # 否则父进程会误判子进程卡死并反复重启它。
+            self._touch_heartbeat()
             self._stop_event.wait(self.interval)
+
+    def _touch_heartbeat(self):
+        """写心跳文件（mtime 即最近一轮完成时间）。失败不影响采样。"""
+        try:
+            self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            self.heartbeat_path.touch()
+        except OSError as exc:  # pragma: no cover - 磁盘异常
+            logger.debug('[monitoring-updater] 心跳写入失败: %s', exc)
 
     def run_once(self, provider=None):
         """执行一轮采样（供主循环与测试复用）。"""
@@ -176,3 +200,114 @@ def get_updater():
         if _instance is None:
             _instance = IntradayUpdater()
         return _instance
+
+
+class SubprocessIntradayUpdater:
+    """以**独立子进程**运行分时更新器；父进程只做守护（拉起 / 重启 / 看门狗）。
+
+    为什么要子进程（2026-10-14）：
+    分时采样经``GmSnapshotProvider`` 调用 gm SDK的 ``api.history``。实测该调用
+    在对端"可连接但不响应"时**持有 GIL 一直阻塞**——同进程内的心跳线程与
+    ``asyncio`` 事件循环全部停摆，``wait_for`` / ``join(timeout)`` 的超时逻辑
+    根本执行不到，**整个 Web 进程被冻结**（浏览器一直转圈、整站打不开）。
+    （对照：终端真正关闭时 gm 会~2s 抛``GmError:无法连接到终端服务``，不会卡死。）
+
+    进程隔离后，卡死只影响子进程：父进程可 ``kill()`` 后重启，Web 服务毫发无损。
+
+    看门狗：子进程每轮循环触碰心跳文件；超过 ``max_staleness`` 秒未更新即视为卡死，
+    父进程强制杀掉并重启（应对"子进程存活但卡在 gm 调用里"）。
+    """
+
+    def __init__(self, interval=None, max_staleness=None, base_dir=None):
+        self.interval = interval or getattr(settings, 'MONITORING_UPDATER_INTERVAL', 60)
+        # 心跳超时阈值：留足 3 轮余量，容忍 gc/IO 抖动
+        self.max_staleness = max_staleness or max(self.interval * 3, 180)
+        self.base_dir = base_dir or Path(__file__).resolve().parents[2]
+        self.heartbeat_path = DEFAULT_HEARTBEAT_PATH
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._proc = None
+        self._lock = threading.Lock()
+
+    # ---- 生命周期 ------------------------------------------------------
+    def start(self):
+        """启动守护线程（不是采样本身）。"""
+        if self._thread is not None and self._thread.is_alive():
+            return self._thread
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._supervise, name='monitoring-updater-supervisor', daemon=True)
+        self._thread.start()
+        logger.info('[monitoring-updater] 守护线程已启动（采样在子进程中运行，间隔 %ss）',
+                    self.interval)
+        return self._thread
+
+    def stop(self, timeout=5):
+        """停止守护线程并终止子进程。"""
+        self._stop_event.set()
+        self._kill_child()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+        return self._thread
+
+    @property
+    def is_running(self):
+        """采样子进程是否存活。"""
+        with self._lock:
+            return self._proc is not None and self._proc.poll() is None
+
+    # ---- 内部 ----------------------------------------------------------
+    def _spawn(self):
+        env = os.environ.copy()
+        # 子进程自己就是采样进程，必须关掉内置更新器，否则会递归再拉一个子进程
+        env['MONITORING_UPDATER_ENABLED'] = '0'
+        env.setdefault('DJANGO_SETTINGS_MODULE', 'quant_engine.settings.dev')
+        cmd = [sys.executable, str(self.base_dir / 'manage.py'), 'run_intraday_updater']
+        logger.info('[monitoring-updater] 拉起采样子进程: %s', ' '.join(cmd))
+        with self._lock:
+            # 刻意不用 `with`：子进程需跨多次 _supervise_once 存活，
+            # 生命周期由 _kill_child / 看门狗显式管理（不能随 spawn 语句结束就关闭）。
+            # pylint: disable=consider-using-with
+            self._proc = subprocess.Popen(  # noqa: S603 # 固定参数，无 shell
+                cmd, cwd=str(self.base_dir), env=env)
+
+    def _kill_child(self, reason=''):
+        """终止子进程（SIGKILL，由操作系统处理，不依赖目标进程响应）。"""
+        with self._lock:
+            proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        logger.warning('[monitoring-updater] 终止采样子进程%s (pid=%s)',
+                       f'（{reason}）' if reason else '', proc.pid)
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception('[monitoring-updater] 终止采样子进程异常')
+
+    def _heartbeat_age(self):
+        """心跳文件距今秒数；不存在返回 ``None``。"""
+        try:
+            return time.time() - self.heartbeat_path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _supervise(self):
+        while not self._stop_event.is_set():
+            try:
+                self._supervise_once()
+            except Exception:  # pylint: disable=broad-except
+                logger.exception('[monitoring-updater] 守护循环异常，下一轮重试')
+            self._stop_event.wait(min(self.interval, 15))
+
+    def _supervise_once(self):
+        if not self.is_running:
+            if self._proc is not None:
+                code = self._proc.poll()
+                logger.warning('[monitoring-updater] 采样子进程已退出（rc=%s），重启', code)
+            self._spawn()
+            return
+        age = self._heartbeat_age()
+        if age is not None and age > self.max_staleness:
+            # 子进程存活但心跳停滞 → 很可能卡在 gm 调用里（持有 GIL，进程无法响应）
+            self._kill_child(reason=f'心跳停滞 {age:.0f}s（疑似卡在 gm 调用）')
