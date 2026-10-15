@@ -73,6 +73,8 @@ staticfiles/
 deploy/windows/env.local.cmd
 # nginx 启动脚本：内容含本机 NginxDir，由 install_nginx.ps1 生成
 deploy/windows/start_nginx.cmd
+# nginx 安装目录记录（本机路径），由 install_nginx.ps1 生成
+deploy/windows/nginx_dir.txt
 
 # 本地数据库备份（迁移/修复前的人工快照，含业务数据，绝不入库）
 .backup/

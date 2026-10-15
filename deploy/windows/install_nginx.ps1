@@ -154,6 +154,11 @@ Write-Ok "已写入 $confPath"
 Write-Ok "监听端口 $ListenPort → 后端 127.0.0.1:$BackendPort"
 Write-Ok "静态目录 $staticfilesPosix"
 
+# 记录安装目录，供 services.ps1 定位 nginx（-NginxDir 可自定义，路径不能硬编码）
+$marker = Join-Path $scriptDir 'nginx_dir.txt'
+[System.IO.File]::WriteAllText($marker, "$NginxDir`r`n", [System.Text.Encoding]::UTF8)
+Write-Ok "已记录 nginx 目录到 $marker"
+
 # --------------------------------------------------------- 4/5 语法校验
 Write-Step '4/5 校验配置语法'
 # ⚠️ nginx 把**所有**输出（含 "syntax is ok"）都写到 stderr。PowerShell 会把

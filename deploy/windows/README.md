@@ -12,6 +12,54 @@
 | 分时采样 | 由 Web 进程自动拉起（`run_intraday_updater` 子进程） | 每 60s 采集分时数据 |
 | **nginx**（可选） | 计划任务 `QuantEngine-Nginx` | 反向代理：静态资源直出 + `/api` 回源 + SSE 缓冲策略 |
 
+## 服务管理（启动 / 停止 / 重启 / 状态）
+
+```powershell
+# 重启全部（改了配置或重新部署后最常用的一条命令）
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\services.ps1 -Action restart
+
+# 只重启某一项
+... -Action restart -Service Web        # 也可以 Scheduler / Nginx
+... -Action start  / -Action stop
+... -Action status                      # 看任务状态、进程数、端口
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-Action` | `start` / `stop` / `restart` / `status`，默认 `status` |
+| `-Service` | `All`（默认）/ `Web` / `Scheduler` / `Nginx` |
+| `-WaitSeconds` | 启动后等待端口就绪的秒数，默认 30 |
+
+不需要管理员权限。
+
+### ⚠️ 重启为什么必须清理孤儿进程
+
+`run_hidden.vbs` 用 `WshShell.Run` 启动子进程，而该方式创建的进程
+**不在计划任务的作业对象（Job Object）内**——所以 `Stop-ScheduledTask`
+只终止 `wscript.exe` 本身，真正的服务进程会活下来变成孤儿。
+
+更麻烦的是**分时采样子进程 `run_intraday_updater`**：它由 Web 拉起，
+继承了 waitress 的 stdout/stderr 重定向，也就是**继承了 `logs/web.log`
+的文件句柄**。Web 被杀后它仍存活并继续持有该文件，于是下次
+`start_web.cmd` 执行 `>> logs\web.log` 时报：
+
+```
+The process cannot access the file because it is being used by another process.
+```
+
+waitress 随即**秒退**，表现为「任务状态 Ready、端口未监听」，而
+`start` 却报告成功——**重启看起来成功、实际服务没起来**。
+
+因此 `services.ps1` 在停止与重启时，都会按命令行特征清理
+`waitress` / `run_intraday_updater` / `run_scheduler` / `nginx`
+的残留进程，并在重启前确认端口已真正释放。
+
+> 顺带一提：曾想在 `start_web.cmd` 里探测日志是否被锁以自动降级，
+> 但**实测 cmd 的 `>>` 重定向失败不会设置 `errorlevel`**，
+> `if errorlevel 1` 检测不出文件锁（被独占锁定时仍判为可写）。
+> 故放弃该方案，改为由 `services.ps1` 处理孤儿进程，
+> 并在就绪失败时打印上面这段诊断。
+
 ## 隐藏自启窗口
 
 登录自启时**不会弹出黑色控制台窗口**。做法是给三个计划任务统一套一层
@@ -317,6 +365,8 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ## 启动与状态
 
+日常操作建议用 `services.ps1`（见文首「服务管理」）。下面是等价的底层命令：
+
 ```powershell
 # 立即启动（不必等下次登录）
 Start-ScheduledTask -TaskName 'QuantEngine-Web'
@@ -328,6 +378,10 @@ Get-ScheduledTask -TaskName 'QuantEngine*' | Get-ScheduledTaskInfo
 # 访问
 Start-Process http://127.0.0.1:8000/
 ```
+
+> 直接 `Stop-ScheduledTask` 是**不完整**的——它只杀 `wscript.exe`，
+> 服务进程与分时采样子进程会残留并继续持有 `logs\web.log`。
+> 需要停止时请用 `services.ps1 -Action stop`。
 
 首次访问会自动跳转 `/setup` 引导页，创建超级管理员。
 完成后 `env.local.cmd` 里 `SETUP_ENABLED=0` 保持不变，即使清空用户表也不会重开引导。
