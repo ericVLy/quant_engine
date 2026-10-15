@@ -12,6 +12,48 @@
 | 分时采样 | 由 Web 进程自动拉起（`run_intraday_updater` 子进程） | 每 60s 采集分时数据 |
 | **nginx**（可选） | 计划任务 `QuantEngine-Nginx` | 反向代理：静态资源直出 + `/api` 回源 + SSE 缓冲策略 |
 
+## 把开发环境的标的同步到部署环境
+
+开发机用 SQLite（`db.sqlite3`），部署机用 MariaDB，两边 `Symbol` 表需要人工对齐。
+部署环境里标的为空时，Web 界面无可选标的，功能无法使用。
+
+```powershell
+# 先预演，看看会新增/更新/删除什么（只读，不停服）
+.venv\Scripts\python.exe manage.py sync_symbols `
+    --source "C:\Users\<你>\Documents\quant_platform\quant_engine\db.sqlite3" --dry-run
+
+# 正式同步（自动停服 → 写入 → 恢复服务）
+.venv\Scripts\python.exe manage.py sync_symbols `
+    --source "C:\Users\<你>\Documents\quant_platform\quant_engine\db.sqlite3"
+```
+
+> 请在**部署环境**执行，命令以只读方式打开开发库的 SQLite 文件。
+> 反过来（开发机直连部署的 MariaDB）需要额外注入部署库口令，风险高。
+
+| 参数 | 说明 |
+|---|---|
+| `--source` | 开发环境 SQLite 路径（必填） |
+| `--dry-run` | 只打印变更计划，不写库不停服 |
+| `--prune` | 删除目标库中源库没有的标的（**会级联删快照**，慎用） |
+| `--no-stop-services` | 同步期间不停服（自行保证无并发读写） |
+| `--keep-backup` | 不在 `.backup/` 留存同步前快照 |
+
+### 为什么要停服
+
+`datasources.SymbolSnapshot` 以 `Symbol` 为主键且 `on_delete=CASCADE`，
+分时采样与调度器也会并发读写标的。同步期间停服可避免读到中间状态。
+
+命令通过 `services.ps1` 停/启服务，并且**只恢复同步前本来就在跑的服务**
+——不会把用户故意停掉的服务重新拉起来。若无任何变更，命令会提前返回、
+不停服（不该为no-op 打扰线上）。
+
+### 安全边界
+
+- 源库以 `mode=ro` 打开，**绝不会写开发库**（有测试守着）；
+- 写库前把目标库现有标的导出到 `.backup/symbols_before_sync_<时间戳>.json`；
+- 写入在 `transaction.atomic()` 内，出错回滚，目标库保持原样；
+- 默认**只增改不删**，删除必须显式 `--prune`。
+
 ## 服务管理（启动 / 停止 / 重启 / 状态）
 
 ```powershell
