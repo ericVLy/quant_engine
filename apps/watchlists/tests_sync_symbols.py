@@ -229,12 +229,15 @@ class SyncSymbolsTests(TestCase):
         self.assertEqual(actions, [], '无变更时不应调用 services.ps1')
 
     def test_stopped_services_are_not_restarted(self):
-        """同步前本来就没服务在跑，不应把它们拉起来。"""
+        """探测到"确实都没在跑"时，不应把它们拉起来。"""
         _make_source_db(self.src_path, [('000426', '兴业银锡', 'SZ', 'A')])
 
         class _FakeProc:
             returncode = 0
-            stdout = 'Web        任务=Ready     进程数=0 端口 8000 未监听\n'
+            # 三个服务都明确是 Ready —— 探测**有效**，且答案为"都没跑"
+            stdout = ('Web        任务=Ready     进程数=0 端口 8000 未监听\n'
+                      'Scheduler  任务=Ready     进程数=0 \n'
+                      'Nginx      任务=Ready     进程数=0 端口 8080 未监听\n')
             stderr = ''
 
         calls = []
@@ -247,4 +250,46 @@ class SyncSymbolsTests(TestCase):
                          stdout=StringIO(), stderr=StringIO())
 
         actions = [a[a.index('-Action') + 1] for a in calls if '-Action' in a]
-        self.assertNotIn('start', actions, '原本没运行的服务不应被启动')
+        self.assertIn('stop', actions)
+        self.assertNotIn('start', actions, '探测确认都没在跑时，不应启动')
+
+    def test_running_detection_survives_mojibake_output(self):
+        """status 输出是系统 ANSI（GBK），按 utf-8 解码后中文是乱码。
+
+        因此探测**只能按 ASCII 片段**匹配。曾经按中文 ``任务=Running`` 匹配，
+        永远匹配不到 → 运行中的服务被误判为空 → 停服后不恢复，线上停摆。
+        """
+        cmd = sync_symbols.Command()
+        # 模拟 GBK 字节被当 utf-8 解码后的乱码：中文全变问号，ASCII 完好
+        mojibake = ('  Web        ???=Running   ??=2 ???? 8000 ???\n'
+                    '  Scheduler  ???=Running   ??=2 \n'
+                    '  Nginx      ???=Ready     ??=0 ???? 8080 ???\n')
+        with mock.patch.object(sync_symbols.subprocess, 'run',
+                               lambda *a, **k: mock.Mock(stdout=mojibake, returncode=0)):
+            self.assertEqual(cmd._probe_running(), ['Web', 'Scheduler'])
+
+    def test_ambiguous_probe_fails_safe_by_starting_all(self):
+        """探测失效（解析不出任何服务）时应兜底拉起全部。
+
+        "让线上停摆"的后果远重于"多启动一个服务"，故取保服务的一侧。
+        """
+        _make_source_db(self.src_path, [('000426', '兴业银锡', 'SZ', 'A')])
+
+        class _FakeProc:
+            returncode = 0
+            stdout = ''          # 探测彻底失效：没有任何可解析内容
+            stderr = ''
+
+        calls = []
+        with mock.patch.object(sync_symbols.subprocess, 'run',
+                               lambda args, **kw: (calls.append(args), _FakeProc())[1]), \
+             mock.patch.object(sync_symbols.Command, '_services_script',
+                               staticmethod(lambda: Path(__file__).resolve().parents[2])):
+            out = StringIO()
+            call_command('sync_symbols', '--source', str(self.src_path),
+                         '--keep-backup', stdout=out, stderr=StringIO())
+
+        actions = [a[a.index('-Action') + 1] for a in calls if '-Action' in a]
+        self.assertIn('stop', actions)
+        self.assertEqual(actions[-1], 'start', '探测失效时应兜底启动')
+        self.assertIn('兜底', out.getvalue())

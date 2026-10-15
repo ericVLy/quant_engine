@@ -28,7 +28,6 @@ param(
     [ValidateSet('start', 'stop', 'restart', 'status')]
     [string]$Action = 'status',
 
-    [ValidateSet('All', 'Web', 'Scheduler', 'Nginx')]
     [string]$Service = 'All',
 
     # start/restart 后等待端口就绪的秒数
@@ -140,6 +139,31 @@ function Resolve-NginxDir {
 }
 
 # --------------------------------------------------------------- 服务定义
+# --------------------------------------------------------------- 服务定义
+# 把 -Service 拆成数组。
+#
+# 为什么不在参数上写 ValidateSet + [string[]]：PowerShell 的 **-File 调用方式
+# 不解析逗号**。从 PowerShell 交互式执行 `-Service Web,Scheduler` 能被解析成数组，
+# 但 `powershell -File x.ps1 -Service Web,Scheduler`（例如从 Python 的
+# subprocess 调用）传进去的是**一个整体字符串** "Web,Scheduler"，
+# 对 [string[]] 只会包成单元素数组，随即被 ValidateSet 拒绝：
+#   The argument "Web,Scheduler" does not belong to the set "All,Web,..."
+# 这个坑真实出现过：sync_symbols 调start 时服务没起来，脚本却报告"已恢复"。
+# 因此这里接收单个字符串、自行按逗号拆分，与调用方式无关。
+$serviceList = @(
+    $Service -split ',' |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ } |
+    Select-Object -Unique
+)
+foreach ($s in $serviceList) {
+    if ($s -notin @('All', 'Web', 'Scheduler', 'Nginx')) {
+        Write-Host "  [X]  -Service 取值非法：$s（可选 All / Web / Scheduler / Nginx）" -ForegroundColor Red
+        Write-Host "      多项请用逗号分隔，例如 -Service Web,Scheduler" -ForegroundColor Yellow
+        exit 1
+    }
+}
+
 $envFile = Join-Path $scriptDir 'env.local.cmd'
 $webPort = [int](Get-EnvVarFromFile $envFile 'QUANT_PORT' '8000')
 
@@ -157,7 +181,10 @@ $defs = @(
     @{ Key = 'Nginx';     Task = 'QuantEngine-Nginx';
        Patterns = @('nginx'); Desc = 'nginx 反向代理 :8080' }
 )
-if ($Service -ne 'All') { $defs = @($defs | Where-Object { $_.Key -eq $Service }) }
+if ($serviceList -notcontains 'All') {
+    # 支持 -Service Web,Scheduler 这样一次操作多个
+    $defs = @($defs | Where-Object { $serviceList -contains $_.Key })
+}
 
 # --------------------------------------------------------------- 停止逻辑
 # ⚠️ restart 与 stop 必须走**同一个**函数：只Stop-ScheduledTask 是不够的。
@@ -191,7 +218,7 @@ function Stop-Def {
 }
 
 # ------------------------------------------------------------------ 主流程
-Write-Step "量化引擎服务管理 — $Action / $Service"
+Write-Step "量化引擎服务管理 — $Action / $($serviceList -join ',')"
 
 if ($Action -eq 'status') {
     foreach ($d in $defs) {

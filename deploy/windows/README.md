@@ -47,6 +47,15 @@
 ——不会把用户故意停掉的服务重新拉起来。若无任何变更，命令会提前返回、
 不停服（不该为no-op 打扰线上）。
 
+若**探测失效**（脚本缺失、调用失败、或输出无法识别），就无法区分
+"本来都没跑"和"没探测到"。此时取**保服务**的一侧：拉起全部并明确告警——
+让线上停摆的后果远重于多启动一个服务。
+
+> 探测只能按 **ASCII** 片段（如 `Running`）匹配，不能匹配中文：
+> `services.ps1` 的输出是系统 ANSI（中文 Windows = GBK），而命令用
+> `encoding='utf-8'` 解码，中文会变乱码。按中文 `任务=Running` 匹配**永远匹配不到**，
+> 曾导致一次同步把服务停了却没拉起来。
+
 ### 安全边界
 
 - 源库以 `mode=ro` 打开，**绝不会写开发库**（有测试守着）；
@@ -69,10 +78,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\services.ps1 
 | 参数 | 说明 |
 |---|---|
 | `-Action` | `start` / `stop` / `restart` / `status`，默认 `status` |
-| `-Service` | `All`（默认）/ `Web` / `Scheduler` / `Nginx` |
+| `-Service` | `All`（默认）/ `Web` / `Scheduler` / `Nginx`；多项用逗号分隔 |
 | `-WaitSeconds` | 启动后等待端口就绪的秒数，默认 30 |
 
 不需要管理员权限。
+
+> `-Service` 接收单个字符串、内部自行按逗号拆分。**不要**用
+> `[string[]]` + `ValidateSet`：PowerShell 的 `-File` 调用方式不解析逗号，
+> `powershell -File services.ps1 -Service Web,Scheduler` 会把整个
+> `"Web,Scheduler"` 当成单个值而被 ValidateSet 拒绝
+> （从 PowerShell 交互式执行却正常，极难察觉）。
+> `sync_symbols` 正是通过 `-File` 调本脚本，这个坑导致过一次
+> 「脚本报已恢复服务，实际服务没起来」。
 
 ### ⚠️ 重启为什么必须清理孤儿进程
 
