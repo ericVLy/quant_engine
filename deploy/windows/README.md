@@ -63,6 +63,51 @@
 - 写入在 `transaction.atomic()` 内，出错回滚，目标库保持原样；
 - 默认**只增改不删**，删除必须显式 `--prune`。
 
+## 同步 K 线数据（`sync_klines`）
+
+K 线按**标的动态分表**（`kline_a_000426` 等），存在**独立的 K 线库**
+（部署环境是 `quant_kline`），与主库不是同一个。
+
+```powershell
+# 先同步标的（前提）
+.venv\Scripts\python.exe manage.py sync_symbols --source "...\db.sqlite3"
+
+# 预演 K 线同步
+.venv\Scripts\python.exe manage.py sync_klines --source "...\kline.sqlite3" --dry-run
+
+# 正式同步（自动停服 → 写入 → 恢复服务）
+.venv\Scripts\python.exe manage.py sync_klines --source "...\kline.sqlite3"
+
+# 只同步指定标的
+... --codes 000426,sh000001
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--source` | 开发环境 `kline.sqlite3`（**注意是 K 线库，不是主库**） |
+| `--dry-run` | 只打印计划 |
+| `--prune` | 删除源库没有的交易日（**会删真实行情**） |
+| `--codes` | 只同步指定标的 |
+
+### 三个必须知道的点
+
+1. **按 code 映射，绝不按 `symbol_id`**。分表的 `symbol_id` 是指向
+   `Symbol` 主键的外键，而两边自增 ID **必然不同**（实测开发库
+   id = 1,3,4,5…11 中间有删除，部署库是新插入的 1..10）。
+   照搬 id 会把所有 K 线挂到错误标的上，**且不报错**。
+
+2. **一切读写走 `kline` 数据库别名**。分表建在独立库，
+   用默认库会报 `Table 'quant_engine.kline_xxx' doesn't exist`。
+
+3. **Decimal 字段按精度量化**。源 SQLite 把 `amount` 存成 float，
+   读出来是 `1275406657.4199998`（二进制浮点噪声），目标列是
+   `DECIMAL(20,2)` → `1275406657.42`。不量化的话**每次同步都会把
+   这些行判成"已变更"重复写入**（实测 9/10 个分表每次报几十到上百条更新），
+   既慢又会把 `updated_at` 全部刷新。
+
+目标库没有对应标的的分表会被**明确报出并跳过**（不会静默丢数据）——
+请先跑 `sync_symbols`。
+
 ## 服务管理（启动 / 停止 / 重启 / 状态）
 
 ```powershell

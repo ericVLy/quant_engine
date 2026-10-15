@@ -52,12 +52,13 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from apps.watchlists.models import Symbol
+from quant_engine.deployment import ServiceControlMixin
 
 # 同步的字段：只取业务字段，不含 id / created_at / updated_at（由 ORM 处理）
 SYNC_FIELDS = ('code', 'name', 'exchange', 'market')
 
 
-class Command(BaseCommand):
+class Command(ServiceControlMixin, BaseCommand):
     help = '把开发环境（SQLite）的标的同步到当前环境；同步前后自动停/启服务'
 
     def add_arguments(self, parser):
@@ -117,7 +118,7 @@ class Command(BaseCommand):
         # ---------------------------------------------------------- 停服务
         was_running = None
         if not opts['no_stop_services']:
-            was_running = self._stop_services()
+            was_running = self.stop_services()
         if (opts['no_stop_services']):
             self.stdout.write(self.style.WARNING(
                 '已指定 --no-stop-services：不会自动恢复服务，请自行确认服务状态。'))
@@ -141,18 +142,8 @@ class Command(BaseCommand):
         # ---------------------------------------------------------- 恢复服务
         if opts['no_stop_services'] or opts['no_restart']:
             return
-        if was_running is None:
-            # 探测失效：无法区分"本来就没跑"与"没探测到"。
-            # 「让线上停摆」的后果远重于「多启动一个服务」，故按保服务处理。
-            self.stdout.write(self.style.WARNING(
-                '同步前未能确认哪些服务在运行（探测失效）。'
-                '为避免线上停摆，将拉起全部服务。'))
-            self._start_services(None)
-        elif was_running:
-            self._start_services(was_running)
-        else:
-            # 探测有效且结论是"都没在跑"——尊重现状，不擅自启动
-            self.stdout.write('  同步前没有服务在运行，保持停止状态。')
+        # 三态处理（探测失效 / 有效但都没跑 / 部分在跑）统一在 mixin 里
+        self.restore_services(was_running)
 
     # ------------------------------------------------------------ 源/目标读取
     @staticmethod
@@ -297,107 +288,3 @@ class Command(BaseCommand):
         except Exception as exc:                       # noqa: BLE001 备份失败不应阻断同步
             self.stderr.write(self.style.WARNING(f'备份失败（继续执行）：{exc}'))
 
-    # -------------------------------------------------------------- 服务控制
-    @staticmethod
-    def _services_script():
-        if sys.platform != 'win32':
-            return None
-        # <repo>/apps/watchlists/management/commands/sync_symbols.py -> repo root
-        root = Path(__file__).resolve().parents[4]
-        path = root / 'deploy' / 'windows' / 'services.ps1'
-        return path if path.exists() else None
-
-    def _stop_services(self):
-        script = self._services_script()
-        if script is None:
-            self.stdout.write(self.style.WARNING(
-                '未找到 deploy/windows/services.ps1（非 Windows 或未安装），'
-                '请自行确保同步期间无并发读写。'))
-            return None
-
-        running = self._probe_running()
-        self.stdout.write('')
-        if running is None:
-            self.stdout.write(self.style.WARNING(
-                '  停服中（**探测失效，无法确定哪些服务在运行**）…'))
-        else:
-            self.stdout.write(f'  停服中（当前在运行：{", ".join(running) if running else "无"}）…')
-        self._run_ps1(script, 'stop')
-        return running
-
-    def _start_services(self, running):
-        """拉起服务。``running`` 为 None 表示"探测失效，不知道哪些在跑"→ 全部拉起。"""
-        script = self._services_script()
-        if script is None:
-            return
-        if running is None:
-            self.stdout.write('  拉起全部服务（兜底）…')
-            self._run_ps1(script, 'start')
-        elif not running:
-            self.stdout.write('  同步前没有服务在运行，保持停止状态。')
-        else:
-            self.stdout.write(f'  恢复服务：{", ".join(running)}…')
-            self._run_ps1(script, 'start', running)
-
-    def _run_ps1(self, script, action, services=None):
-        args = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                '-File', str(script), '-Action', action]
-        if services:
-            args += ['-Service', ','.join(services)]
-        try:
-            proc = subprocess.run(  # noqa: S603
-                args, capture_output=True, text=True,
-                encoding='utf-8', errors='replace', timeout=180, check=False)
-        except (OSError, subprocess.SubprocessError) as exc:
-            self.stderr.write(self.style.WARNING(f'调用 services.ps1 失败：{exc}'))
-            return
-        if proc.returncode != 0:
-            self.stderr.write(self.style.WARNING(
-                f'services.ps1 -{action} 返回 {proc.returncode}，请确认服务状态：'))
-            for line in (proc.stdout or '').splitlines()[-8:]:
-                self.stderr.write(f'    {line}')
-
-    def _probe_running(self):
-        """同步前记录哪些服务本来就在运行，避免把用户故意停的服务重新拉起。
-
-        返回三态：
-          * ``None`` —— 探测**失效**（脚本缺失/调用失败/输出无法识别）；
-          * ``[]``   —— 探测有效，确实没有服务在运行；
-          * ``[名称]`` —— 探测有效，这些服务在运行。
-
-        ⚠️ 只按 **ASCII** 片段匹配，不要匹配中文。
-        ``services.ps1`` 的输出经 PowerShell 写出时是**系统 ANSI 代码页**（中文
-        Windows = GBK），而本命令用 ``encoding='utf-8'`` 解码，中文会变成乱码；
-        若按 ``任务=Running`` 这类中文标记匹配，**永远匹配不到**，
-        于是"运行中的服务"被误判为空——停服后就不会恢复，线上直接停摆。
-        （这个 bug 真实发生过：一次同步把服务停了却没拉起来。）
-        GBK 与 UTF-8 对 ASCII 是兼容的，故只匹配 ``Running`` 等 ASCII 片段。
-        """
-        script = self._services_script()
-        if script is None:
-            return None
-        try:
-            proc = subprocess.run(  # noqa: S603
-                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                 '-File', str(script), '-Action', 'status'],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=120, check=False)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if proc.returncode != 0:
-            return None
-
-        running, seen = [], set()
-        for line in (proc.stdout or '').splitlines():
-            parts = line.split()
-            if not parts:
-                continue
-            name = parts[0].strip()
-            if name not in ('Web', 'Scheduler', 'Nginx'):
-                continue
-            seen.add(name)
-            # 形如：  Web        ???=Running   ??=2 ???? 8000 ???
-            if 'Running' in line:
-                running.append(name)
-        # 一行服务状态都认不出来 → 输出格式与预期不符，判定为探测失效
-        return running if seen else None

@@ -17,6 +17,7 @@ from django.core.management.base import CommandError
 from django.test import TestCase
 
 from apps.watchlists.management.commands import sync_symbols
+from quant_engine import deployment
 from apps.watchlists.models import Symbol
 
 TABLE = Symbol._meta.db_table
@@ -197,8 +198,8 @@ class SyncSymbolsTests(TestCase):
             calls.append(args)
             return _FakeProc()
 
-        with mock.patch.object(sync_symbols.subprocess, 'run', _fake_run), \
-             mock.patch.object(sync_symbols.Command, '_services_script',
+        with mock.patch.object(deployment.subprocess, 'run', _fake_run), \
+             mock.patch.object(deployment.ServiceControlMixin, 'services_script',
                                staticmethod(lambda: Path(__file__).resolve().parents[2])):
             call_command('sync_symbols', '--source', str(self.src_path),
                          '--keep-backup',
@@ -217,9 +218,9 @@ class SyncSymbolsTests(TestCase):
         Symbol.objects.get(code='000426')        # 确认已存在
 
         calls = []
-        with mock.patch.object(sync_symbols.subprocess, 'run',
+        with mock.patch.object(deployment.subprocess, 'run',
                                lambda args, **kw: calls.append(args)), \
-             mock.patch.object(sync_symbols.Command, '_services_script',
+             mock.patch.object(deployment.ServiceControlMixin, 'services_script',
                                staticmethod(lambda: Path(__file__).resolve().parents[2])):
             call_command('sync_symbols', '--source', str(self.src_path),
                          '--keep-backup',
@@ -241,9 +242,9 @@ class SyncSymbolsTests(TestCase):
             stderr = ''
 
         calls = []
-        with mock.patch.object(sync_symbols.subprocess, 'run',
+        with mock.patch.object(deployment.subprocess, 'run',
                                lambda args, **kw: (calls.append(args), _FakeProc())[1]), \
-             mock.patch.object(sync_symbols.Command, '_services_script',
+             mock.patch.object(deployment.ServiceControlMixin, 'services_script',
                                staticmethod(lambda: Path(__file__).resolve().parents[2])):
             call_command('sync_symbols', '--source', str(self.src_path),
                          '--keep-backup',
@@ -264,9 +265,9 @@ class SyncSymbolsTests(TestCase):
         mojibake = ('  Web        ???=Running   ??=2 ???? 8000 ???\n'
                     '  Scheduler  ???=Running   ??=2 \n'
                     '  Nginx      ???=Ready     ??=0 ???? 8080 ???\n')
-        with mock.patch.object(sync_symbols.subprocess, 'run',
+        with mock.patch.object(deployment.subprocess, 'run',
                                lambda *a, **k: mock.Mock(stdout=mojibake, returncode=0)):
-            self.assertEqual(cmd._probe_running(), ['Web', 'Scheduler'])
+            self.assertEqual(cmd.probe_running(), ['Web', 'Scheduler'])
 
     def test_ambiguous_probe_fails_safe_by_starting_all(self):
         """探测失效（解析不出任何服务）时应兜底拉起全部。
@@ -281,9 +282,9 @@ class SyncSymbolsTests(TestCase):
             stderr = ''
 
         calls = []
-        with mock.patch.object(sync_symbols.subprocess, 'run',
+        with mock.patch.object(deployment.subprocess, 'run',
                                lambda args, **kw: (calls.append(args), _FakeProc())[1]), \
-             mock.patch.object(sync_symbols.Command, '_services_script',
+             mock.patch.object(deployment.ServiceControlMixin, 'services_script',
                                staticmethod(lambda: Path(__file__).resolve().parents[2])):
             out = StringIO()
             call_command('sync_symbols', '--source', str(self.src_path),
