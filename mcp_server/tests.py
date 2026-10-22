@@ -35,7 +35,10 @@ from apps.watchlists.models import Symbol
 from mcp_server import tools_impl
 from mcp_server.config import McpConfigError, load_transport_config
 from mcp_server.formatting import to_jsonable
-from mcp_server.server import build_http_app, build_transport_security, create_server
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp_server.server import (
+    QuantEngineServer, build_http_app, build_transport_security, create_server,
+)
 
 EXPECTED_TOOL_NAMES = {
     'search_symbols',
@@ -359,6 +362,58 @@ class McpServerWiringTest(SimpleTestCase):
         self.assertEqual(resources, {'quant://docs/overview'})
         self.assertEqual(server.name, 'quant-engine')
         self.assertIn('MCP_ALLOW_TRIGGER=1', server.instructions)
+
+    # ---------------------------------------- 错误信息可读性（2026-10-22）
+    def test_server_is_quant_engine_subclass(self):
+        """装配出来的是 QuantEngineServer（错误透出增强版），不是裸 MCPServer。"""
+        self.assertIsInstance(create_server(), QuantEngineServer)
+
+    def test_anticipated_tool_error_keeps_message(self):
+        """预期内失败（写开关未开）必须把**原因**透给客户端。
+
+        回归：MCP SDK 会把非 ``MCPError`` 的异常包成 ``UnexpectedToolError``，
+        客户端只收到一句 ``Error executing tool <name>``，原始信息全被抹掉。
+        于是"写开关没开"这种最常撞到的失败，agent 侧完全看不出所以然。
+
+        注意：``call_tool`` 本身是**抛异常**的，由传输层转成
+        ``is_error=True`` 的响应。故这里断言异常与消息。
+        """
+        server = create_server()
+        env = {k: v for k, v in os.environ.items() if k != 'MCP_ALLOW_MUTATE'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ToolError) as ctx:
+                asyncio.run(server.call_tool(
+                    'create_case', {'name': 'x', 'node_type': 'signal'}))
+        message = str(ctx.exception)
+        self.assertIn('MCP_ALLOW_MUTATE', message,
+                      '错误里必须带上可操作的提示，而不是一句无信息量的报错')
+        self.assertNotIn('Error executing tool', message)
+
+    def test_unexpected_error_still_hides_detail(self):
+        """未预期异常仍按 SDK 契约抹掉详情（不泄漏内部信息）。"""
+        server = create_server()
+        with mock.patch('mcp_server.mutations.create_case',
+                        side_effect=RuntimeError('内部敏感信息 secret=xxx')):
+            with self.assertRaises(UnexpectedToolError) as ctx:
+                asyncio.run(server.call_tool(
+                    'create_case', {'name': 'x', 'node_type': 'signal'}))
+        message = str(ctx.exception)
+        self.assertIn('Error executing tool', message)
+        self.assertNotIn('secret=xxx', message,
+                         '未预期异常不得把内部细节泄漏给客户端')
+
+    def test_value_error_keeps_message(self):
+        """参数校验类失败（ValueError）同样要透出原因。"""
+        server = create_server()
+        # 注意：本类是 SimpleTestCase（禁 DB），故用替身注入 ValueError，
+        # 避免把"DB 不可用"这类环境噪声混进断言。
+        with mock.patch('mcp_server.tools_impl.get_case',
+                        side_effect=ValueError('Case 不存在: 999999')):
+            with self.assertRaises(ToolError) as ctx:
+                asyncio.run(server.call_tool('get_case', {'case_id': 999999}))
+        message = str(ctx.exception)
+        self.assertNotIn('Error executing tool', message)
+        self.assertIn('Case 不存在', message)
 
     def test_bootstrap_disables_intraday_updater_by_default(self):
         """MCP-13：MCP 进程默认不拉起分时更新器，避免多进程重复采样与外部请求。"""

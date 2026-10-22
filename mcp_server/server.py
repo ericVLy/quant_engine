@@ -24,6 +24,7 @@ import os
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from pydantic import Field
 
 from mcp_server import mutations, tools_impl
@@ -31,6 +32,54 @@ from mcp_server.auth import BearerAuthMiddleware
 from mcp_server.config import McpTransportConfig, load_transport_config
 
 logger = logging.getLogger(__name__)
+
+# 工具里**预期内**的业务失败类型。这些失败是"可预期的"（调用方一看就明白
+# 该改什么），必须把原因透给客户端：
+#   PermissionError      —— 写开关未开启（MCP_ALLOW_MUTATE / MCP_ALLOW_TRIGGER）
+#   ValueError           —— 参数/配置校验失败（含字段名）
+#   MutationConflictError —— 被引用 / 有执行记录，语义冲突（REST 409 语义）
+_ANTICIPATED_TOOL_ERRORS = (PermissionError, ValueError)
+
+
+def _anticipated_tool_error(exc: BaseException) -> bool:
+    """判断异常是否为**预期内**的业务失败。"""
+    if isinstance(exc, _ANTICIPATED_TOOL_ERRORS):
+        return True
+    # MutationConflictError 在 mutations 模块内定义；按类名判定避免循环导入
+    return type(exc).__name__ == 'MutationConflictError'
+
+
+class QuantEngineServer(MCPServer):
+    """为本项目定制的 MCP 服务：让**预期内**失败的原因能到客户端。
+
+    ⚠️ 为什么需要这个子类（2026-10-22 实测）：
+
+    MCP SDK 的约定是——工具里抛出的异常若不是 ``MCPError``，会被当成"崩溃"包成
+    ``UnexpectedToolError``，客户端**只收到一句**
+    ``Error executing tool <name>``，原始信息全部被抹掉
+    （服务端日志里有 traceback，客户端看不到）。
+
+    于是"写开关没开"这种最常撞到的失败，agent 侧只看到一句无信息量的报错，
+    根本无法区分"是没开写权限"还是"参数不对"，只能靠猜。
+
+    而 ``ToolError`` 正是 SDK 为**预期内失败**准备的：客户端拿到
+    ``is_error=True`` 且 content 里带完整信息，服务端也只记 INFO 不记 traceback。
+    本类把上述三类领域异常从 ``UnexpectedToolError.__cause__`` 里取出来，
+    重新以 ``ToolError`` 抛出。
+
+    放在 ``call_tool`` 这一层而不是逐个工具装饰，是为了**不漏**：
+    以后新加的工具自动就有可读的错误，不必记得套装饰器。
+    """
+
+    async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
+        try:
+            return await super().call_tool(name, arguments, context)
+        except UnexpectedToolError as exc:
+            cause = exc.__cause__
+            if cause is not None and _anticipated_tool_error(cause):
+                # 预期内失败：透出原因（原异常仍是 __cause__，便于服务端排查）
+                raise ToolError(str(cause)) from cause
+            raise
 
 
 def create_server() -> MCPServer:
@@ -44,7 +93,7 @@ def create_server() -> MCPServer:
     Returns:
         MCPServer: 注册完毕的 MCP 服务实例（未启动传输）。
     """
-    server = MCPServer(
+    server = QuantEngineServer(
         name='quant-engine',
         title='Quant Engine',
         description='量化投研与交易系统 MCP 接入：标的、K 线、策略元数据、告警与分时监控。',
