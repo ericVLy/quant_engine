@@ -44,8 +44,76 @@ class GmBrokerAdapterTest(SimpleTestCase):
 
         self.api.order_volume.assert_called_once_with(
             symbol='SHSE.600000', volume=200, side=1, order_type=2,
-            position_effect=1, price=12.34,
+            position_effect=1, price=12.34, account='',
         )
+
+    def test_order_volume_passes_account_explicitly(self):
+        """绑定账户后下单必须显式带 account，不再依赖 SDK 预设账户。"""
+        self.adapter.set_account_id('acct-1')
+        self.adapter.submit_order(
+            'SHSE.600000', {'direction': 'sell', 'price': '12.34', 'volume': 100}
+        )
+        kwargs = self.api.order_volume.call_args.kwargs
+        self.assertEqual(kwargs['account'], 'acct-1')
+
+    # ------------------------------------------------- SDK 预设账户死锁回归
+    def test_set_account_id_never_touches_sdk_preset(self):
+        """回归：绝不能调用 gm SDK 的 ``api.set_account_id()``。
+
+        实测（真实 gm SDK，2026-10-22）：一旦进程内调用过
+        ``api.set_account_id(X)``，该进程后续**所有** ``api.get_cash()``
+        都会**永久死锁**——C 扩展持有 GIL，连 ``join(timeout)`` 的超时逻辑
+        都执行不到，整个进程冻结；``api.set_account_id('')`` 清空预设也救不回来。
+
+        现象是"分时监控正常、资金同步卡死"：前者走 ``api.history``，
+        后者走 ``api.get_cash``。
+        """
+        self.adapter.set_account_id('acct-1')
+        self.api.set_account_id.assert_not_called()
+        self.assertEqual(self.adapter.account_id, 'acct-1')
+
+    def test_constructor_with_account_id_never_touches_sdk_preset(self):
+        """构造时传account_id 同样不得设置 SDK 预设。"""
+        adapter = GmBrokerAdapter(api=self.api, account_id='acct-9')
+        self.api.set_account_id.assert_not_called()
+        self.assertEqual(adapter.account_id, 'acct-9')
+
+    def test_get_account_passes_account_id_explicitly(self):
+        """查询必须显式带 account_id，这样完全不需要 SDK 预设。"""
+        self.adapter.set_account_id('acct-1')
+        self.api.get_cash.return_value = {'nav': 1}
+        self.adapter.get_account()
+        self.api.get_cash.assert_called_once_with(account_id='acct-1')
+
+    def test_get_positions_passes_account_id_explicitly(self):
+        self.adapter.set_account_id('acct-1')
+        # 适配器按 `get_positions` -> `get_position` 顺序探测；
+        # 真实 SDK 只有单数版，这里用 Mock 实际会命中的那个来断言。
+        self.api.get_positions.return_value = [{'symbol': 'SHSE.600000'}]
+        self.adapter.get_positions()
+        self.api.get_positions.assert_called_once_with(account_id='acct-1')
+
+    def test_get_orders_prefers_account_aware_variant(self):
+        """``get_orders()`` 不接受账户参数，须优先用 ``get_orders_mm``。"""
+        self.adapter.set_account_id('acct-1')
+        self.api.get_orders_mm.return_value = [{'cl_ord_id': 'x'}]
+        self.assertEqual(self.adapter.get_orders(), [{'cl_ord_id': 'x'}])
+        self.api.get_orders_mm.assert_called_once_with(account_id='acct-1')
+
+    def test_get_unfinished_orders_prefers_account_aware_variant(self):
+        self.adapter.set_account_id('acct-1')
+        self.api.get_unfinished_orders_mm.return_value = [{'cl_ord_id': 'y'}]
+        self.assertEqual(self.adapter.get_unfinished_orders(), [{'cl_ord_id': 'y'}])
+        self.api.get_unfinished_orders_mm.assert_called_once_with(account_id='acct-1')
+
+    def test_account_queries_work_without_any_sdk_preset(self):
+        """完整链路：绑定账户 → 查资金/持仓，全程不碰 SDK 预设。"""
+        self.adapter.set_account_id('acct-1')
+        self.api.get_cash.return_value = {'nav': 999913.99}
+        self.api.get_positions.return_value = [{'symbol': 'SHSE.600000'}]
+        self.assertEqual(self.adapter.get_account()['nav'], 999913.99)
+        self.assertEqual(len(self.adapter.get_positions()), 1)
+        self.api.set_account_id.assert_not_called()
 
     def test_account_and_position_interfaces_are_forwarded(self):
         self.api.get_cash.return_value = {'available': 1000}

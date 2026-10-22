@@ -381,11 +381,21 @@ def _call_with_timeout(func, timeout, label, account_id):
 
 
 def _bind_account(broker, account_id) -> None:
-    """把查询适配器绑定到目标账户（gm 要求先 ``set_account_id``）。
+    """把查询适配器指向目标账户（记录 ``broker.account_id``）。
 
-    gm 的 ``get_cash`` / ``get_position`` 在未绑定账户时可能报
-    ``无效的ACCOUNT_ID``（status 1020），因此每次查询前都要确保适配器已绑定
-    到当前账户——批量同步多个账户时尤其需要逐个重新绑定。
+    ⚠️ 这里**只记录逻辑账户**，绝不触碰 gm SDK 的 ``api.set_account_id()``。
+
+    实测（真实 gm SDK，2026-10-22）：``api.set_account_id()`` 一旦在进程内被
+    调用，后续所有 ``api.get_cash()`` 都会**永久死锁**（C 扩展持有 GIL，
+    连 ``join(timeout)`` 的超时逻辑都执行不到 → 整个进程冻结），
+    且 ``api.set_account_id('')`` 清空预设也救不回来。
+    分时监控（走 ``api.history``）不受影响，所以现象是"行情正常、资金查询卡死"。
+
+    查询类接口（``get_cash`` / ``get_position``）本来就支持**显式传
+    account_id**，实测耗时 0.17s / 0.00s，根本不需要预设账户。
+
+    早期版本这里"必须先绑定"的注释已过时：那是针对更老 SDK 的行为，
+    在当前 SDK 上恰恰是死锁的直接原因。
 
     绑定失败不抛异常：部分适配器（如测试替身）不提供 ``set_account_id``，
     此时沿用未绑定查询，由后续的 :func:`sync_account_funds` 统一判定成败。

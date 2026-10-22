@@ -57,11 +57,26 @@ class GmBrokerAdapter:
                 or os.getenv('GM_TOKEN', '') or None)
 
     def set_account_id(self, account_id):
-        """绑定交易账户（模拟账户），后续下单/查询均作用于该账户。"""
-        setter = getattr(self.api, 'set_account_id', None)
-        if setter is None:
-            raise NotImplementedError('gm SDK 未暴露 set_account_id；无法绑定交易账户')
-        setter(account_id)
+        """记录交易账户（模拟账户），供后续查询/下单**显式传参**。
+
+        ⚠️ 这里**刻意不调用** gm SDK 的 ``api.set_account_id()``。
+
+        实测（真实 gm SDK，2026-10-22）：一旦在进程内调用过
+        ``api.set_account_id(X)``，该进程后续的**所有** ``api.get_cash()``
+        调用都会**永久死锁**——即使随后 ``api.set_account_id('')`` 清空预设
+        也救不回来。死锁发生在 ``py_gmi_get_cash_pb_v2``（C 扩展）且**持有
+        GIL**，因此同进程内连 ``join(timeout)`` 的超时逻辑都执行不到，
+        整个进程被冻结（不是"超时后放弃"，是永远卡住）。
+
+        而 ``get_cash`` / ``get_position`` / ``get_orders_mm`` /
+        ``get_unfinished_orders_mm`` / ``order_volume`` 全都支持**显式传账户**，
+        根本不需要 SDK 预设账户。实测显式传参的耗时：
+        ``get_cash`` 0.17s、其余 0.00s。
+
+        附带理由：SDK 预算是**进程全局**的（``gm.api`` 是模块级单例），
+        一旦设置就会污染同进程内**所有**适配器实例——包括只做行情的
+        分时采样适配器。
+        """
         self.account_id = account_id
         return self.account_id
 
@@ -107,9 +122,24 @@ class GmBrokerAdapter:
             order_type=getattr(self.api, order_type_name),
             position_effect=getattr(self.api, position_effect_name),
             price=float(order_data.get('price', 0)),
+            # 显式传账户：基础契约不传即用 SDK 默认账户（等价于原先未绑定时的行为），
+            # 但避免依赖 SDK 预设账户——设置预设会污染整个进程（见 set_account_id）。
+            account=self.account_id or '',
         )
 
     def get_orders(self):
+        """查询委托。
+
+        优先用 **account 感知**的 ``get_orders_mm(account_id=...)``：
+        基础版 ``get_orders()`` 不接受账户参数，只能依赖 SDK 预设账户，
+        而设置预设会污染整个进程（见 :meth:`set_account_id` 的说明）。
+        """
+        getter = getattr(self.api, 'get_orders_mm', None)
+        if getter is not None and self.account_id:
+            try:
+                return getter(account_id=self.account_id)
+            except TypeError:
+                pass
         return self.api.get_orders()
 
     def request_cancel(self, symbol=None, order_data=None, order_id=None):
@@ -175,7 +205,18 @@ class GmBrokerAdapter:
         return getter() or []
 
     def get_unfinished_orders(self):
-        """Return currently unfinished (open) orders from the broker."""
+        """Return currently unfinished (open) orders from the broker.
+
+        优先用 **account 感知**的 ``get_unfinished_orders_mm(account_id=...)``；
+        基础版不接受账户参数，只能依赖 SDK 预设账户，而设置预设会污染整个
+        进程（见 :meth:`set_account_id` 的说明）。
+        """
+        getter = getattr(self.api, 'get_unfinished_orders_mm', None)
+        if getter is not None and self.account_id:
+            try:
+                return getter(account_id=self.account_id) or []
+            except TypeError:
+                pass
         getter = getattr(self.api, 'get_unfinished_orders', None)
         if getter is None:
             return []
