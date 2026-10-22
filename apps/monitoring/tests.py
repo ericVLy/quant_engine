@@ -1150,3 +1150,39 @@ class MonitoringUpdaterProcessGateTest(TestCase):
     def test_disabled_setting_skips_updater(self):
         self._ready(['manage.py', 'runserver'], enabled=False,
                     run_main='true').assert_not_called()
+
+    # ---------------------------------------------- 管道 EOF / 一次性命令回归
+    def test_one_shot_commands_skip_updater(self):
+        """一次性运维命令**不得**拉起分时采样子进程。
+
+        回归（2026-10-22）：Web 的"同步账户资金"子进程跑
+        ``manage.py sync_account_funds``，该命令原不在跳过名单里 →
+        子进程拉起采样器 → 采样器继承父进程 ``capture_output`` 的管道 →
+        父进程退出后管道写端仍被持有 → **EOF 永不到达** →
+        ``subprocess.run`` 一直等到超时 → 报"gm 终端无响应"，**而 gm 完全正常**。
+        """
+        for command in ('sync_account_funds', 'sync_symbols', 'sync_klines',
+                        'test', 'migrate', 'collectstatic', 'shell', 'check'):
+            with self.subTest(command=command):
+                self._ready(['manage.py', command]).assert_not_called()
+
+    def test_production_waitress_entry_starts_updater(self):
+        """生产 Windows 的 Web 走 ``python -m waitress``，**必须**能拉起采样器。
+
+        ⚠️ ``python -m waitress`` 的 ``sys.argv[0]`` 是
+        ``...\\waitress\\__main__.py``——模块名**不在** argv 元素里。
+        若按 ``'waitress' in sys.argv`` 精确匹配会漏判 → 生产的分时采样
+        直接停摆（曾真实发生过：改成白名单后采样器进程数为 0）。
+        故必须对整条命令行做子串匹配。
+        """
+        argv = [r'C:\\Python\\Lib\\site-packages\\waitress\\__main__.py',
+                '--listen=127.0.0.1:8000', '--threads=8',
+                'quant_engine.wsgi:application']
+        self._ready(argv).return_value.start.assert_called_once()
+
+    def test_gunicorn_and_uvicorn_entries_start_updater(self):
+        """其它部署形态的 Web 入口同样要能拉起采样器。"""
+        for marker in ('gunicorn', 'uvicorn'):
+            with self.subTest(marker=marker):
+                argv = [f'/usr/bin/{marker}', 'quant_engine.wsgi:application']
+                self._ready(argv).return_value.start.assert_called_once()

@@ -202,8 +202,19 @@ def run_account_sync_in_subprocess(account_id, capital_basis='total'):
     """
     base_dir = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
-    # 子进程是非 Web 命令：显式关闭分时更新器，避免重复外部请求与写库
-    env.setdefault('MONITORING_UPDATER_ENABLED', '0')
+    # 子进程是非 Web 命令：显式关闭分时更新器，避免重复外部请求与写库。
+    #
+    # ⚠️ 必须用**直接赋值**而不是 ``setdefault``：Web 进程自己的环境里
+    # ``MONITORING_UPDATER_ENABLED`` 已经是 '1'（生产 env.local.cmd 设的），
+    # ``setdefault`` 对**已存在的键不生效** → 子进程照样拉起分时采样子进程。
+    # 而采样子进程会继承本处 ``capture_output=True`` 的 stdout/stderr 管道，
+    # 父进程（sync_account_funds）退出后管道写端仍被采样器持有 → **EOF 永不到达**
+    # → ``subprocess.run`` 一直等到超时 → 报"gm 终端无响应"，**而 gm 完全正常**。
+    #
+    # 真实踩过：Web 端"同步账户资金"按钮 20s 超时，根因在此。
+    env['MONITORING_UPDATER_ENABLED'] = '0'
+    # 同理：子进程不该跑基本面刷新等后台任务
+    env['FUNDAMENTALS_ENABLED'] = '0'
     env.setdefault('DJANGO_SETTINGS_MODULE', 'quant_engine.settings.dev')
     cmd = [
         sys.executable, str(base_dir / 'manage.py'), 'sync_account_funds',

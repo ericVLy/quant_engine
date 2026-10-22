@@ -248,6 +248,48 @@ class SyncEndpointNeverHangsTest(TestCase):
         create = self.client.post('/api/execution/accounts/',
                                   {'account_id': 'still-usable'}, format='json')
         self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+
+    # --------------------------------------------------- 管道 EOF 回归
+    def test_sync_subprocess_env_forces_updater_off(self):
+        """子进程环境**必须强制**关掉分时更新器（不能靠 setdefault）。
+
+        回归（2026-10-22）：Web 进程自己的环境里
+        ``MONITORING_UPDATER_ENABLED`` 已是 '1'，``setdefault`` 对已存在的
+        键不生效 → 子进程照样拉起分时采样子进程 → 采样器继承
+        ``capture_output`` 的管道 → 父进程退出后 EOF 永不到达 →
+        ``subprocess.run`` 一直等到超时 → 报"gm 终端无响应"，**而 gm 完全正常**。
+        """
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, stdout='{}', stderr='')
+
+        # 模拟 Web 进程的真实环境：更新器是开的
+        with patch.dict(os.environ, {'MONITORING_UPDATER_ENABLED': '1'}, clear=False), \
+                patch('apps.execution.views.subprocess.run', _fake_run):
+            with override_settings(GM_TOKEN='fake-token'):
+                self.client.post(f'/api/execution/accounts/{self.cfg.id}/sync/')
+
+        env = captured.get('env') or {}
+        self.assertEqual(env.get('MONITORING_UPDATER_ENABLED'), '0',
+                         '子进程环境必须强制关闭分时更新器，不能受父环境影响')
+        self.assertEqual(env.get('FUNDAMENTALS_ENABLED'), '0',
+                         '子进程环境必须强制关闭基本面刷新')
+
+    def test_sync_source_does_not_rely_on_setdefault_for_updater(self):
+        """源码层面钉死：``MONITORING_UPDATER_ENABLED`` 必须直接赋值。
+
+        ``env.setdefault(...)`` 对父环境已存在的键无效，是本 bug 的直接原因。
+        """
+        import inspect
+
+        from apps.execution import views as execution_views
+
+        src = inspect.getsource(execution_views.run_account_sync_in_subprocess)
+        self.assertNotIn("setdefault('MONITORING_UPDATER_ENABLED'", src,
+                         '分时更新器开关不能�� setdefault（父环境里通常已是 1）')
+        self.assertIn("env['MONITORING_UPDATER_ENABLED'] = '0'", src)
         self.cfg.refresh_from_db()
         self.assertEqual(str(self.cfg.total_capital), '100000.00',
                          '失败绝不写 0：额度应保持上次成功值')

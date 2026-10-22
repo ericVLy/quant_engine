@@ -154,9 +154,24 @@ class ProcessGateTest(TestCase):
     databases = ['default', 'kline']
 
     def test_command_name_in_skip_list(self):
-        from apps.monitoring import apps as monitoring_apps
-        src = monitoring_apps.__file__
-        with open(src, encoding='utf-8') as handle:
-            content = handle.read()
-        self.assertIn("'run_intraday_updater'", content,
-                      '采样子进程命令必须加入 AppConfig.ready 的跳过名单')
+        """采样子进程命令不得再拉子进程（防递归）。
+
+        回归（2026-10-22）：``ready()`` 的门禁从**黑名单**改为**白名单**
+        （只有 Web 服务进程才采样）。本用例原先断言的是**源码里出现**
+        ``'run_intraday_updater'`` 字面量（黑名单写法），白名单下该字面量
+        已被移除——但**意图不变**：采样器命令仍不得拉起采样器。
+
+        故改为断言**行为**（更稳，不依赖实现细节）。
+        """
+        from unittest.mock import patch
+
+        from django.apps import apps as django_apps
+        from django.conf import settings as django_settings
+
+        app_config = django_apps.get_app_config('monitoring')
+        with patch.object(django_settings, 'MONITORING_UPDATER_ENABLED', True), \
+                patch('sys.argv', ['manage.py', 'run_intraday_updater']), \
+                patch.dict(os.environ, {'RUN_MAIN': 'true'}, clear=False), \
+                patch('apps.monitoring.updater.SubprocessIntradayUpdater') as supervisor:
+            app_config.ready()
+        supervisor.return_value.start.assert_not_called()
