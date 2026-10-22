@@ -30,7 +30,9 @@ import sys
 from pathlib import Path
 
 # services.ps1 认识的服务名（用于校验探测结果、过滤无关行）
-KNOWN_SERVICES = ('Web', 'Scheduler', 'Nginx')
+# ⚠️ 新增服务时**必须同步这里**，否则探测会把它当"不认识的行"而漏掉，
+# 导致该服务不被纳入"同步前在运行"的判断。
+KNOWN_SERVICES = ('Web', 'Scheduler', 'MCP', 'Nginx')
 
 
 class ServiceControlMixin:

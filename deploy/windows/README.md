@@ -123,7 +123,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\services.ps1 
 | 参数 | 说明 |
 |---|---|
 | `-Action` | `start` / `stop` / `restart` / `status`，默认 `status` |
-| `-Service` | `All`（默认）/ `Web` / `Scheduler` / `Nginx`；多项用逗号分隔 |
+| `-Service` | `All`（默认）/ `Web` / `Scheduler` / `MCP` / `Nginx`；多项用逗号分隔 |
 | `-WaitSeconds` | 启动后等待端口就绪的秒数，默认 30 |
 
 不需要管理员权限。
@@ -136,8 +136,58 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\services.ps1 
 > `sync_symbols` 正是通过 `-File` 调本脚本，这个坑导致过一次
 > 「脚本报已恢复服务，实际服务没起来」。
 
-### ⚠️ 重启为什么必须清理孤儿进程
+### MCP 服务在服务管理中的位置
 
+MCP（SSE）默认监听 `127.0.0.1:8765`，端点 `/sse`、健康检查 `/health`。
+它由计划任务 `QuantEngine-MCP` 托管（`start_mcp.cmd`）。
+
+**计划任务没注册时的降级**：`services.ps1` 会直接运行 `start_mcp.cmd`
+（与 nginx 同一思路），`status` 会显示为「降级运行，非计划任务托管」。
+
+> 注意：降级启动的进程**不随工具/会话结束而保留**，需要长期常驻请注册计划任务
+> （`install.ps1 -TasksOnly`）。
+
+配置项与用法见下一节。
+
+## MCP 服务（AI 助手 / 外部客户端接入）
+
+`install.ps1` 现在会询问 MCP 配置并写入 `env.local.cmd`：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MCP_HOST` | `127.0.0.1` | 监听地址；**非回环地址必须同时设 `MCP_AUTH_TOKEN`** |
+| `MCP_PORT` | `8765` | 监听端口 |
+| `MCP_AUTH_TOKEN` | 空 | Bearer 令牌；绑定非回环地址时必填，否则 MCP 服务会拒绝启动 |
+| `MCP_ALLOW_TRIGGER` | `1` | 允许 `trigger_plan_execution`（仅创建 pending SuiteRun，**不直接下单**） |
+| `MCP_ALLOW_MUTATE` | `0` | 允许增删改 Case/Suite/Plan（改 draft，不发布、不启动）。风险更高，默认关闭 |
+
+访问地址：`http://127.0.0.1:8765/sse`（健康检查 `/health`）。
+
+> ⚠️ MCP 默认只监听回环地址。若要让局域网内的 AI 助手接入，改成 `0.0.0.0`
+> 并**必须**配置 `MCP_AUTH_TOKEN`（install.ps1 会强制要求）。
+
+### 只重注册计划任务（不必重输数据库口令）
+
+改过启动脚本、或任务损坏后，用 `-TasksOnly` 重建任务：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -TasksOnly
+```
+
+它会跳过第 2~6 步（env 生成 / 依赖 / 建库 / 迁移 / 前端 / collectstatic），
+沿用现有 `env.local.cmd`，只重注册 `QuantEngine-Web` / `QuantEngine-Scheduler` /
+`QuantEngine-MCP` 三个任务。`env.local.cmd` 不存在时会直接报错退出。
+
+### 日志编码
+
+三个启动脚本都显式设置了 `PYTHONIOENCODING=utf-8`，日志一律是 UTF-8。
+PowerShell 5.1 的 `Get-Content` 默认按 ANSI(GBK) 读，**看中文日志要显式指定编码**：
+
+```powershell
+Get-Content logs\mcp.log -Encoding UTF8 -Tail 20
+```
+
+### ⚠️ 重启为什么必须清理孤儿进程
 `run_hidden.vbs` 用 `WshShell.Run` 启动子进程，而该方式创建的进程
 **不在计划任务的作业对象（Job Object）内**——所以 `Stop-ScheduledTask`
 只终止 `wscript.exe` 本身，真正的服务进程会活下来变成孤儿。

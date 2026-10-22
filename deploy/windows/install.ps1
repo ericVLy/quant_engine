@@ -46,7 +46,12 @@ param(
     # 计划任务的权限级别：Limited（**默认**，普通账户即可，无需管理员）
     #                     Highest（需管理员；本项目服务本身不需要）
     [ValidateSet('Limited', 'Highest')]
-    [string]$RunLevel = 'Limited'
+    [string]$RunLevel = 'Limited',
+
+    # 只重注册计划任务，跳过第 2~6 步（env 生成 / 依赖 / 建库 / 迁移 / 前端 / collectstatic）。
+    # 用途：改过启动脚本或任务损坏后，**不必重输数据库口令**就能把任务重建。
+    # 前置：env.local.cmd 已存在（否则服务起不来）。
+    [switch]$TasksOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -201,6 +206,24 @@ if ($mariaSvc.Status -ne 'Running') {
 Write-Ok "MariaDB 服务：$($mariaSvc.Status)（StartType=$($mariaSvc.StartType)）"
 
 # ------------------------------------------------------- 2. 生成环境变量文件
+if ($TasksOnly) {
+    # -TasksOnly：只重注册计划任务。跳过 env 生成（第 2 步）等，
+    # 因为那些步骤要交互式输入数据库口令，运维只想修任务时不该被逼重输。
+    Write-Step '2/8 跳过（-TasksOnly）'
+    if (-not (Test-Path $envFile)) {
+        Write-Err "缺少 $envFile，服务无法启动。请先完整跑一次 install.ps1。"
+        exit 1
+    }
+    Write-Ok "沿用现有 $envFile"
+    # 任务描述里要显示 MCP 地址，从 env.local.cmd 里读（不再交互询问）
+    $mcpHost = '127.0.0.1'
+    $mcpPort = '8765'
+    foreach ($line in (Get-Content $envFile -Encoding Default -ErrorAction SilentlyContinue)) {
+        if ($line -match '^\s*set\s+MCP_HOST=(.*)$') { $mcpHost = $Matches[1].Trim() }
+        if ($line -match '^\s*set\s+MCP_PORT=(.*)$') { $mcpPort = $Matches[1].Trim() }
+    }
+    Write-Ok "MCP 监听 $mcpHost`:$mcpPort"
+} else {
 Write-Step '2/8 生成 env.local.cmd'
 
 $dbUser     = Read-Host 'MariaDB 用户名 [root]'
@@ -234,6 +257,36 @@ if ([string]::IsNullOrWhiteSpace($klinePassword)) { $klinePassword = $dbPassword
 $gmServAddr = Read-Host 'gm 终端服务地址，如 192.168.1.10:7001（留空=本机终端）'
 $allowedHosts = if ($Host_ -eq '0.0.0.0') { '127.0.0.1,localhost' } else { "$Host_,localhost" }
 
+# ------------------------------------------------------------------ MCP 配置
+# MCP 服务给 AI 助手 / 外部客户端提供 SSE 接入端点（默认 http://127.0.0.1:8765/sse）。
+$mcpHost = Read-Host 'MCP 监听地址 [127.0.0.1]'
+if ([string]::IsNullOrWhiteSpace($mcpHost)) { $mcpHost = '127.0.0.1' }
+$mcpPort = Read-Host 'MCP 端口 [8765]'
+if ([string]::IsNullOrWhiteSpace($mcpPort)) { $mcpPort = '8765' }
+
+# 绑定非回环地址时 MCP 服务自身会拒绝启动（没有令牌就没有防护），故此处强制要求
+$mcpAuthToken = ''
+if ($mcpHost -notin @('127.0.0.1', 'localhost', '::1')) {
+    $tokSecure = Read-Host "MCP 访问令牌（绑定 $mcpHost 必填，输入不回显）" -AsSecureString
+    $tokBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokSecure)
+    try {
+        $mcpAuthToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($tokBstr)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($tokBstr)
+    }
+    if ([string]::IsNullOrWhiteSpace($mcpAuthToken)) {
+        Write-Err "绑定 $mcpHost 必须配置 MCP 访问令牌，终止。"
+        exit 1
+    }
+}
+
+# 写操作开关：--allow-trigger 只创建 pending SuiteRun，不直接下单；
+# --allow-mutate 能增删改 Case/Suite/Plan（改 draft，不发布），风险更高，默认关闭。
+$mcpTrigger = Read-Host '允许 MCP 触发计划执行？[Y/n]（仅创建 pending 运行，不直接下单）'
+if ([string]::IsNullOrWhiteSpace($mcpTrigger) -or $mcpTrigger -match '^[Yy]') { $mcpAllowTrigger = '1' } else { $mcpAllowTrigger = '0' }
+$mcpMutate = Read-Host '允许 MCP 修改配置（增删改 Case/Suite/Plan）？[y/N]（默认关闭）'
+if ($mcpMutate -match '^[Yy]') { $mcpAllowMutate = '1' } else { $mcpAllowMutate = '0' }
+
 $envBody = @"
 @echo off
 rem 由 install.ps1 自动生成于 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
@@ -261,6 +314,11 @@ set QUANT_PORT=$Port
 set QUANT_THREADS=8
 set QUANT_SCHED_INTERVAL=60
 set QUANT_SCHED_WORKERS=1
+set MCP_HOST=$mcpHost
+set MCP_PORT=$mcpPort
+set MCP_AUTH_TOKEN=$mcpAuthToken
+set MCP_ALLOW_TRIGGER=$mcpAllowTrigger
+set MCP_ALLOW_MUTATE=$mcpAllowMutate
 "@
 # ⚠️ 必须显式指定 **GBK 编码 + CRLF 行尾**：
 #   - 编码：文件里有中文注释，需按 ANSI(GBK) 写出，否则 cmd 里显示乱码；
@@ -269,7 +327,10 @@ set QUANT_SCHED_WORKERS=1
 $envBodyCrlf = $envBody.Replace("`r`n", "`n").Replace("`n", "`r`n")
 [System.IO.File]::WriteAllText($envFile, $envBodyCrlf, [System.Text.Encoding]::GetEncoding(936))
 Write-Ok "已写入 $envFile（GBK 编码 + CRLF 行尾）"
+}   # end else: -TasksOnly 时跳过 env 生成
 
+# ------------------------------------------- 3~6 步：依赖 / 迁移 / 前端 / 静态资源
+if (-not $TasksOnly) {
 # ------------------------------------------- 3. 安装 Python 依赖（uv 优先）
 Write-Step '3/8 安装 Python 依赖'
 
@@ -404,13 +465,15 @@ if (-not $SkipStatic) {
 } else {
     Write-Warn2 '已跳过 collectstatic（-SkipStatic）'
 }
+}   # end if (-not $TasksOnly)：-TasksOnly 时跳过第 3~6 步
 
 # ------------------------------------------------- 5. 注册开机自启计划任务
 Write-Step "7/8 注册开机自启计划任务（触发：$Trigger / 权限：$RunLevel）"
 
 $tasks = @(
     @{ Name = 'QuantEngine-Web';      Script = 'start_web.cmd';      Desc = '量化引擎 Web 服务（waitress）' },
-    @{ Name = 'QuantEngine-Scheduler'; Script = 'start_scheduler.cmd'; Desc = '量化引擎 策略调度器' }
+    @{ Name = 'QuantEngine-Scheduler'; Script = 'start_scheduler.cmd'; Desc = '量化引擎 策略调度器' },
+    @{ Name = 'QuantEngine-MCP';       Script = 'start_mcp.cmd';      Desc = "量化引擎 MCP 服务（SSE，$mcpHost`:$mcpPort）" }
 )
 
 # 提权自检：RunLevel=Highest（或 OnStart 的 SYSTEM）需要管理员权限，
@@ -486,22 +549,25 @@ Write-Host @"
   立即启动（不必等下次登录）：
     Start-ScheduledTask -TaskName 'QuantEngine-Web'
     Start-ScheduledTask -TaskName 'QuantEngine-Scheduler'
+    Start-ScheduledTask -TaskName 'QuantEngine-MCP'
 
   查看状态：
     Get-ScheduledTask -TaskName 'QuantEngine*' | Get-ScheduledTaskInfo
 
   访问地址：
     http://${Host_}:$Port/
+    MCP (SSE)：http://${mcpHost}:$mcpPort/sse
 
   首次使用：打开前端会自动跳 /setup 引导页，创建超级管理员。
   完成初始化后建议把 env.local.cmd 里的 SETUP_ENABLED 保持为 0（已是）。
 
   日志目录：$logDir
-    web-*.log / scheduler-*.log
+    web-*.log / scheduler-*.log / mcp.log
 
   注意（单机约束）：
     - 调度器只能有一个实例，多开会重复触发 Plan；
     - 分时采样子进程由 Web 进程自动拉起，**不要**再单独跑 run_intraday_updater；
+    - MCP 服务也只能有一个实例，多开会抢同一个端口；
     - MariaDB 服务需为自动启动（当前：$($mariaSvc.StartType)）。
 
 "@ -ForegroundColor Yellow

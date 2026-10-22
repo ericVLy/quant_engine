@@ -27,6 +27,10 @@ if not exist "%~dp0env.local.cmd" (
 pushd "%PROJECT_DIR%" || exit /b 1
 call "%~dp0env.local.cmd"
 
+rem 日志统一写UTF-8：Python 写 stdout 的编码默认随区域设置变化，
+rem 固定后用 Get-Content -Encoding UTF8 读即为正常中文。
+set "PYTHONIOENCODING=utf-8"
+
 if not exist "%PROJECT_DIR%logs" mkdir "%PROJECT_DIR%logs"
 set "LOG_FILE=%PROJECT_DIR%logs\web.log"
 

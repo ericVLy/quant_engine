@@ -157,8 +157,8 @@ $serviceList = @(
     Select-Object -Unique
 )
 foreach ($s in $serviceList) {
-    if ($s -notin @('All', 'Web', 'Scheduler', 'Nginx')) {
-        Write-Host "  [X]  -Service 取值非法：$s（可选 All / Web / Scheduler / Nginx）" -ForegroundColor Red
+    if ($s -notin @('All', 'Web', 'Scheduler', 'MCP', 'Nginx')) {
+        Write-Host "  [X]  -Service 取值非法：$s（可选 All / Web / Scheduler / MCP / Nginx）" -ForegroundColor Red
         Write-Host "      多项请用逗号分隔，例如 -Service Web,Scheduler" -ForegroundColor Yellow
         exit 1
     }
@@ -166,6 +166,8 @@ foreach ($s in $serviceList) {
 
 $envFile = Join-Path $scriptDir 'env.local.cmd'
 $webPort = [int](Get-EnvVarFromFile $envFile 'QUANT_PORT' '8000')
+# MCP 服务端口（env.local.cmd 由 install.ps1 生成；旧版文件没有则用默认 8765）
+$mcpPort = [int](Get-EnvVarFromFile $envFile 'MCP_PORT' '8765')
 
 $defs = @(
     # ⚠️ Web 必须**同时**匹配 run_intraday_updater：
@@ -178,6 +180,8 @@ $defs = @(
        Patterns = @('waitress', 'run_intraday_updater'); Desc = "Web(waitress) :$webPort" },
     @{ Key = 'Scheduler'; Task = 'QuantEngine-Scheduler';
        Patterns = @('run_scheduler'); Desc = '调度器' },
+    @{ Key = 'MCP';       Task = 'QuantEngine-MCP';
+       Patterns = @('run_mcp_server'); Desc = "MCP(SSE) :$mcpPort" },
     @{ Key = 'Nginx';     Task = 'QuantEngine-Nginx';
        Patterns = @('nginx'); Desc = 'nginx 反向代理 :8080' }
 )
@@ -223,16 +227,6 @@ Write-Step "量化引擎服务管理 — $Action / $($serviceList -join ',')"
 if ($Action -eq 'status') {
     foreach ($d in $defs) {
         $state = Get-TaskState $d.Task
-        if ($null -eq $state) {
-            if ($d.Key -eq 'Nginx') {
-                $ng = Resolve-NginxDir
-                if ($ng) { Write-Warn2 "$($d.Desc)：未注册计划任务，但检测到 $ng" }
-                else { Write-Warn2 "$($d.Desc)：未安装（跳过）" }
-            } else {
-                Write-Err "$($d.Desc)：计划任务 $($d.Task) 不存在，请先运行 install.ps1"
-            }
-            continue
-        }
         $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                      Where-Object {
                          $cl = $_.CommandLine
@@ -240,8 +234,26 @@ if ($Action -eq 'status') {
                          foreach ($pat in $d.Patterns) { if ($cl -like "*$pat*") { return $true } }
                          return $false
                      })
+
+        if ($null -eq $state) {
+            # 计划任务没注册：若进程在跑，说明是走"直接启动脚本"的降级路径，
+            # 应如实显示为「降级运行」而不是报错——否则会误导运维去重装。
+            if ($running.Count -gt 0) {
+                Write-Host ("  {0,-10} 任务=未注册    进程数={1} （降级运行，非计划任务托管）" -f $d.Key, $running.Count) -ForegroundColor Yellow
+            } elseif ($d.Key -eq 'Nginx') {
+                $ng = Resolve-NginxDir
+                if ($ng) { Write-Warn2 "$($d.Desc)：未注册计划任务，但检测到 $ng" }
+                else { Write-Warn2 "$($d.Desc)：未安装（跳过）" }
+            } elseif ($d.Key -eq 'MCP') {
+                Write-Warn2 "$($d.Desc)：未运行，且未注册计划任务（跑 install.ps1 可开机自启）"
+            } else {
+                Write-Err "$($d.Desc)：计划任务 $($d.Task) 不存在，请先运行 install.ps1"
+            }
+            continue
+        }
         $portMark = ''
         if ($d.Key -eq 'Web')       { $portMark = if (Test-PortListening $webPort) { "端口 $webPort 已监听" } else { "端口 $webPort 未监听" } }
+        if ($d.Key -eq 'MCP')       { $portMark = if (Test-PortListening $mcpPort) { "端口 $mcpPort 已监听" } else { "端口 $mcpPort 未监听" } }
         if ($d.Key -eq 'Nginx')     { $portMark = if (Test-PortListening 8080) { '端口 8080 已监听' } else { '端口 8080 未监听' } }
         Write-Host ("  {0,-10} 任务={1,-9} 进程数={2} {3}" -f $d.Key, $state, $running.Count, $portMark) -ForegroundColor Yellow
     }
@@ -268,19 +280,21 @@ if ($Action -eq 'start' -or $Action -eq 'restart') {
     foreach ($d in $defs) {
         $state = Get-TaskState $d.Task
         if ($null -eq $state) {
+            # 计划任务没注册时，退化为直接跑启动脚本（与 nginx 同一处理思路）。
+            # MCP 在"只跑服务、不想注册开机自启"的机器上很有用。
+            $fallback = $null
+            if ($d.Key -eq 'MCP') { $fallback = Join-Path $scriptDir 'start_mcp.cmd' }
             if ($d.Key -eq 'Nginx') {
                 $ng = Resolve-NginxDir
-                $startCmd = Join-Path $scriptDir 'start_nginx.cmd'
-                if ($ng -and (Test-Path $startCmd)) {
-                    Write-Ok "启动 $($d.Desc)（未注册计划任务，直接运行 start_nginx.cmd）"
-                    Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', "`"$startCmd`"") `
-                                  -WorkingDirectory $ng -WindowStyle Hidden | Out-Null
-                    Start-Sleep -Seconds 2
-                } else {
-                    Write-Warn2 "$($d.Desc)：未安装，跳过"
-                }
+                if ($ng) { $fallback = Join-Path $scriptDir 'start_nginx.cmd' }
+            }
+            if ($fallback -and (Test-Path $fallback)) {
+                Write-Ok "启动 $($d.Desc)（未注册计划任务，直接运行 $(Split-Path -Leaf $fallback)）"
+                Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', "`"$fallback`"") `
+                              -WorkingDirectory $projectDir -WindowStyle Hidden | Out-Null
+                Start-Sleep -Seconds 2
             } else {
-                Write-Err "$($d.Desc)：计划任务 $($d.Task) 不存在，请先运行 install.ps1"
+                Write-Warn2 "$($d.Desc)：未注册计划任务且无启动脚本，跳过"
             }
             continue
         }
